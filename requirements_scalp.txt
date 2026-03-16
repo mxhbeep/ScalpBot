@@ -1,0 +1,6 @@
+ccxt==4.4.30
+pandas==2.2.2
+numpy==1.26.4
+requests==2.32.3
+Flask==3.0.3
+gunicorn==23.0.0
