@@ -1,6 +1,6 @@
 """
-SCALP BOT — SuperTrend AI 15min/1H + Bias 3H
-Stratégie : Bias 3H (EMA13 vs SMA30) comme filtre macro
+SCALP BOT — SuperTrend AI 3H/1H/15min
+Stratégie : SuperTrend AI 3H comme filtre macro
             SuperTrend AI 1H comme filtre de tendance
             SuperTrend AI 15min flip comme signal d'entrée
 Polling : à chaque bougie 15min fermée
@@ -37,8 +37,6 @@ CONFIG = {
     'TELEGRAM_CHAT_ID':   os.environ.get('TELEGRAM_CHAT_ID', ''),
     'ST_ATR_LEN':   10,
     'ST_FACTOR':    3.0,
-    'BIAS_EMA_LEN': 13,
-    'BIAS_SMA_LEN': 30,
     'COOLDOWN':     3600,
 }
 
@@ -59,13 +57,6 @@ def fetch_ohlcv(symbol: str, timeframe: str, limit: int = 250) -> Optional[pd.Da
     except Exception as e:
         logger.error(f"❌ fetch_ohlcv {symbol} {timeframe}: {e}")
         return None
-
-def calc_bias(df: pd.DataFrame, ema_len: int = 13, sma_len: int = 30) -> str:
-    """EMA13 vs SMA30 — reproduction exacte du Pine Script CarréBias."""
-    close   = df['close']
-    ema_val = close.ewm(span=ema_len, adjust=False).mean().iloc[-2]
-    sma_val = close.rolling(window=sma_len).mean().iloc[-2]
-    return 'bull' if ema_val > sma_val else 'bear'
 
 def supertrend(df: pd.DataFrame, atr_len: int = 10, factor: float = 3.0) -> pd.Series:
     high  = df['high'].copy()
@@ -122,7 +113,7 @@ def send_telegram(msg: str):
     except Exception as e:
         logger.error(f"❌ Telegram: {e}")
 
-def format_message(symbol, direction, price, bias_3h, st_1h, st_15m):
+def format_message(symbol, direction, price, st_3h, st_1h, st_15m):
     emoji = "🟢" if direction == "LONG" else "🔴"
     b_emoji = "🟢" if bias_3h == 'bull' else "🔴"
     now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
@@ -132,7 +123,7 @@ def format_message(symbol, direction, price, bias_3h, st_1h, st_15m):
         f"💰 Price: ${price:.4f}\n"
         f"🏦 Exchange: OKX\n"
         f"⏰ {now}\n"
-        f"{b_emoji} Bias 3H: {bias_3h.upper()}\n"
+        f"{b_emoji} ST AI 3H: {st_3h.upper()}\n"
         f"✅ ST AI 1H: {st_1h.upper()}\n"
         f"✅ ST AI 15min: flip {st_15m.upper()}\n"
         f"🛑 SL: Sous dernier swing low\n"
@@ -140,19 +131,20 @@ def format_message(symbol, direction, price, bias_3h, st_1h, st_15m):
 
 def process_symbol(symbol: str):
     try:
-        df_3h  = fetch_ohlcv(symbol, '3h',  limit=100)
+        df_3h  = fetch_ohlcv(symbol, '3h',  limit=250)
         df_1h  = fetch_ohlcv(symbol, '1h',  limit=250)
         df_15m = fetch_ohlcv(symbol, '15m', limit=250)
 
         if df_3h is None or df_1h is None or df_15m is None:
             return
-        if len(df_3h) < 35 or len(df_1h) < 50 or len(df_15m) < 50:
+        if len(df_3h) < 50 or len(df_1h) < 50 or len(df_15m) < 50:
             return
 
-        bias_3h  = calc_bias(df_3h,  CONFIG['BIAS_EMA_LEN'], CONFIG['BIAS_SMA_LEN'])
+        dir_3h   = supertrend(df_3h,  CONFIG['ST_ATR_LEN'], CONFIG['ST_FACTOR'])
         dir_1h   = supertrend(df_1h,  CONFIG['ST_ATR_LEN'], CONFIG['ST_FACTOR'])
         dir_15m  = supertrend(df_15m, CONFIG['ST_ATR_LEN'], CONFIG['ST_FACTOR'])
 
+        curr_3h  = dir_3h.iloc[-2]
         curr_1h  = dir_1h.iloc[-2]
         curr_15m = dir_15m.iloc[-2]
         prev_15m = dir_15m.iloc[-3]
@@ -162,8 +154,8 @@ def process_symbol(symbol: str):
         flip_sell = (prev_15m == 'buy'  and curr_15m == 'sell')
 
         signal = None
-        if   flip_buy  and curr_1h == 'buy'  and bias_3h == 'bull': signal = 'LONG'
-        elif flip_sell and curr_1h == 'sell' and bias_3h == 'bear': signal = 'SHORT'
+        if   flip_buy  and curr_1h == 'buy'  and curr_3h == 'buy':  signal = 'LONG'
+        elif flip_sell and curr_1h == 'sell' and curr_3h == 'sell': signal = 'SHORT'
 
         if not signal:
             return
@@ -175,9 +167,9 @@ def process_symbol(symbol: str):
                 return
             LAST_SIGNAL[symbol] = {'signal': signal, 'ts': now_ts}
 
-        msg = format_message(symbol, signal, price, bias_3h, curr_1h, curr_15m)
+        msg = format_message(symbol, signal, price, curr_3h, curr_1h, curr_15m)
         send_telegram(msg)
-        logger.info(f"[SCALP] ✅ {signal} {symbol} @ {price} | Bias3H={bias_3h} ST1H={curr_1h}")
+        logger.info(f"[SCALP] ✅ {signal} {symbol} @ {price} | ST3H={curr_3h} ST1H={curr_1h}")
 
     except Exception as e:
         logger.error(f"❌ {symbol}: {e}")
