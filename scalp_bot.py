@@ -40,10 +40,11 @@ CONFIG = {
         # Solana ecosystem
         'RAY/USDT', 'JTO/USDT',
         # Gaming
-        'AXS/USDT', 'IMX/USDT', 'GALA/USDT',
+        'AXS/USDT', 'IMX/USDT',
         # Autres OKX
         'LTC/USDT', 'DOT/USDT', 'ATOM/USDT', 'FIL/USDT',
-        'SAND/USDT', 'MANA/USDT', 'CHZ/USDT', 'JASMY/USDT',
+        'SAND/USDT', 'MANA/USDT', 'CHZ/USDT', 'GALA/USDT',
+        'HBAR/USDT', 'QNT/USDT',
     ],
     'TELEGRAM_BOT_TOKEN': os.environ.get('TELEGRAM_BOT_TOKEN', ''),
     'TELEGRAM_CHAT_ID':   os.environ.get('TELEGRAM_CHAT_ID', ''),
