@@ -24,13 +24,26 @@ import numpy as np
 
 CONFIG = {
     'SYMBOLS': [
-        'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'LINK/USDT', 'TIA/USDT',
-        'TAO/USDT', 'FET/USDT', 'RENDER/USDT', 'ZK/USDT',
-        'ONDO/USDT', 'PENDLE/USDT', 'CRV/USDT', 'CVX/USDT',
-        'PEPE/USDT', 'WIF/USDT', 'DOGE/USDT', 'BONK/USDT',
-        'VIRTUAL/USDT', 'HYPE/USDT',
-        'AAVE/USDT', 'NEAR/USDT', 'PYTH/USDT', 'STX/USDT', 'ZRO/USDT',
-        'SUI/USDT', 'ENA/USDT', 'ARB/USDT', 'AVAX/USDT',
+        # Majors
+        'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT', 'DOGE/USDT',
+        # L1/L2
+        'AVAX/USDT', 'NEAR/USDT', 'APT/USDT', 'SUI/USDT', 'SEI/USDT',
+        'OP/USDT', 'ARB/USDT', 'TON/USDT', 'TIA/USDT', 'STX/USDT',
+        # DeFi
+        'AAVE/USDT', 'LINK/USDT', 'ENA/USDT', 'PENDLE/USDT', 'ZRO/USDT', 'ONDO/USDT',
+        # IA & Tech
+        'TAO/USDT', 'FET/USDT', 'RENDER/USDT', 'VIRTUAL/USDT', 'ZK/USDT',
+        # Memes
+        'PEPE/USDT', 'WIF/USDT', 'BONK/USDT', 'FLOKI/USDT',
+        # Wildcard
+        'HYPE/USDT', 'INJ/USDT', 'JUP/USDT', 'WLD/USDT', 'MOVE/USDT', 'POPCAT/USDT',
+        # Solana ecosystem
+        'RAY/USDT', 'JTO/USDT',
+        # Gaming
+        'AXS/USDT', 'IMX/USDT', 'GALA/USDT',
+        # Autres OKX
+        'LTC/USDT', 'DOT/USDT', 'ATOM/USDT', 'FIL/USDT',
+        'SAND/USDT', 'MANA/USDT', 'CHZ/USDT', 'JASMY/USDT',
     ],
     'TELEGRAM_BOT_TOKEN': os.environ.get('TELEGRAM_BOT_TOKEN', ''),
     'TELEGRAM_CHAT_ID':   os.environ.get('TELEGRAM_CHAT_ID', ''),
