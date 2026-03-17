@@ -1,1 +1,1 @@
-worker: python scalp_bot.py
+web: python scalp_bot.py
