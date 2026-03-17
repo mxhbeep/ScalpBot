@@ -454,6 +454,30 @@ def audit():
         entries = [e for e in entries if e.get('sym') == sf]
     return jsonify(entries[:limit])
 
+
+@app.route('/aligned')
+def aligned():
+    with STATE_LOCK:
+        state_copy = dict(SCAN_STATE)
+    
+    bull = []
+    bear = []
+    for symbol, s in state_copy.items():
+        b3 = s.get('bias_3h')
+        b1 = s.get('bias_1h')
+        if b3 == 'bull' and b1 == 'bull':
+            bull.append({'symbol': symbol, 'price': s.get('price'), 'st_15m': s.get('st_15m')})
+        elif b3 == 'bear' and b1 == 'bear':
+            bear.append({'symbol': symbol, 'price': s.get('price'), 'st_15m': s.get('st_15m')})
+    
+    return jsonify({
+        'bull': sorted(bull, key=lambda x: x['symbol']),
+        'bear': sorted(bear, key=lambda x: x['symbol']),
+        'total_bull': len(bull),
+        'total_bear': len(bear),
+        'last_scan': LAST_SCAN_TIME,
+    })
+
 @app.route('/scan', methods=['POST'])
 def force_scan():
     threading.Thread(target=scan_all, daemon=True).start()
