@@ -259,8 +259,8 @@ def format_invalidation_message(symbol, direction, bias_3h, bias_1h, position):
 
 def process_symbol(symbol):
     try:
-        df_3h  = fetch_ohlcv(symbol, '4H',  limit=100)
-        df_1h  = fetch_ohlcv(symbol, '1H',  limit=100)
+        df_3h  = fetch_ohlcv(symbol, '4h',  limit=100)
+        df_1h  = fetch_ohlcv(symbol, '1h',  limit=100)
         df_15m = fetch_ohlcv(symbol, '15m', limit=250)
 
         if df_3h is None or df_1h is None or df_15m is None: return
