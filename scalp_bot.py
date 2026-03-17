@@ -455,6 +455,79 @@ def audit():
     return jsonify(entries[:limit])
 
 
+
+def handle_telegram_command(message):
+    chat_id = message.get('chat', {}).get('id')
+    text    = message.get('text', '').strip().lower()
+    if not chat_id:
+        return
+
+    if '/aligned' in text:
+        with STATE_LOCK:
+            state_copy = dict(SCAN_STATE)
+        bull = []
+        bear = []
+        for symbol, s in state_copy.items():
+            b3 = s.get('bias_3h')
+            b1 = s.get('bias_1h')
+            st = s.get('st_15m', '?')
+            e  = '🟢' if st == 'buy' else '🔴'
+            price = s.get('price', 0)
+            if b3 == 'bull' and b1 == 'bull':
+                bull.append(f"{e} {symbol.replace('/USDT','')} ${price:.4g}")
+            elif b3 == 'bear' and b1 == 'bear':
+                bear.append(f"{e} {symbol.replace('/USDT','')} ${price:.4g}")
+        now = datetime.now(timezone.utc).strftime('%H:%M UTC')
+        msg = f"📊 <b>Assets alignes</b> — {now}\n"
+        msg += "━" * 20 + "\n"
+        if bull:
+            msg += f"\n🟢 <b>BULL ({len(bull)})</b>\n"
+            msg += "\n".join(sorted(bull)) + "\n"
+        if bear:
+            msg += f"\n🔴 <b>BEAR ({len(bear)})</b>\n"
+            msg += "\n".join(sorted(bear)) + "\n"
+        if not bull and not bear:
+            msg += "\nAucun asset aligne."
+        msg += "\n\n🟢 ST15m buy | 🔴 ST15m sell"
+        url     = f"https://api.telegram.org/bot{CONFIG['TELEGRAM_BOT_TOKEN']}/sendMessage"
+        payload = {'chat_id': chat_id, 'text': msg, 'parse_mode': 'HTML'}
+        try:
+            requests.post(url, json=payload, timeout=10)
+        except Exception as e:
+            logger.error(f"Telegram reply: {e}")
+
+    elif '/status' in text:
+        with STATE_LOCK:
+            state_copy = dict(SCAN_STATE)
+        bull_c = sum(1 for s in state_copy.values() if s.get('bias_3h') == 'bull' and s.get('bias_1h') == 'bull')
+        bear_c = sum(1 for s in state_copy.values() if s.get('bias_3h') == 'bear' and s.get('bias_1h') == 'bear')
+        now = datetime.now(timezone.utc).strftime('%H:%M UTC')
+        msg = (
+            f"🤖 <b>Scalp Bot</b> — {now}\n"
+            f"━" * 20 + "\n"
+            f"📊 Assets: {len(state_copy)}\n"
+            f"🟢 BULL alignes: {bull_c}\n"
+            f"🔴 BEAR alignes: {bear_c}\n"
+            f"⏰ Dernier scan: {LAST_SCAN_TIME or 'N/A'}\n"
+        )
+        url     = f"https://api.telegram.org/bot{CONFIG['TELEGRAM_BOT_TOKEN']}/sendMessage"
+        payload = {'chat_id': chat_id, 'text': msg, 'parse_mode': 'HTML'}
+        try:
+            requests.post(url, json=payload, timeout=10)
+        except Exception as e:
+            logger.error(f"Telegram reply: {e}")
+
+
+@app.route('/telegram', methods=['POST'])
+def telegram_webhook():
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'ok': True})
+    message = data.get('message') or data.get('edited_message')
+    if message:
+        threading.Thread(target=handle_telegram_command, args=(message,), daemon=True).start()
+    return jsonify({'ok': True})
+
 @app.route('/aligned')
 def aligned():
     with STATE_LOCK:
