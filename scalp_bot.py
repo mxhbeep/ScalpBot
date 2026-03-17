@@ -31,14 +31,14 @@ CONFIG = {
         'AVAX/USDT', 'NEAR/USDT', 'APT/USDT', 'SUI/USDT', 'SEI/USDT',
         'OP/USDT', 'ARB/USDT', 'TON/USDT', 'TIA/USDT', 'STX/USDT',
         'AAVE/USDT', 'LINK/USDT', 'ENA/USDT', 'PENDLE/USDT', 'ZRO/USDT', 'ONDO/USDT',
-        'TAO/USDT', 'FET/USDT', 'RENDER/USDT', 'VIRTUAL/USDT', 'ZK/USDT',
+        'FET/USDT', 'RENDER/USDT', 'VIRTUAL/USDT', 'ZK/USDT',
         'PEPE/USDT', 'WIF/USDT', 'BONK/USDT', 'FLOKI/USDT',
-        'HYPE/USDT', 'INJ/USDT', 'JUP/USDT', 'WLD/USDT', 'MOVE/USDT', 'POPCAT/USDT',
+        'HYPE/USDT', 'INJ/USDT', 'JUP/USDT', 'WLD/USDT', 'MOVE/USDT',
         'RAY/USDT', 'JTO/USDT',
         'AXS/USDT', 'IMX/USDT',
         'LTC/USDT', 'DOT/USDT', 'ATOM/USDT', 'FIL/USDT',
         'SAND/USDT', 'MANA/USDT', 'CHZ/USDT', 'GALA/USDT',
-        'HBAR/USDT', 'QNT/USDT',
+        'HBAR/USDT',
     ],
     'TELEGRAM_BOT_TOKEN': os.environ.get('TELEGRAM_BOT_TOKEN', ''),
     'TELEGRAM_CHAT_ID':   os.environ.get('TELEGRAM_CHAT_ID', ''),
@@ -259,8 +259,8 @@ def format_invalidation_message(symbol, direction, bias_3h, bias_1h, position):
 
 def process_symbol(symbol):
     try:
-        df_3h  = fetch_ohlcv(symbol, '3h',  limit=100)
-        df_1h  = fetch_ohlcv(symbol, '1h',  limit=100)
+        df_3h  = fetch_ohlcv(symbol, '4H',  limit=100)
+        df_1h  = fetch_ohlcv(symbol, '1H',  limit=100)
         df_15m = fetch_ohlcv(symbol, '15m', limit=250)
 
         if df_3h is None or df_1h is None or df_15m is None: return
