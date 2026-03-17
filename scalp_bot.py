@@ -480,7 +480,7 @@ def send_start_notification():
         f"📊 Assets: {len(CONFIG['SYMBOLS'])}\n"
         f"💾 Redis: {'✅' if REDIS_CLIENT else '⚠️ non connecté'}\n\n"
         "📋 <b>STRATÉGIE:</b>\n\n"
-        "🔵 Filtre 1: Bias 3H (EMA13 vs SMA30)\n"
+        "🔵 Filtre 1: Bias 4H (EMA13 vs SMA30)\n"
         "🔵 Filtre 2: Bias 1H (EMA13 vs SMA30)\n"
         "🟢 Signal: Flip ST AI 15min (MACD contre-tendance)\n"
         "📈 Sizing: pyramiding illimité\n"
