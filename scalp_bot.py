@@ -259,8 +259,8 @@ def format_invalidation_message(symbol, direction, bias_3h, bias_1h, position):
 
 def process_symbol(symbol):
     try:
-        df_3h  = fetch_ohlcv(symbol, '4h',  limit=300)
-        df_1h  = fetch_ohlcv(symbol, '1h',  limit=300)
+        df_3h  = fetch_ohlcv(symbol, '4h',  limit=200)
+        df_1h  = fetch_ohlcv(symbol, '1h',  limit=200)
         df_15m = fetch_ohlcv(symbol, '15m', limit=250)
 
         if df_3h is None or df_1h is None or df_15m is None: return
@@ -271,12 +271,14 @@ def process_symbol(symbol):
         dir_15m  = supertrend(df_15m, CONFIG['ST_ATR_LEN'], CONFIG['ST_FACTOR'])
         macd_hist = calc_macd(df_15m, CONFIG['MACD_FAST'], CONFIG['MACD_SLOW'], CONFIG['MACD_SIGNAL'])
 
-        curr_15m = dir_15m.iloc[-2]
-        prev_15m = dir_15m.iloc[-3]
-        price    = float(df_15m['close'].iloc[-2])
+        curr_15m  = dir_15m.iloc[-2]
+        prev_15m  = dir_15m.iloc[-3]
+        prev2_15m = dir_15m.iloc[-4]
+        price     = float(df_15m['close'].iloc[-2])
 
-        flip_buy  = (prev_15m == 'sell' and curr_15m == 'buy')
-        flip_sell = (prev_15m == 'buy'  and curr_15m == 'sell')
+        # Flip sur la bougie actuelle OU la bougie précédente (pour rattraper les flips manqués)
+        flip_buy  = (prev_15m == 'sell' and curr_15m == 'buy') or (prev2_15m == 'sell' and prev_15m == 'buy' and curr_15m == 'buy')
+        flip_sell = (prev_15m == 'buy'  and curr_15m == 'sell') or (prev2_15m == 'buy' and prev_15m == 'sell' and curr_15m == 'sell')
 
         # Alignement biais
         bias_long  = (bias_3h == 'bull' and bias_1h == 'bull')
@@ -377,6 +379,53 @@ def process_symbol(symbol):
 # ============================================================================ #
 # SCANNER
 # ============================================================================ #
+
+
+def send_hourly_aligned():
+    with STATE_LOCK:
+        state_copy = dict(SCAN_STATE)
+
+    bull = []
+    bear = []
+    for symbol, s in state_copy.items():
+        b3 = s.get('bias_3h')
+        b1 = s.get('bias_1h')
+        st = s.get('st_15m', '?')
+        e  = '🟢' if st == 'buy' else '🔴'
+        price = s.get('price', 0)
+        if b3 == 'bull' and b1 == 'bull':
+            bull.append(e + ' ' + symbol.replace('/USDT','') + ' $' + str(round(price, 4)))
+        elif b3 == 'bear' and b1 == 'bear':
+            bear.append(e + ' ' + symbol.replace('/USDT','') + ' $' + str(round(price, 4)))
+
+    if not bull and not bear:
+        return
+
+    now = datetime.now(timezone.utc).strftime('%H:%M UTC')
+    msg = '📊 <b>Aligned Report</b> — ' + now + '\n'
+    msg += '━' * 20 + '\n'
+    if bull:
+        msg += '\n🟢 <b>BULL (' + str(len(bull)) + ')</b>\n'
+        msg += '\n'.join(sorted(bull)) + '\n'
+    if bear:
+        msg += '\n🔴 <b>BEAR (' + str(len(bear)) + ')</b>\n'
+        msg += '\n'.join(sorted(bear)) + '\n'
+    msg += '\n🟢 ST15m buy | 🔴 ST15m sell'
+    send_telegram(msg)
+    logger.info('[HOURLY] Rapport envoye — ' + str(len(bull)) + ' BULL, ' + str(len(bear)) + ' BEAR')
+
+
+def hourly_report_scheduler():
+    from datetime import timedelta
+    while True:
+        now = datetime.now(timezone.utc)
+        next_run = now.replace(minute=5, second=0, microsecond=0)
+        if now.minute >= 5:
+            next_run = (now + timedelta(hours=1)).replace(minute=5, second=0, microsecond=0)
+        wait = (next_run - now).total_seconds()
+        logger.info('[HOURLY] Prochain rapport dans ' + str(int(wait)) + 's')
+        time.sleep(wait)
+        send_hourly_aligned()
 
 def wait_next_15m_close():
     now  = time.time()
@@ -592,4 +641,6 @@ if __name__ == '__main__':
     init_redis()
     send_start_notification()
     threading.Thread(target=scanner_loop, daemon=True).start()
+    threading.Thread(target=hourly_report_scheduler, daemon=True).start()
+    threading.Thread(target=hourly_report_scheduler, daemon=True).start()
     app.run(host='0.0.0.0', port=CONFIG['PORT'])
