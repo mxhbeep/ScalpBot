@@ -67,6 +67,7 @@ logger = logging.getLogger(__name__)
 # Position active par asset
 # {symbol: {direction, entries: [{price, ts}], avg_price, sl, entry_count}}
 POSITIONS: dict = {}
+LAST_SIGNAL: dict = {}
 
 SCAN_STATE:  dict = {}
 STATE_LOCK = threading.Lock()
