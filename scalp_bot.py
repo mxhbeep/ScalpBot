@@ -119,12 +119,15 @@ def fetch_ohlcv(symbol, timeframe, limit=250):
 # INDICATEURS
 # ============================================================================ #
 
-def calc_bias(df, ema_len=13, sma_len=30):
+def calc_bias(df, ema_len=13, sma_len=30, label=''):
     """EMA13 vs SMA30 — CarréBias Pine Script."""
     close   = df['close']
     ema_val = close.ewm(span=ema_len, adjust=False).mean().iloc[-2]
     sma_val = close.rolling(window=sma_len).mean().iloc[-2]
-    return 'bull' if ema_val > sma_val else 'bear'
+    result  = 'bull' if ema_val > sma_val else 'bear'
+    if label:
+        logger.info('[BIAS DEBUG] ' + label + ' EMA13=' + str(round(ema_val,4)) + ' SMA30=' + str(round(sma_val,4)) + ' -> ' + result)
+    return result
 
 def supertrend(df, atr_len=10, factor=3.0):
     high  = df['high'].copy()
