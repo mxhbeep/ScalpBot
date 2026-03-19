@@ -333,6 +333,33 @@ def process_symbol(symbol):
                 return
 
         # Nouveau signal
+        # Alerte preparation - 3/4 conditions remplies (sans flip ST)
+        prep_long  = bias_long  and macd_hist < 0 and not flip_buy
+        prep_short = bias_short and macd_hist > 0 and not flip_sell
+
+        if prep_long or prep_short:
+            prep_dir = 'LONG' if prep_long else 'SHORT'
+            now_ts = time.time()
+            with STATE_LOCK:
+                last_prep = LAST_SIGNAL.get(symbol + '_prep', {})
+                if last_prep.get('signal') != prep_dir or now_ts - last_prep.get('ts', 0) > 3600:
+                    LAST_SIGNAL[symbol + '_prep'] = {'signal': prep_dir, 'ts': now_ts}
+                    e_dir = '🟡' if prep_dir == 'LONG' else '🟠'
+                    b3e = '🟢' if bias_3h == 'bull' else '🔴'
+                    b1e = '🟢' if bias_1h == 'bull' else '🔴'
+                    macd_str = ('+' if macd_hist >= 0 else '') + str(round(macd_hist, 4))
+                    lines = [
+                        e_dir + ' <b>[PREP ' + prep_dir + '] ' + symbol + '</b>',
+                        '━' * 20,
+                        '💰 Price: $' + str(round(price, 4)),
+                        b3e + ' Bias 4H: ' + bias_3h.upper(),
+                        b1e + ' Bias 1H: ' + bias_1h.upper(),
+                        '📊 MACD 15min: ' + macd_str,
+                        '⏳ En attente flip ST AI 15min ' + prep_dir,
+                    ]
+                    send_telegram('\n'.join(lines))
+                    logger.info('[PREP] ' + prep_dir + ' ' + symbol + ' @ ' + str(price))
+
         signal = None
         if   flip_buy  and bias_long  and macd_hist < 0: signal = 'LONG'
         elif flip_sell and bias_short and macd_hist > 0: signal = 'SHORT'
