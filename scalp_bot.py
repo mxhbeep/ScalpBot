@@ -266,8 +266,9 @@ def process_symbol(symbol):
         if df_3h is None or df_1h is None or df_15m is None: return
         if len(df_3h) < 35 or len(df_1h) < 35 or len(df_15m) < 50: return
 
-        bias_3h  = calc_bias(df_3h, CONFIG['BIAS_EMA_LEN'], CONFIG['BIAS_SMA_LEN'])
-        bias_1h  = calc_bias(df_1h, CONFIG['BIAS_EMA_LEN'], CONFIG['BIAS_SMA_LEN'])
+        dbg = symbol if symbol in ['AVAX/USDT', 'RENDER/USDT', 'BTC/USDT'] else ''
+        bias_3h  = calc_bias(df_3h, CONFIG['BIAS_EMA_LEN'], CONFIG['BIAS_SMA_LEN'], label=dbg+' 4H' if dbg else '')
+        bias_1h  = calc_bias(df_1h, CONFIG['BIAS_EMA_LEN'], CONFIG['BIAS_SMA_LEN'], label=dbg+' 1H' if dbg else '')
         dir_15m  = supertrend(df_15m, CONFIG['ST_ATR_LEN'], CONFIG['ST_FACTOR'])
         macd_hist = calc_macd(df_15m, CONFIG['MACD_FAST'], CONFIG['MACD_SLOW'], CONFIG['MACD_SIGNAL'])
 
