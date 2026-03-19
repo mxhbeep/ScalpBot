@@ -120,10 +120,10 @@ def fetch_ohlcv(symbol, timeframe, limit=250):
 # ============================================================================ #
 
 def calc_bias(df, ema_len=13, sma_len=30, label=''):
-    """EMA13 vs SMA30 — CarréBias Pine Script."""
+    """EMA13 vs SMA30 — CarréBias Pine Script. Utilise la bougie en cours (iloc[-1]) pour etre reactif."""
     close   = df['close']
-    ema_val = close.ewm(span=ema_len, adjust=False).mean().iloc[-2]
-    sma_val = close.rolling(window=sma_len).mean().iloc[-2]
+    ema_val = close.ewm(span=ema_len, adjust=False).mean().iloc[-1]
+    sma_val = close.rolling(window=sma_len).mean().iloc[-1]
     result  = 'bull' if ema_val > sma_val else 'bear'
     if label:
         logger.info('[BIAS DEBUG] ' + label + ' EMA13=' + str(round(ema_val,4)) + ' SMA30=' + str(round(sma_val,4)) + ' -> ' + result)
