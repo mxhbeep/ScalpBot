@@ -1,18 +1,13 @@
 """
-SCALP BOT v2 — Pyramiding Strategy
-Bias 3H + Bias 1H → direction
-Flip ST AI 15min → entrée (sizing progressif)
-SL: swing low 15min → break even après 2ème entrée
-Sortie: SL touché uniquement
+SCALP BOT v3 — Double Strategy
+Stratégie A : Bias 4H + Bias 1H + MACD 15min neg/pos + flip ST 15min
+Stratégie B : MACD 2H direction + Bias 1H + MACD 15min neg/pos + flip ST 15min
+              TP partiel alerte sur retournement MACD 2H
+Pyramiding illimité, SL swing low -> break even
 """
 
-import os
-import time
-import json
-import logging
-import requests
-import threading
-from datetime import datetime, timezone
+import os, time, json, logging, requests, threading
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import ccxt
@@ -46,29 +41,19 @@ CONFIG = {
     'ST_FACTOR':     3.0,
     'BIAS_EMA_LEN':  13,
     'BIAS_SMA_LEN':  30,
-    'SWING_LOOKBACK': 5,   # bougies 15min pour trouver le swing low/high
+    'SWING_LOOKBACK': 5,
     'MACD_FAST':     12,
     'MACD_SLOW':     26,
     'MACD_SIGNAL':   9,
     'PORT':          int(os.environ.get('PORT', 5001)),
 }
 
-# ============================================================================ #
-# LOGGING
-# ============================================================================ #
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
 
-# ============================================================================ #
-# ÉTAT
-# ============================================================================ #
-
-# Position active par asset
-# {symbol: {direction, entries: [{price, ts}], avg_price, sl, entry_count}}
 POSITIONS: dict = {}
 LAST_SIGNAL: dict = {}
-
+PREP_BUFFER: list = []
 SCAN_STATE:  dict = {}
 STATE_LOCK = threading.Lock()
 LAST_SCAN_TIME = None
@@ -80,25 +65,25 @@ REDIS_CLIENT = None
 
 def init_redis():
     global REDIS_CLIENT
-    redis_url = os.environ.get('REDIS_URL')
-    if not redis_url:
-        logger.warning("REDIS_URL non defini")
+    url = os.environ.get('REDIS_URL')
+    if not url:
+        logger.warning('REDIS_URL non defini')
         return
     try:
-        REDIS_CLIENT = redis.from_url(redis_url, decode_responses=True)
+        REDIS_CLIENT = redis.from_url(url, decode_responses=True)
         REDIS_CLIENT.ping()
-        logger.info("Redis connecte")
+        logger.info('Redis connecte')
     except Exception as e:
-        logger.error(f"Redis erreur: {e}")
+        logger.error('Redis erreur: ' + str(e))
         REDIS_CLIENT = None
 
-def audit_log(entry: dict):
+def audit_log(entry):
     if REDIS_CLIENT:
         try:
-            REDIS_CLIENT.lpush('scalp_audit_v2', json.dumps(entry))
-            REDIS_CLIENT.ltrim('scalp_audit_v2', 0, 999)
+            REDIS_CLIENT.lpush('scalp_audit_v3', json.dumps(entry))
+            REDIS_CLIENT.ltrim('scalp_audit_v3', 0, 999)
         except Exception as e:
-            logger.error(f"Redis audit: {e}")
+            logger.error('Redis audit: ' + str(e))
 
 # ============================================================================ #
 # EXCHANGE
@@ -113,22 +98,27 @@ def fetch_ohlcv(symbol, timeframe, limit=250):
         df['ts'] = pd.to_datetime(df['ts'], unit='ms', utc=True)
         return df
     except Exception as e:
-        logger.error(f"fetch_ohlcv {symbol} {timeframe}: {e}")
+        logger.error('fetch_ohlcv ' + symbol + ' ' + timeframe + ': ' + str(e))
         return None
 
 # ============================================================================ #
 # INDICATEURS
 # ============================================================================ #
 
-def calc_bias(df, ema_len=13, sma_len=30, label=''):
-    """EMA13 vs SMA30 — CarréBias Pine Script. Utilise la bougie en cours (iloc[-1]) pour etre reactif."""
+def calc_bias(df, ema_len=13, sma_len=30):
     close   = df['close']
     ema_val = close.ewm(span=ema_len, adjust=False).mean().iloc[-1]
     sma_val = close.rolling(window=sma_len).mean().iloc[-1]
-    result  = 'bull' if ema_val > sma_val else 'bear'
-    if label:
-        logger.info('[BIAS DEBUG] ' + label + ' EMA13=' + str(round(ema_val,4)) + ' SMA30=' + str(round(sma_val,4)) + ' -> ' + result)
-    return result
+    return 'bull' if ema_val > sma_val else 'bear'
+
+def calc_macd_histogram(df, fast=12, slow=26, signal=9, candle=-2):
+    close       = df['close']
+    ema_fast    = close.ewm(span=fast,   adjust=False).mean()
+    ema_slow    = close.ewm(span=slow,   adjust=False).mean()
+    macd_line   = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram   = macd_line - signal_line
+    return float(histogram.iloc[candle])
 
 def supertrend(df, atr_len=10, factor=3.0):
     high  = df['high'].copy()
@@ -162,100 +152,106 @@ def supertrend(df, atr_len=10, factor=3.0):
             else:       trend.iloc[i] = fl; direction.iloc[i] = 'buy'
     return direction
 
-
-def calc_macd(df, fast=12, slow=26, signal=9):
-    """Retourne la valeur de l'histogramme MACD sur la dernière bougie fermée."""
-    close      = df['close']
-    ema_fast   = close.ewm(span=fast,   adjust=False).mean()
-    ema_slow   = close.ewm(span=slow,   adjust=False).mean()
-    macd_line  = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    histogram  = macd_line - signal_line
-    return float(histogram.iloc[-2])
-
 def get_swing_low(df, lookback=5):
-    """Dernier swing low sur les N dernières bougies 15min."""
     return float(df['low'].iloc[-lookback-2:-2].min())
 
 def get_swing_high(df, lookback=5):
-    """Dernier swing high sur les N dernières bougies 15min."""
     return float(df['high'].iloc[-lookback-2:-2].max())
 
 def calc_sl(direction, df_15m, avg_price, entry_count):
-    """
-    Entrée 1 : SL = swing low/high récent
-    Entrée 2+ : SL = break even (prix moyen)
-    """
     if entry_count <= 1:
-        if direction == 'LONG':
-            return get_swing_low(df_15m, CONFIG['SWING_LOOKBACK'])
-        else:
-            return get_swing_high(df_15m, CONFIG['SWING_LOOKBACK'])
-    else:
-        return avg_price  # break even
+        return get_swing_low(df_15m, CONFIG['SWING_LOOKBACK']) if direction == 'LONG' else get_swing_high(df_15m, CONFIG['SWING_LOOKBACK'])
+    return avg_price
 
 # ============================================================================ #
 # TELEGRAM
 # ============================================================================ #
 
 def send_telegram(msg):
-    url     = f"https://api.telegram.org/bot{CONFIG['TELEGRAM_BOT_TOKEN']}/sendMessage"
+    url     = 'https://api.telegram.org/bot' + CONFIG['TELEGRAM_BOT_TOKEN'] + '/sendMessage'
     payload = {'chat_id': CONFIG['TELEGRAM_CHAT_ID'], 'text': msg, 'parse_mode': 'HTML'}
     try:
         resp = requests.post(url, json=payload, timeout=10)
         if resp.status_code == 200:
-            logger.info("Telegram envoye")
+            logger.info('Telegram envoye')
         elif resp.status_code == 429:
             retry = resp.json().get('parameters', {}).get('retry_after', 30)
             time.sleep(retry)
             requests.post(url, json=payload, timeout=10)
         else:
-            logger.error(f"Telegram HTTP {resp.status_code}: {resp.text}")
+            logger.error('Telegram HTTP ' + str(resp.status_code) + ': ' + resp.text)
     except Exception as e:
-        logger.error(f"Telegram: {e}")
+        logger.error('Telegram: ' + str(e))
 
-def format_entry_message(symbol, direction, price, avg_price, sl, entry_count, bias_3h, bias_1h, macd_hist):
-    emoji     = "🟢" if direction == "LONG" else "🔴"
-    sl_label  = "Swing low" if entry_count == 1 else "Break even"
-    sl_emoji  = "🆕" if entry_count == 1 else "⚖️"
-    now       = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-    b3_emoji  = "🟢" if bias_3h == 'bull' else "🔴"
-    b1_emoji  = "🟢" if bias_1h == 'bull' else "🔴"
-
-    msg = (
-        f"{emoji} <b>[SCALP {direction} #{entry_count}] {symbol}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 Prix entrée: ${price:.4f}\n"
-    )
+def format_entry_msg(symbol, direction, price, avg_price, sl, entry_count, strat, bias_4h=None, bias_1h=None, macd_2h=None, macd_15m=None):
+    emoji = '\U0001f7e2' if direction == 'LONG' else '\U0001f534'
+    sl_label = 'Swing low/high' if entry_count == 1 else 'Break even'
+    now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+    lines = [
+        emoji + ' <b>[SCALP ' + direction + ' #' + str(entry_count) + ' | STRAT ' + strat + '] ' + symbol + '</b>',
+        '\u2501' * 20,
+        '\U0001f4b0 Prix entree: $' + str(round(price, 6)),
+    ]
     if entry_count > 1:
-        msg += f"📊 Prix moyen: ${avg_price:.4f}\n"
-    msg += (
-        f"{sl_emoji} SL ({sl_label}): ${sl:.4f}\n"
-        f"🏦 Exchange: OKX\n"
-        f"⏰ {now}\n"
-        f"{b3_emoji} Bias 3H: {bias_3h.upper()}\n"
-        f"{b1_emoji} Bias 1H: {bias_1h.upper()}\n"
-        f"✅ ST AI 15min: flip {direction.lower()}\n"
-        f"📊 MACD 15min: {macd_hist:+.4f}\n"
-    )
+        lines.append('\U0001f4ca Prix moyen: $' + str(round(avg_price, 6)))
+    lines += [
+        '\U0001f6d1 SL (' + sl_label + '): $' + str(round(sl, 6)),
+        '\U0001f3e6 Exchange: OKX',
+        '\u23f0 ' + now,
+    ]
+    if strat == 'A' and bias_4h:
+        e4 = '\U0001f7e2' if bias_4h == 'bull' else '\U0001f534'
+        lines.append(e4 + ' Bias 4H: ' + bias_4h.upper())
+    elif strat == 'B' and macd_2h is not None:
+        m2h_str = ('+' if macd_2h >= 0 else '') + str(round(macd_2h, 4))
+        lines.append('\U0001f4ca MACD 2H: ' + m2h_str)
+    if bias_1h:
+        e1 = '\U0001f7e2' if bias_1h == 'bull' else '\U0001f534'
+        lines.append(e1 + ' Bias 1H: ' + bias_1h.upper())
+    if macd_15m is not None:
+        m15_str = ('+' if macd_15m >= 0 else '') + str(round(macd_15m, 4))
+        lines.append('\U0001f4ca MACD 15min: ' + m15_str)
+    lines.append('\u2705 ST AI 15min: flip ' + direction.lower())
     if entry_count > 1:
-        msg += f"📈 Positions accumulées: {entry_count}\n"
-    return msg
+        lines.append('\U0001f4c8 Positions accumulees: ' + str(entry_count))
+    return '\n'.join(lines)
 
-def format_invalidation_message(symbol, direction, bias_3h, bias_1h, position):
-    emoji = "⚠️"
-    now   = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-    return (
-        f"{emoji} <b>[BIAIS INVALIDE] {symbol}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"Direction précédente: {direction}\n"
-        f"Positions ouvertes: {position['entry_count']}\n"
-        f"Prix moyen: ${position['avg_price']:.4f}\n"
-        f"SL actuel: ${position['sl']:.4f}\n\n"
-        f"🔴 Bias 3H: {bias_3h.upper()} | Bias 1H: {bias_1h.upper()}\n"
-        f"⚠️ Biais non alignés — gérer la position manuellement\n"
-        f"⏰ {now}"
-    )
+def format_prep_msg(symbol, direction, price, strat, bias_4h=None, bias_1h=None, macd_2h=None, macd_15m=None):
+    emoji = '\U0001f7e1' if direction == 'LONG' else '\U0001f7e0'
+    now = datetime.now(timezone.utc).strftime('%H:%M UTC')
+    lines = [
+        emoji + ' <b>[PREP ' + direction + ' | STRAT ' + strat + '] ' + symbol + '</b>',
+        '\u2501' * 20,
+        '\U0001f4b0 Price: $' + str(round(price, 6)),
+    ]
+    if strat == 'A' and bias_4h:
+        e4 = '\U0001f7e2' if bias_4h == 'bull' else '\U0001f534'
+        lines.append(e4 + ' Bias 4H: ' + bias_4h.upper())
+    elif strat == 'B' and macd_2h is not None:
+        m2h_str = ('+' if macd_2h >= 0 else '') + str(round(macd_2h, 4))
+        lines.append('\U0001f4ca MACD 2H: ' + m2h_str)
+    if bias_1h:
+        e1 = '\U0001f7e2' if bias_1h == 'bull' else '\U0001f534'
+        lines.append(e1 + ' Bias 1H: ' + bias_1h.upper())
+    if macd_15m is not None:
+        m15_str = ('+' if macd_15m >= 0 else '') + str(round(macd_15m, 4))
+        lines.append('\U0001f4ca MACD 15min: ' + m15_str)
+    lines.append('\u23f3 En attente flip ST AI 15min ' + direction)
+    return '\n'.join(lines)
+
+def format_tp_msg(symbol, direction, price, strat, macd_2h):
+    now = datetime.now(timezone.utc).strftime('%H:%M UTC')
+    flip_dir = 'BEAR' if direction == 'LONG' else 'BULL'
+    m2h_str = ('+' if macd_2h >= 0 else '') + str(round(macd_2h, 4))
+    lines = [
+        '\U0001f4ca <b>[TP PARTIEL | STRAT ' + strat + '] ' + symbol + '</b>',
+        '\u2501' * 20,
+        '\U0001f4b0 Price: $' + str(round(price, 6)),
+        '\U0001f4ca MACD 2H flip ' + flip_dir + ': ' + m2h_str,
+        '\u2705 TP partiel conseille sur position ' + direction,
+        '\u23f0 ' + now,
+    ]
+    return '\n'.join(lines)
 
 # ============================================================================ #
 # PROCESS SYMBOL
@@ -263,192 +259,216 @@ def format_invalidation_message(symbol, direction, bias_3h, bias_1h, position):
 
 def process_symbol(symbol):
     try:
-        df_3h  = fetch_ohlcv(symbol, '4h',  limit=200)
-        df_1h  = fetch_ohlcv(symbol, '1h',  limit=200)
+        df_4h  = fetch_ohlcv(symbol, '4H',  limit=200)
+        df_2h  = fetch_ohlcv(symbol, '2H',  limit=100)
+        df_1h  = fetch_ohlcv(symbol, '1H',  limit=200)
         df_15m = fetch_ohlcv(symbol, '15m', limit=250)
 
-        if df_3h is None or df_1h is None or df_15m is None: return
-        if len(df_3h) < 35 or len(df_1h) < 35 or len(df_15m) < 50: return
+        if df_4h is None or df_2h is None or df_1h is None or df_15m is None: return
+        if len(df_4h) < 35 or len(df_2h) < 35 or len(df_1h) < 35 or len(df_15m) < 50: return
 
-        dbg = symbol if symbol in ['AVAX/USDT', 'RENDER/USDT', 'BTC/USDT'] else ''
-        bias_3h  = calc_bias(df_3h, CONFIG['BIAS_EMA_LEN'], CONFIG['BIAS_SMA_LEN'], label=dbg+' 4H' if dbg else '')
-        bias_1h  = calc_bias(df_1h, CONFIG['BIAS_EMA_LEN'], CONFIG['BIAS_SMA_LEN'], label=dbg+' 1H' if dbg else '')
+        # Indicateurs
+        bias_4h   = calc_bias(df_4h, CONFIG['BIAS_EMA_LEN'], CONFIG['BIAS_SMA_LEN'])
+        bias_1h   = calc_bias(df_1h, CONFIG['BIAS_EMA_LEN'], CONFIG['BIAS_SMA_LEN'])
+        macd_2h   = calc_macd_histogram(df_2h,  CONFIG['MACD_FAST'], CONFIG['MACD_SLOW'], CONFIG['MACD_SIGNAL'], candle=-2)
+        macd_2h_p = calc_macd_histogram(df_2h,  CONFIG['MACD_FAST'], CONFIG['MACD_SLOW'], CONFIG['MACD_SIGNAL'], candle=-3)
+        macd_15m  = calc_macd_histogram(df_15m, CONFIG['MACD_FAST'], CONFIG['MACD_SLOW'], CONFIG['MACD_SIGNAL'], candle=-2)
+
         dir_15m  = supertrend(df_15m, CONFIG['ST_ATR_LEN'], CONFIG['ST_FACTOR'])
-        macd_hist = calc_macd(df_15m, CONFIG['MACD_FAST'], CONFIG['MACD_SLOW'], CONFIG['MACD_SIGNAL'])
-
         curr_15m  = dir_15m.iloc[-2]
         prev_15m  = dir_15m.iloc[-3]
         prev2_15m = dir_15m.iloc[-4]
         price     = float(df_15m['close'].iloc[-2])
 
-        # Flip sur la bougie actuelle OU la bougie précédente (pour rattraper les flips manqués)
         flip_buy  = (prev_15m == 'sell' and curr_15m == 'buy') or (prev2_15m == 'sell' and prev_15m == 'buy' and curr_15m == 'buy')
         flip_sell = (prev_15m == 'buy'  and curr_15m == 'sell') or (prev2_15m == 'buy' and prev_15m == 'sell' and curr_15m == 'sell')
+        flip      = flip_buy or flip_sell
 
-        # Alignement biais
-        bias_long  = (bias_3h == 'bull' and bias_1h == 'bull')
-        bias_short = (bias_3h == 'bear' and bias_1h == 'bear')
-        bias_aligned = bias_long or bias_short
+        # Conditions Strat A
+        a_long  = bias_4h == 'bull' and bias_1h == 'bull'
+        a_short = bias_4h == 'bear' and bias_1h == 'bear'
 
-        # DEBUG
-        flip = flip_buy or flip_sell
-        if not flip:
-            reason = "no flip"
-        elif flip_buy and bias_long and macd_hist < 0:
-            reason = f"SIGNAL LONG (MACD={macd_hist:.4f})"
-        elif flip_sell and bias_short and macd_hist > 0:
-            reason = f"SIGNAL SHORT (MACD={macd_hist:.4f})"
-        elif flip_buy and bias_long:
-            reason = f"filtré: MACD={macd_hist:.4f} > 0 (pas négatif)"
-        elif flip_sell and bias_short:
-            reason = f"filtré: MACD={macd_hist:.4f} < 0 (pas positif)"
-        elif flip_buy:
-            reason = f"filtré: Bias3H={bias_3h} Bias1H={bias_1h}"
-        else:
-            reason = f"filtré: Bias3H={bias_3h} Bias1H={bias_1h}"
+        # Conditions Strat B
+        b_long  = macd_2h > 0 and bias_1h == 'bull'
+        b_short = macd_2h < 0 and bias_1h == 'bear'
 
-        logger.info(f"[SCAN] {symbol:<20} Bias3H={bias_3h:<4} Bias1H={bias_1h:<4} ST15m={curr_15m:<4} MACD={macd_hist:+.4f} flip={str(flip):<5} → {reason}")
+        # Retournement MACD 2H (pour TP)
+        macd_2h_flip_bear = macd_2h_p > 0 and macd_2h < 0
+        macd_2h_flip_bull = macd_2h_p < 0 and macd_2h > 0
 
-        # Mise à jour scan state
+        # Debug log
+        reason_a = 'no flip' if not flip else ('LONG A' if flip_buy and a_long and macd_15m < 0 else 'SHORT A' if flip_sell and a_short and macd_15m > 0 else 'filtre A')
+        reason_b = 'no flip' if not flip else ('LONG B' if flip_buy and b_long and macd_15m < 0 else 'SHORT B' if flip_sell and b_short and macd_15m > 0 else 'filtre B')
+        logger.info('[SCAN] ' + symbol.ljust(20) + ' B4H=' + bias_4h + ' B1H=' + bias_1h + ' M2H=' + ('+' if macd_2h >= 0 else '') + str(round(macd_2h, 4)) + ' M15m=' + ('+' if macd_15m >= 0 else '') + str(round(macd_15m, 4)) + ' ST=' + curr_15m + ' flip=' + str(flip) + ' A:' + reason_a + ' B:' + reason_b)
+
+        # Update scan state
         with STATE_LOCK:
             SCAN_STATE[symbol] = {
-                'bias_3h': bias_3h, 'bias_1h': bias_1h, 'macd_hist': macd_hist,
+                'bias_4h': bias_4h, 'bias_1h': bias_1h,
+                'macd_2h': round(macd_2h, 6), 'macd_15m': round(macd_15m, 6),
                 'st_15m': curr_15m, 'price': price,
                 'ts': datetime.now(timezone.utc).isoformat(),
             }
 
-        # Vérifie si position active → biais invalide
+        # TP partiel Strat B
+        now_ts = time.time()
         with STATE_LOCK:
-            position = POSITIONS.get(symbol)
+            pos_b = POSITIONS.get(symbol + '_B')
+        if pos_b:
+            d = pos_b['direction']
+            if (d == 'LONG' and macd_2h_flip_bear) or (d == 'SHORT' and macd_2h_flip_bull):
+                send_telegram(format_tp_msg(symbol, d, price, 'B', macd_2h))
+                logger.info('[TP B] ' + symbol + ' ' + d + ' MACD 2H flip')
+                audit_log({'ts': datetime.now(timezone.utc).isoformat(), 'sym': symbol, 'event': 'tp_partiel_B', 'direction': d, 'price': price})
 
-        if position:
-            direction = position['direction']
-            pos_valid = (direction == 'LONG' and bias_long) or (direction == 'SHORT' and bias_short)
-            if not pos_valid:
-                logger.info(f"[SCALP] {symbol} biais invalide — position {direction} à gérer")
-                send_telegram(format_invalidation_message(symbol, direction, bias_3h, bias_1h, position))
-                with STATE_LOCK:
-                    del POSITIONS[symbol]
-                audit_log({'ts': datetime.now(timezone.utc).isoformat(), 'sym': symbol,
-                           'event': 'invalidation', 'direction': direction, 'price': price})
-                return
-
-        # Nouveau signal
-        # Alerte preparation - 3/4 conditions remplies (sans flip ST)
-        prep_long  = bias_long  and macd_hist < 0 and not flip_buy
-        prep_short = bias_short and macd_hist > 0 and not flip_sell
-
-        if prep_long or prep_short:
-            prep_dir = 'LONG' if prep_long else 'SHORT'
-            now_ts = time.time()
+        # Collecte des assets en preparation (rapport groupé toutes les 15min)
+        prep_entries = []
+        if a_long  and macd_15m < 0 and not flip_buy:
+            prep_entries.append({'sym': symbol, 'dir': 'LONG',  'strat': 'A', 'price': price, 'bias_4h': bias_4h, 'bias_1h': bias_1h, 'macd_15m': macd_15m})
+        if a_short and macd_15m > 0 and not flip_sell:
+            prep_entries.append({'sym': symbol, 'dir': 'SHORT', 'strat': 'A', 'price': price, 'bias_4h': bias_4h, 'bias_1h': bias_1h, 'macd_15m': macd_15m})
+        if b_long  and macd_15m < 0 and not flip_buy:
+            prep_entries.append({'sym': symbol, 'dir': 'LONG',  'strat': 'B', 'price': price, 'bias_1h': bias_1h, 'macd_2h': macd_2h, 'macd_15m': macd_15m})
+        if b_short and macd_15m > 0 and not flip_sell:
+            prep_entries.append({'sym': symbol, 'dir': 'SHORT', 'strat': 'B', 'price': price, 'bias_1h': bias_1h, 'macd_2h': macd_2h, 'macd_15m': macd_15m})
+        if prep_entries:
             with STATE_LOCK:
-                last_prep = LAST_SIGNAL.get(symbol + '_prep', {})
-                if last_prep.get('signal') != prep_dir or now_ts - last_prep.get('ts', 0) > 3600:
-                    LAST_SIGNAL[symbol + '_prep'] = {'signal': prep_dir, 'ts': now_ts}
-                    e_dir = '🟡' if prep_dir == 'LONG' else '🟠'
-                    b3e = '🟢' if bias_3h == 'bull' else '🔴'
-                    b1e = '🟢' if bias_1h == 'bull' else '🔴'
-                    macd_str = ('+' if macd_hist >= 0 else '') + str(round(macd_hist, 4))
-                    lines = [
-                        e_dir + ' <b>[PREP ' + prep_dir + '] ' + symbol + '</b>',
-                        '━' * 20,
-                        '💰 Price: $' + str(round(price, 4)),
-                        b3e + ' Bias 4H: ' + bias_3h.upper(),
-                        b1e + ' Bias 1H: ' + bias_1h.upper(),
-                        '📊 MACD 15min: ' + macd_str,
-                        '⏳ En attente flip ST AI 15min ' + prep_dir,
-                    ]
-                    send_telegram('\n'.join(lines))
-                    logger.info('[PREP] ' + prep_dir + ' ' + symbol + ' @ ' + str(price))
+                PREP_BUFFER.extend(prep_entries)
 
-        signal = None
-        if   flip_buy  and bias_long  and macd_hist < 0: signal = 'LONG'
-        elif flip_sell and bias_short and macd_hist > 0: signal = 'SHORT'
-        if not signal: return
+        # Signaux
+        for strat, sig_long, sig_short, kw in [
+            ('A', flip_buy and a_long  and macd_15m < 0, flip_sell and a_short and macd_15m > 0, {'bias_4h': bias_4h, 'bias_1h': bias_1h, 'macd_15m': macd_15m}),
+            ('B', flip_buy and b_long  and macd_15m < 0, flip_sell and b_short and macd_15m > 0, {'bias_1h': bias_1h, 'macd_2h': macd_2h, 'macd_15m': macd_15m}),
+        ]:
+            signal = 'LONG' if sig_long else ('SHORT' if sig_short else None)
+            if not signal: continue
 
-        # Mise à jour position
-        with STATE_LOCK:
-            pos = POSITIONS.get(symbol)
-            if pos and pos['direction'] != signal:
-                # Direction opposée → reset position
-                del POSITIONS[symbol]
-                pos = None
+            pos_key = symbol + '_' + strat
+            with STATE_LOCK:
+                pos = POSITIONS.get(pos_key)
+                if pos and pos['direction'] != signal:
+                    del POSITIONS[pos_key]
+                    pos = None
 
-            if pos is None:
-                POSITIONS[symbol] = {
-                    'direction':   signal,
-                    'entries':     [{'price': price, 'ts': datetime.now(timezone.utc).isoformat()}],
-                    'avg_price':   price,
-                    'entry_count': 1,
-                    'sl':          0,
-                }
-                pos = POSITIONS[symbol]
-            else:
-                pos['entries'].append({'price': price, 'ts': datetime.now(timezone.utc).isoformat()})
-                pos['entry_count'] += 1
-                pos['avg_price'] = sum(e['price'] for e in pos['entries']) / len(pos['entries'])
+                if pos is None:
+                    POSITIONS[pos_key] = {
+                        'direction': signal,
+                        'entries': [{'price': price, 'ts': datetime.now(timezone.utc).isoformat()}],
+                        'avg_price': price,
+                        'entry_count': 1,
+                        'sl': 0,
+                    }
+                    pos = POSITIONS[pos_key]
+                else:
+                    # Cooldown entre entrées
+                    last_entry_ts = pos['entries'][-1]['ts']
+                    last_ts = datetime.fromisoformat(last_entry_ts).timestamp()
+                    if now_ts - last_ts < 900:  # 15min minimum entre entrées
+                        continue
+                    pos['entries'].append({'price': price, 'ts': datetime.now(timezone.utc).isoformat()})
+                    pos['entry_count'] += 1
+                    pos['avg_price'] = sum(e['price'] for e in pos['entries']) / len(pos['entries'])
 
-            # Calcul SL
-            pos['sl'] = calc_sl(signal, df_15m, pos['avg_price'], pos['entry_count'])
-            entry_count = pos['entry_count']
-            avg_price   = pos['avg_price']
-            sl          = pos['sl']
+                pos['sl'] = calc_sl(signal, df_15m, pos['avg_price'], pos['entry_count'])
+                entry_count = pos['entry_count']
+                avg_price   = pos['avg_price']
+                sl          = pos['sl']
 
-        msg = format_entry_message(symbol, signal, price, avg_price, sl, entry_count, bias_3h, bias_1h, macd_hist)
-        send_telegram(msg)
-        logger.info(f"[SCALP] {signal} #{entry_count} {symbol} @ {price} | avg={avg_price:.4f} SL={sl:.4f}")
-
-        audit_log({
-            'ts': datetime.now(timezone.utc).isoformat(),
-            'sym': symbol, 'signal': signal, 'price': price,
-            'avg_price': avg_price, 'sl': sl, 'entry_count': entry_count,
-            'bias_3h': bias_3h, 'bias_1h': bias_1h, 'macd_hist': macd_hist,
-        })
+            msg = format_entry_msg(symbol, signal, price, avg_price, sl, entry_count, strat, **kw)
+            send_telegram(msg)
+            logger.info('[STRAT ' + strat + '] ' + signal + ' #' + str(entry_count) + ' ' + symbol + ' @ ' + str(price))
+            audit_log({'ts': datetime.now(timezone.utc).isoformat(), 'sym': symbol, 'signal': signal, 'strat': strat, 'price': price, 'avg_price': avg_price, 'sl': sl, 'entry_count': entry_count})
 
     except Exception as e:
-        logger.error(f"{symbol}: {e}")
+        logger.error(symbol + ': ' + str(e))
 
 # ============================================================================ #
 # SCANNER
 # ============================================================================ #
 
+def wait_next_15m_close():
+    now  = time.time()
+    wait = 15 * 60 - (now % (15 * 60))
+    logger.info('Prochain scan dans ' + str(int(wait)) + 's')
+    time.sleep(wait + 2)
+
+def send_prep_report():
+    with STATE_LOCK:
+        entries = list(PREP_BUFFER)
+        PREP_BUFFER.clear()
+    if not entries:
+        return
+    now = datetime.now(timezone.utc).strftime('%H:%M UTC')
+    msg = '⏳ <b>En attente de signal</b> ' + now + '\n' + '━' * 20
+    groups = {}
+    for e in entries:
+        key = e['strat'] + '_' + e['dir']
+        if key not in groups:
+            groups[key] = []
+        m15 = ('+' if e['macd_15m'] >= 0 else '') + str(round(e['macd_15m'], 4))
+        em = '🟢' if e['dir'] == 'LONG' else '🔴'
+        groups[key].append(em + ' ' + e['sym'].replace('/USDT', '') + ' $' + str(round(e['price'], 4)) + ' MACD15m:' + m15)
+    for key in sorted(groups.keys()):
+        strat, direction = key.split('_', 1)
+        msg += '\n\n<b>STRAT ' + strat + ' ' + direction + '</b>\n'
+        msg += '\n'.join(groups[key])
+    send_telegram(msg)
+    logger.info('[PREP] Rapport groupe envoye ' + str(len(entries)) + ' assets')
+
+def scan_all():
+    global LAST_SCAN_TIME
+    logger.info('Scan ' + str(len(CONFIG['SYMBOLS'])) + ' assets...')
+    LAST_SCAN_TIME = datetime.now(timezone.utc).isoformat()
+    for symbol in CONFIG['SYMBOLS']:
+        process_symbol(symbol)
+        time.sleep(0.3)
+    send_prep_report()
+    logger.info('Scan termine')
+
+def scanner_loop():
+    while True:
+        wait_next_15m_close()
+        scan_all()
+
+# ============================================================================ #
+# RAPPORT HORAIRE
+# ============================================================================ #
 
 def send_hourly_aligned():
     with STATE_LOCK:
         state_copy = dict(SCAN_STATE)
 
-    bull = []
-    bear = []
+    bull_a, bear_a, bull_b, bear_b = [], [], [], []
     for symbol, s in state_copy.items():
-        b3 = s.get('bias_3h')
-        b1 = s.get('bias_1h')
-        st = s.get('st_15m', '?')
-        e  = '🟢' if st == 'buy' else '🔴'
-        price = s.get('price', 0)
-        if b3 == 'bull' and b1 == 'bull':
-            bull.append(e + ' ' + symbol.replace('/USDT','') + ' $' + str(round(price, 4)))
-        elif b3 == 'bear' and b1 == 'bear':
-            bear.append(e + ' ' + symbol.replace('/USDT','') + ' $' + str(round(price, 4)))
-
-    if not bull and not bear:
-        return
+        b4 = s.get('bias_4h'); b1 = s.get('bias_1h')
+        m2 = s.get('macd_2h', 0); st = s.get('st_15m', '?')
+        e  = '\U0001f7e2' if st == 'buy' else '\U0001f534'
+        pr = '$' + str(round(s.get('price', 0), 4))
+        base = e + ' ' + symbol.replace('/USDT', '') + ' ' + pr
+        if b4 == 'bull' and b1 == 'bull': bull_a.append(base)
+        if b4 == 'bear' and b1 == 'bear': bear_a.append(base)
+        if m2 > 0 and b1 == 'bull': bull_b.append(base)
+        if m2 < 0 and b1 == 'bear': bear_b.append(base)
 
     now = datetime.now(timezone.utc).strftime('%H:%M UTC')
-    msg = '📊 <b>Aligned Report</b> — ' + now + '\n'
-    msg += '━' * 20 + '\n'
-    if bull:
-        msg += '\n🟢 <b>BULL (' + str(len(bull)) + ')</b>\n'
-        msg += '\n'.join(sorted(bull)) + '\n'
-    if bear:
-        msg += '\n🔴 <b>BEAR (' + str(len(bear)) + ')</b>\n'
-        msg += '\n'.join(sorted(bear)) + '\n'
-    msg += '\n🟢 ST15m buy | 🔴 ST15m sell'
+    msg = '\U0001f4ca <b>Aligned Report</b> ' + now + '\n' + '\u2501' * 20
+
+    if bull_a or bear_a:
+        msg += '\n\n<b>STRAT A (Bias 4H+1H)</b>'
+        if bull_a: msg += '\n\U0001f7e2 BULL (' + str(len(bull_a)) + '):\n' + '\n'.join(sorted(bull_a))
+        if bear_a: msg += '\n\U0001f534 BEAR (' + str(len(bear_a)) + '):\n' + '\n'.join(sorted(bear_a))
+
+    if bull_b or bear_b:
+        msg += '\n\n<b>STRAT B (MACD 2H+Bias 1H)</b>'
+        if bull_b: msg += '\n\U0001f7e2 BULL (' + str(len(bull_b)) + '):\n' + '\n'.join(sorted(bull_b))
+        if bear_b: msg += '\n\U0001f534 BEAR (' + str(len(bear_b)) + '):\n' + '\n'.join(sorted(bear_b))
+
+    if not any([bull_a, bear_a, bull_b, bear_b]):
+        return
     send_telegram(msg)
-    logger.info('[HOURLY] Rapport envoye — ' + str(len(bull)) + ' BULL, ' + str(len(bear)) + ' BEAR')
+    logger.info('[HOURLY] Rapport envoye')
 
-
-def hourly_report_scheduler():
-    from datetime import timedelta
+def hourly_scheduler():
     while True:
         now = datetime.now(timezone.utc)
         next_run = now.replace(minute=5, second=0, microsecond=0)
@@ -459,25 +479,62 @@ def hourly_report_scheduler():
         time.sleep(wait)
         send_hourly_aligned()
 
-def wait_next_15m_close():
-    now  = time.time()
-    wait = 15 * 60 - (now % (15 * 60))
-    logger.info(f"Prochain scan dans {int(wait)}s")
-    time.sleep(wait + 2)
+# ============================================================================ #
+# TELEGRAM COMMANDS
+# ============================================================================ #
 
-def scan_all():
-    global LAST_SCAN_TIME
-    logger.info(f"Scan {len(CONFIG['SYMBOLS'])} assets...")
-    LAST_SCAN_TIME = datetime.now(timezone.utc).isoformat()
-    for symbol in CONFIG['SYMBOLS']:
-        process_symbol(symbol)
-        time.sleep(0.3)
-    logger.info("Scan termine")
+def handle_telegram_command(message):
+    chat_id = message.get('chat', {}).get('id')
+    text    = message.get('text', '').strip().lower()
+    if not chat_id: return
 
-def scanner_loop():
-    while True:
-        wait_next_15m_close()
-        scan_all()
+    if '/aligned' in text:
+        with STATE_LOCK:
+            state_copy = dict(SCAN_STATE)
+        bull_a, bear_a, bull_b, bear_b = [], [], [], []
+        for symbol, s in state_copy.items():
+            b4 = s.get('bias_4h'); b1 = s.get('bias_1h')
+            m2 = s.get('macd_2h', 0); st = s.get('st_15m', '?')
+            e  = '\U0001f7e2' if st == 'buy' else '\U0001f534'
+            pr = '$' + str(round(s.get('price', 0), 4))
+            base = e + ' ' + symbol.replace('/USDT', '') + ' ' + pr
+            if b4 == 'bull' and b1 == 'bull': bull_a.append(base)
+            if b4 == 'bear' and b1 == 'bear': bear_a.append(base)
+            if m2 > 0 and b1 == 'bull': bull_b.append(base)
+            if m2 < 0 and b1 == 'bear': bear_b.append(base)
+        now = datetime.now(timezone.utc).strftime('%H:%M UTC')
+        msg = '\U0001f4ca <b>Aligned</b> ' + now + '\n' + '\u2501' * 20
+        if bull_a or bear_a:
+            msg += '\n\n<b>STRAT A</b>'
+            if bull_a: msg += '\n\U0001f7e2 BULL: ' + ', '.join(sorted([x.split(' ')[1] for x in bull_a]))
+            if bear_a: msg += '\n\U0001f534 BEAR: ' + ', '.join(sorted([x.split(' ')[1] for x in bear_a]))
+        if bull_b or bear_b:
+            msg += '\n\n<b>STRAT B</b>'
+            if bull_b: msg += '\n\U0001f7e2 BULL: ' + ', '.join(sorted([x.split(' ')[1] for x in bull_b]))
+            if bear_b: msg += '\n\U0001f534 BEAR: ' + ', '.join(sorted([x.split(' ')[1] for x in bear_b]))
+        url = 'https://api.telegram.org/bot' + CONFIG['TELEGRAM_BOT_TOKEN'] + '/sendMessage'
+        requests.post(url, json={'chat_id': chat_id, 'text': msg, 'parse_mode': 'HTML'}, timeout=10)
+
+    elif '/status' in text:
+        with STATE_LOCK:
+            state_copy = dict(SCAN_STATE)
+            pos_copy   = dict(POSITIONS)
+        ba = sum(1 for s in state_copy.values() if s.get('bias_4h') == 'bull' and s.get('bias_1h') == 'bull')
+        sa = sum(1 for s in state_copy.values() if s.get('bias_4h') == 'bear' and s.get('bias_1h') == 'bear')
+        bb = sum(1 for s in state_copy.values() if s.get('macd_2h', 0) > 0 and s.get('bias_1h') == 'bull')
+        sb = sum(1 for s in state_copy.values() if s.get('macd_2h', 0) < 0 and s.get('bias_1h') == 'bear')
+        now = datetime.now(timezone.utc).strftime('%H:%M UTC')
+        msg = (
+            '\U0001f916 <b>Scalp Bot v3</b> ' + now + '\n'
+            + '\u2501' * 20 + '\n'
+            + '\U0001f4ca Assets: ' + str(len(state_copy)) + '\n'
+            + '\U0001f4cc Positions: ' + str(len(pos_copy)) + '\n'
+            + '\n<b>STRAT A:</b> \U0001f7e2' + str(ba) + ' BULL | \U0001f534' + str(sa) + ' BEAR\n'
+            + '<b>STRAT B:</b> \U0001f7e2' + str(bb) + ' BULL | \U0001f534' + str(sb) + ' BEAR\n'
+            + '\u23f0 Dernier scan: ' + (LAST_SCAN_TIME or 'N/A') + '\n'
+        )
+        url = 'https://api.telegram.org/bot' + CONFIG['TELEGRAM_BOT_TOKEN'] + '/sendMessage'
+        requests.post(url, json={'chat_id': chat_id, 'text': msg, 'parse_mode': 'HTML'}, timeout=10)
 
 # ============================================================================ #
 # FLASK
@@ -487,7 +544,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return jsonify({'bot': 'Scalp Bot v2', 'status': 'running', 'assets': len(CONFIG['SYMBOLS'])})
+    return jsonify({'bot': 'Scalp Bot v3', 'status': 'running', 'assets': len(CONFIG['SYMBOLS'])})
 
 @app.route('/status')
 def status():
@@ -497,26 +554,38 @@ def status():
     assets = []
     for symbol in CONFIG['SYMBOLS']:
         s = state_copy.get(symbol, {})
-        p = pos_copy.get(symbol)
         assets.append({
-            'symbol':      symbol,
-            'bias_3h':     s.get('bias_3h', 'N/A'),
-            'bias_1h':     s.get('bias_1h', 'N/A'),
-            'st_15m':      s.get('st_15m', 'N/A'),
-            'price':       s.get('price', 0),
-            'position':    p,
+            'symbol':  symbol,
+            'bias_4h': s.get('bias_4h', 'N/A'),
+            'bias_1h': s.get('bias_1h', 'N/A'),
+            'macd_2h': s.get('macd_2h', 0),
+            'macd_15m': s.get('macd_15m', 0),
+            'st_15m':  s.get('st_15m', 'N/A'),
+            'price':   s.get('price', 0),
+            'pos_a':   pos_copy.get(symbol + '_A'),
+            'pos_b':   pos_copy.get(symbol + '_B'),
         })
-    return jsonify({
-        'last_scan':       LAST_SCAN_TIME,
-        'active_positions': len(pos_copy),
-        'assets':          assets,
-    })
+    return jsonify({'last_scan': LAST_SCAN_TIME, 'assets': assets})
+
+@app.route('/aligned')
+def aligned():
+    with STATE_LOCK:
+        state_copy = dict(SCAN_STATE)
+    bull_a, bear_a, bull_b, bear_b = [], [], [], []
+    for symbol, s in state_copy.items():
+        b4 = s.get('bias_4h'); b1 = s.get('bias_1h')
+        m2 = s.get('macd_2h', 0); st = s.get('st_15m')
+        entry = {'symbol': symbol, 'price': s.get('price'), 'st_15m': st}
+        if b4 == 'bull' and b1 == 'bull': bull_a.append(entry)
+        if b4 == 'bear' and b1 == 'bear': bear_a.append(entry)
+        if m2 > 0 and b1 == 'bull': bull_b.append(entry)
+        if m2 < 0 and b1 == 'bear': bear_b.append(entry)
+    return jsonify({'strat_a': {'bull': bull_a, 'bear': bear_a}, 'strat_b': {'bull': bull_b, 'bear': bear_b}})
 
 @app.route('/positions')
 def positions():
     with STATE_LOCK:
-        pos_copy = dict(POSITIONS)
-    return jsonify(pos_copy)
+        return jsonify(dict(POSITIONS))
 
 @app.route('/audit')
 def audit():
@@ -525,7 +594,7 @@ def audit():
     if not REDIS_CLIENT:
         return jsonify({'error': 'Redis non connecte'}), 503
     try:
-        raw     = REDIS_CLIENT.lrange('scalp_audit_v2', 0, 999)
+        raw     = REDIS_CLIENT.lrange('scalp_audit_v3', 0, 999)
         entries = [json.loads(e) for e in raw]
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -535,103 +604,6 @@ def audit():
         entries = [e for e in entries if e.get('sym') == sf]
     return jsonify(entries[:limit])
 
-
-
-def handle_telegram_command(message):
-    chat_id = message.get('chat', {}).get('id')
-    text    = message.get('text', '').strip().lower()
-    if not chat_id:
-        return
-
-    if '/aligned' in text:
-        with STATE_LOCK:
-            state_copy = dict(SCAN_STATE)
-        bull = []
-        bear = []
-        for symbol, s in state_copy.items():
-            b3 = s.get('bias_3h')
-            b1 = s.get('bias_1h')
-            st = s.get('st_15m', '?')
-            e  = '🟢' if st == 'buy' else '🔴'
-            price = s.get('price', 0)
-            if b3 == 'bull' and b1 == 'bull':
-                bull.append(f"{e} {symbol.replace('/USDT','')} ${price:.4g}")
-            elif b3 == 'bear' and b1 == 'bear':
-                bear.append(f"{e} {symbol.replace('/USDT','')} ${price:.4g}")
-        now = datetime.now(timezone.utc).strftime('%H:%M UTC')
-        msg = f"📊 <b>Assets alignes</b> — {now}\n"
-        msg += "━" * 20 + "\n"
-        if bull:
-            msg += f"\n🟢 <b>BULL ({len(bull)})</b>\n"
-            msg += "\n".join(sorted(bull)) + "\n"
-        if bear:
-            msg += f"\n🔴 <b>BEAR ({len(bear)})</b>\n"
-            msg += "\n".join(sorted(bear)) + "\n"
-        if not bull and not bear:
-            msg += "\nAucun asset aligne."
-        msg += "\n\n🟢 ST15m buy | 🔴 ST15m sell"
-        url     = f"https://api.telegram.org/bot{CONFIG['TELEGRAM_BOT_TOKEN']}/sendMessage"
-        payload = {'chat_id': chat_id, 'text': msg, 'parse_mode': 'HTML'}
-        try:
-            requests.post(url, json=payload, timeout=10)
-        except Exception as e:
-            logger.error(f"Telegram reply: {e}")
-
-    elif '/status' in text:
-        with STATE_LOCK:
-            state_copy = dict(SCAN_STATE)
-        bull_c = sum(1 for s in state_copy.values() if s.get('bias_3h') == 'bull' and s.get('bias_1h') == 'bull')
-        bear_c = sum(1 for s in state_copy.values() if s.get('bias_3h') == 'bear' and s.get('bias_1h') == 'bear')
-        now = datetime.now(timezone.utc).strftime('%H:%M UTC')
-        msg = (
-            f"🤖 <b>Scalp Bot</b> — {now}\n"
-            f"━" * 20 + "\n"
-            f"📊 Assets: {len(state_copy)}\n"
-            f"🟢 BULL alignes: {bull_c}\n"
-            f"🔴 BEAR alignes: {bear_c}\n"
-            f"⏰ Dernier scan: {LAST_SCAN_TIME or 'N/A'}\n"
-        )
-        url     = f"https://api.telegram.org/bot{CONFIG['TELEGRAM_BOT_TOKEN']}/sendMessage"
-        payload = {'chat_id': chat_id, 'text': msg, 'parse_mode': 'HTML'}
-        try:
-            requests.post(url, json=payload, timeout=10)
-        except Exception as e:
-            logger.error(f"Telegram reply: {e}")
-
-
-@app.route('/telegram', methods=['POST'])
-def telegram_webhook():
-    data = request.get_json(silent=True)
-    if not data:
-        return jsonify({'ok': True})
-    message = data.get('message') or data.get('edited_message')
-    if message:
-        threading.Thread(target=handle_telegram_command, args=(message,), daemon=True).start()
-    return jsonify({'ok': True})
-
-@app.route('/aligned')
-def aligned():
-    with STATE_LOCK:
-        state_copy = dict(SCAN_STATE)
-    
-    bull = []
-    bear = []
-    for symbol, s in state_copy.items():
-        b3 = s.get('bias_3h')
-        b1 = s.get('bias_1h')
-        if b3 == 'bull' and b1 == 'bull':
-            bull.append({'symbol': symbol, 'price': s.get('price'), 'st_15m': s.get('st_15m')})
-        elif b3 == 'bear' and b1 == 'bear':
-            bear.append({'symbol': symbol, 'price': s.get('price'), 'st_15m': s.get('st_15m')})
-    
-    return jsonify({
-        'bull': sorted(bull, key=lambda x: x['symbol']),
-        'bear': sorted(bear, key=lambda x: x['symbol']),
-        'total_bull': len(bull),
-        'total_bear': len(bear),
-        'last_scan': LAST_SCAN_TIME,
-    })
-
 @app.route('/scan', methods=['POST'])
 def force_scan():
     threading.Thread(target=scan_all, daemon=True).start()
@@ -639,12 +611,23 @@ def force_scan():
 
 @app.route('/reset/<path:symbol>', methods=['POST'])
 def reset_position(symbol):
-    sym = symbol.replace('-', '/').upper()
+    sym  = symbol.replace('-', '/').upper()
+    strat = request.args.get('strat', 'A')
+    key  = sym + '_' + strat
     with STATE_LOCK:
-        if sym in POSITIONS:
-            del POSITIONS[sym]
-            return jsonify({'status': f'position {sym} reset'})
-    return jsonify({'status': 'pas de position active'}), 404
+        if key in POSITIONS:
+            del POSITIONS[key]
+            return jsonify({'status': 'reset ' + key})
+    return jsonify({'status': 'pas de position'}), 404
+
+@app.route('/telegram', methods=['POST'])
+def telegram_webhook():
+    data = request.get_json(silent=True)
+    if not data: return jsonify({'ok': True})
+    message = data.get('message') or data.get('edited_message')
+    if message:
+        threading.Thread(target=handle_telegram_command, args=(message,), daemon=True).start()
+    return jsonify({'ok': True})
 
 # ============================================================================ #
 # DÉMARRAGE
@@ -653,26 +636,29 @@ def reset_position(symbol):
 def send_start_notification():
     now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     msg = (
-        "🤖 <b>[SCALP BOT v2 STARTED]</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📊 Assets: {len(CONFIG['SYMBOLS'])}\n"
-        f"💾 Redis: {'✅' if REDIS_CLIENT else '⚠️ non connecté'}\n\n"
-        "📋 <b>STRATÉGIE:</b>\n\n"
-        "🔵 Filtre 1: Bias 4H (EMA13 vs SMA30)\n"
-        "🔵 Filtre 2: Bias 1H (EMA13 vs SMA30)\n"
-        "🟢 Signal: Flip ST AI 15min (MACD contre-tendance)\n"
-        "📈 Sizing: pyramiding illimité\n"
-        "🛑 SL: swing low → break even\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"⏰ {now}"
+        '\U0001f916 <b>[SCALP BOT v3 STARTED]</b>\n'
+        + '\u2501' * 20 + '\n\n'
+        + '\U0001f4ca Assets: ' + str(len(CONFIG['SYMBOLS'])) + '\n'
+        + '\U0001f4be Redis: ' + ('\u2705' if REDIS_CLIENT else '\u26a0\ufe0f non connecte') + '\n\n'
+        + '\U0001f4cb <b>STRATEGIES:</b>\n\n'
+        + '<b>STRAT A</b>\n'
+        + '\U0001f535 Filtre: Bias 4H (EMA13 vs SMA30)\n'
+        + '\U0001f535 Confirmation: Bias 1H\n'
+        + '\U0001f7e2 Signal: Flip ST AI 15min\n\n'
+        + '<b>STRAT B</b>\n'
+        + '\U0001f535 Filtre: MACD 2H direction\n'
+        + '\U0001f535 Confirmation: Bias 1H\n'
+        + '\U0001f7e2 Signal: Flip ST AI 15min\n'
+        + '\U0001f4ca TP: alerte retournement MACD 2H\n\n'
+        + '\u2501' * 20 + '\n'
+        + '\u23f0 ' + now
     )
     send_telegram(msg)
 
 if __name__ == '__main__':
-    logger.info("Demarrage Scalp Bot v2...")
+    logger.info('Demarrage Scalp Bot v3...')
     init_redis()
     send_start_notification()
     threading.Thread(target=scanner_loop, daemon=True).start()
-    threading.Thread(target=hourly_report_scheduler, daemon=True).start()
-    threading.Thread(target=hourly_report_scheduler, daemon=True).start()
+    threading.Thread(target=hourly_scheduler, daemon=True).start()
     app.run(host='0.0.0.0', port=CONFIG['PORT'])
