@@ -55,6 +55,7 @@ POSITIONS: dict = {}
 LAST_SIGNAL: dict = {}
 PREP_BUFFER: list = []
 SCAN_STATE:  dict = {}
+ST_CONTEXT_15M: dict = {}  # symbol -> 'buy' | 'sell' | None
 STATE_LOCK = threading.Lock()
 LAST_SCAN_TIME = None
 REDIS_CLIENT = None
@@ -321,9 +322,13 @@ def process_symbol(symbol):
         flip_sell = (prev_15m == 'buy'  and curr_15m == 'sell') or (prev2_15m == 'buy' and prev_15m == 'sell' and curr_15m == 'sell')
         flip      = flip_buy or flip_sell
 
-        # Conditions Strat A
-        a_long  = bias_4h == 'bull' and bias_1h == 'bull'
-        a_short = bias_4h == 'bear' and bias_1h == 'bear'
+        # ST Context 15min (recu via webhook TradingView)
+        with STATE_LOCK:
+            ctx_15m = ST_CONTEXT_15M.get(symbol)
+
+        # Conditions Strat A: Bias 4H + ST Context 15min zone
+        a_long  = bias_4h == 'bull' and ctx_15m == 'buy'
+        a_short = bias_4h == 'bear' and ctx_15m == 'sell'
 
         # Conditions Strat B
         b_long  = macd_2h > 0 and bias_1h == 'bull'
@@ -334,14 +339,15 @@ def process_symbol(symbol):
         macd_2h_flip_bull = macd_2h_p < 0 and macd_2h > 0
 
         # Debug log
-        reason_a = 'no flip' if not flip else ('LONG A' if flip_buy and a_long and macd_15m < 0 else 'SHORT A' if flip_sell and a_short and macd_15m > 0 else 'filtre A')
+        reason_a = 'no flip' if not flip else ('LONG A' if flip_buy and a_long else 'SHORT A' if flip_sell and a_short else 'filtre A (B4H=' + bias_4h + ' CTX=' + str(ctx_15m) + ')')
         reason_b = 'no flip' if not flip else ('LONG B' if flip_buy and b_long and macd_15m < 0 else 'SHORT B' if flip_sell and b_short and macd_15m > 0 else 'filtre B')
-        logger.info('[SCAN] ' + symbol.ljust(20) + ' B4H=' + bias_4h + ' B1H=' + bias_1h + ' M2H=' + ('+' if macd_2h >= 0 else '') + str(round(macd_2h, 4)) + ' M15m=' + ('+' if macd_15m >= 0 else '') + str(round(macd_15m, 4)) + ' ST=' + curr_15m + ' flip=' + str(flip) + ' A:' + reason_a + ' B:' + reason_b)
+        logger.info('[SCAN] ' + symbol.ljust(20) + ' B4H=' + bias_4h + ' CTX15m=' + str(ctx_15m) + ' M2H=' + ('+' if macd_2h >= 0 else '') + str(round(macd_2h, 4)) + ' M15m=' + ('+' if macd_15m >= 0 else '') + str(round(macd_15m, 4)) + ' ST=' + curr_15m + ' flip=' + str(flip) + ' A:' + reason_a + ' B:' + reason_b)
 
         # Update scan state
         with STATE_LOCK:
             SCAN_STATE[symbol] = {
                 'bias_4h': bias_4h, 'bias_1h': bias_1h,
+                'ctx_15m': ST_CONTEXT_15M.get(symbol),
                 'macd_2h': round(macd_2h, 6), 'macd_15m': round(macd_15m, 6),
                 'st_15m': curr_15m, 'price': price,
                 'ts': datetime.now(timezone.utc).isoformat(),
@@ -374,7 +380,7 @@ def process_symbol(symbol):
 
         # Signaux
         for strat, sig_long, sig_short, kw in [
-            ('A', flip_buy and a_long  and macd_15m < 0, flip_sell and a_short and macd_15m > 0, {'bias_4h': bias_4h, 'bias_1h': bias_1h, 'macd_15m': macd_15m}),
+            ('A', flip_buy and a_long, flip_sell and a_short, {'bias_4h': bias_4h, 'bias_1h': bias_1h, 'macd_2h': ctx_15m, 'macd_15m': macd_15m}),
             ('B', flip_buy and b_long  and macd_15m < 0, flip_sell and b_short and macd_15m > 0, {'bias_1h': bias_1h, 'macd_2h': macd_2h, 'macd_15m': macd_15m}),
         ]:
             signal = 'LONG' if sig_long else ('SHORT' if sig_short else None)
@@ -582,6 +588,51 @@ app = Flask(__name__)
 @app.route('/')
 def home():
     return jsonify({'bot': 'Scalp Bot v3', 'status': 'running', 'assets': len(CONFIG['SYMBOLS'])})
+
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Reçoit le ST Context 15min depuis TradingView."""
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'ok': False}), 400
+
+    raw_symbol  = data.get('symbol', '')
+    alert_type  = data.get('type', '').lower()
+    tf          = data.get('tf', '').lower()
+    val         = str(data.get('value', '')).strip().lower()
+    price       = data.get('price', 0)
+
+    # Normaliser le symbole: BTCUSDT -> BTC/USDT
+    symbol = raw_symbol.upper()
+    if '/' not in symbol:
+        for q in ['USDT', 'USDC']:
+            if symbol.endswith(q):
+                symbol = symbol[:-len(q)] + '/' + q
+                break
+
+    if symbol not in CONFIG['SYMBOLS']:
+        return jsonify({'ok': False, 'reason': 'not_in_watchlist'}), 200
+
+    if alert_type == 'st_context' and tf == '15m':
+        ctx_val = None
+        if val in ('buy', 'sell'):
+            ctx_val = val
+        else:
+            try:
+                fval = float(val)
+                if fval < -1.96:   ctx_val = 'buy'
+                elif fval > 1.96:  ctx_val = 'sell'
+                else:              ctx_val = None
+            except (ValueError, TypeError):
+                pass
+
+        with STATE_LOCK:
+            ST_CONTEXT_15M[symbol] = ctx_val
+        logger.info('[WEBHOOK] ' + symbol + ' ST Context 15min: ' + str(ctx_val) + ' (val=' + val + ')')
+        return jsonify({'ok': True, 'symbol': symbol, 'ctx_15m': ctx_val}), 200
+
+    return jsonify({'ok': False, 'reason': 'unknown_type'}), 200
 
 @app.route('/status')
 def status():
