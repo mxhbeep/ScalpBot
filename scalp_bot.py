@@ -1,6 +1,6 @@
 """
 SCALP BOT v3 — Double Strategy
-Stratégie A : Bias 2H + ST Context 15min + flip ST AI 15min
+Stratégie A : Bias 4H + ST Context 15min + flip ST AI 15min
 Stratégie B : MACD 2H direction + Bias 1H + MACD 15min neg/pos + flip ST 15min
               TP partiel alerte sur retournement MACD 2H
 Pyramiding illimité, SL swing low -> break even
@@ -239,7 +239,7 @@ def format_entry_msg(symbol, direction, price, avg_price, sl, entry_count, strat
     ]
     if strat == 'A' and bias_4h:
         e4 = '\U0001f7e2' if bias_4h == 'bull' else '\U0001f534'
-        lines.append(e4 + ' Bias 2H: ' + bias_4h.upper())
+        lines.append(e4 + ' Bias 4H: ' + bias_4h.upper())
     elif strat == 'B' and macd_2h is not None:
         m2h_str = ('+' if macd_2h >= 0 else '') + str(round(macd_2h, 4))
         lines.append('\U0001f4ca MACD 2H: ' + m2h_str)
@@ -327,9 +327,9 @@ def process_symbol(symbol):
         with STATE_LOCK:
             ctx_15m = ST_CONTEXT_15M.get(symbol)
 
-        # Conditions Strat A: Bias 2H + ST Context 15min zone
-        a_long  = bias_2h == 'bull' and ctx_15m == 'buy'
-        a_short = bias_2h == 'bear' and ctx_15m == 'sell'
+        # Conditions Strat A: Bias 4H + ST Context 15min zone
+        a_long  = bias_4h == 'bull' and ctx_15m == 'buy'
+        a_short = bias_4h == 'bear' and ctx_15m == 'sell'
 
         # Conditions Strat B
         b_long  = macd_2h > 0 and bias_1h == 'bull'
@@ -340,9 +340,9 @@ def process_symbol(symbol):
         macd_2h_flip_bull = macd_2h_p < 0 and macd_2h > 0
 
         # Debug log
-        reason_a = 'no flip' if not flip else ('LONG A' if flip_buy and a_long else 'SHORT A' if flip_sell and a_short else 'filtre A (B2H=' + bias_2h + ' CTX=' + str(ctx_15m) + ')')
+        reason_a = 'no flip' if not flip else ('LONG A' if flip_buy and a_long else 'SHORT A' if flip_sell and a_short else 'filtre A (B4H=' + bias_4h + ' CTX=' + str(ctx_15m) + ')')
         reason_b = 'no flip' if not flip else ('LONG B' if flip_buy and b_long and macd_15m < 0 else 'SHORT B' if flip_sell and b_short and macd_15m > 0 else 'filtre B')
-        logger.info('[SCAN] ' + symbol.ljust(20) + ' B2H=' + bias_2h + ' CTX15m=' + str(ctx_15m) + ' M2H=' + ('+' if macd_2h >= 0 else '') + str(round(macd_2h, 4)) + ' M15m=' + ('+' if macd_15m >= 0 else '') + str(round(macd_15m, 4)) + ' ST=' + curr_15m + ' flip=' + str(flip) + ' A:' + reason_a + ' B:' + reason_b)
+        logger.info('[SCAN] ' + symbol.ljust(20) + ' B4H=' + bias_4h + ' CTX15m=' + str(ctx_15m) + ' M2H=' + ('+' if macd_2h >= 0 else '') + str(round(macd_2h, 4)) + ' M15m=' + ('+' if macd_15m >= 0 else '') + str(round(macd_15m, 4)) + ' ST=' + curr_15m + ' flip=' + str(flip) + ' A:' + reason_a + ' B:' + reason_b)
 
         # Update scan state
         with STATE_LOCK:
@@ -381,7 +381,7 @@ def process_symbol(symbol):
 
         # Signaux
         for strat, sig_long, sig_short, kw in [
-            ('A', flip_buy and a_long, flip_sell and a_short, {'bias_4h': bias_2h, 'bias_1h': bias_1h, 'macd_2h': ctx_15m, 'macd_15m': macd_15m}),
+            ('A', flip_buy and a_long, flip_sell and a_short, {'bias_4h': bias_4h, 'bias_1h': bias_1h, 'macd_2h': ctx_15m, 'macd_15m': macd_15m}),
             ('B', flip_buy and b_long  and macd_15m < 0, flip_sell and b_short and macd_15m > 0, {'bias_1h': bias_1h, 'macd_2h': macd_2h, 'macd_15m': macd_15m}),
         ]:
             signal = 'LONG' if sig_long else ('SHORT' if sig_short else None)
@@ -734,7 +734,7 @@ def send_start_notification():
         + '\U0001f4be Redis: ' + ('\u2705' if REDIS_CLIENT else '\u26a0\ufe0f non connecte') + '\n\n'
         + '\U0001f4cb <b>STRATEGIES:</b>\n\n'
         + '<b>STRAT A</b>\n'
-        + '\U0001f535 Filtre: Bias 2H (EMA13 vs SMA30)\n'
+        + '\U0001f535 Filtre: Bias 4H (EMA13 vs SMA30)\n'
         + '\U0001f535 Zone: ST Context 15min\n'
         + '\U0001f7e2 Signal: Flip ST AI 15min\n\n'
         + '<b>STRAT B</b>\n'
