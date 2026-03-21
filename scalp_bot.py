@@ -35,8 +35,6 @@ CONFIG = {
     ],
     'TELEGRAM_BOT_TOKEN': os.environ.get('TELEGRAM_BOT_TOKEN', ''),
     'TELEGRAM_CHAT_ID':   os.environ.get('TELEGRAM_CHAT_ID', ''),
-    'ST_ATR_LEN':    10,
-    'ST_FACTOR':     3.0,
     'BIAS_EMA_LEN':  13,
     'BIAS_SMA_LEN':  30,
     'SWING_LOOKBACK': 5,
@@ -118,38 +116,75 @@ def calc_macd_histogram(df, fast=12, slow=26, signal=9, candle=-2):
     histogram   = macd_line - signal_line
     return float(histogram.iloc[candle])
 
-def supertrend(df, atr_len=10, factor=3.0):
-    high  = df['high'].copy()
-    low   = df['low'].copy()
-    close = df['close'].copy()
-    prev_close = close.shift(1)
-    tr = pd.concat([
-        high - low,
-        (high - prev_close).abs(),
-        (low  - prev_close).abs()
-    ], axis=1).max(axis=1)
-    atr   = tr.ewm(alpha=1/atr_len, adjust=False).mean()
-    hl2   = (high + low) / 2
-    upper = (hl2 + factor * atr).copy()
-    lower = (hl2 - factor * atr).copy()
-    n     = len(df)
-    trend = pd.Series(np.nan, index=df.index, dtype=float)
+
+def supertrend_ai(df, atr_len=6, min_mult=1.0, max_mult=2.0, step=1.0,
+                  perf_alpha=100, from_cluster='Best', max_iter=100):
+    high  = df['high'].values
+    low   = df['low'].values
+    close = df['close'].values
+    n     = len(close)
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(high[i]-low[i], abs(high[i]-close[i-1]), abs(low[i]-close[i-1]))
+    atr = pd.Series(tr).ewm(alpha=1/atr_len, adjust=False).mean().values
+    hl2 = (high + low) / 2.0
+    factors, f = [], min_mult
+    while f <= max_mult + 1e-9:
+        factors.append(round(f, 10))
+        f += step
+    nf = len(factors)
+    upper_arr  = np.full((n, nf), hl2[0])
+    lower_arr  = np.full((n, nf), hl2[0])
+    trend_arr  = np.zeros((n, nf), dtype=int)
+    output_arr = np.full((n, nf), hl2[0])
+    perf_arr   = np.zeros((n, nf))
+    alpha_perf = 2.0 / (perf_alpha + 1)
+    for i in range(1, n):
+        for k, factor in enumerate(factors):
+            up = hl2[i] + atr[i] * factor
+            dn = hl2[i] - atr[i] * factor
+            if close[i] > upper_arr[i-1, k]:   trend_arr[i, k] = 1
+            elif close[i] < lower_arr[i-1, k]: trend_arr[i, k] = 0
+            else:                               trend_arr[i, k] = trend_arr[i-1, k]
+            upper_arr[i, k] = min(up, upper_arr[i-1, k]) if close[i-1] < upper_arr[i-1, k] else up
+            lower_arr[i, k] = max(dn, lower_arr[i-1, k]) if close[i-1] > lower_arr[i-1, k] else dn
+            output_arr[i, k] = lower_arr[i, k] if trend_arr[i, k] == 1 else upper_arr[i, k]
+            diff = np.sign(close[i-1] - output_arr[i-1, k]) if output_arr[i-1, k] != 0 else 0
+            perf_arr[i, k] = perf_arr[i-1, k] + alpha_perf * ((close[i] - close[i-1]) * diff - perf_arr[i-1, k])
+    perf_final   = perf_arr[-1]
+    factor_final = np.array(factors)
+    centroids    = np.percentile(perf_final, [25, 50, 75])
+    clusters_p = [[], [], []]
+    clusters_f = [[], [], []]
+    for _ in range(max_iter):
+        clusters_p = [[], [], []]
+        clusters_f = [[], [], []]
+        for j, val in enumerate(perf_final):
+            idx = int(np.argmin([abs(val - c) for c in centroids]))
+            clusters_p[idx].append(val)
+            clusters_f[idx].append(factor_final[j])
+        new_c = [np.mean(cp) if cp else 0.0 for cp in clusters_p]
+        if np.max(np.abs(np.array(new_c) - centroids)) < 0.0001:
+            centroids = np.array(new_c)
+            break
+        centroids = np.array(new_c)
+    from_idx = {'Best': 2, 'Average': 1, 'Worst': 0}.get(from_cluster, 2)
+    sorted_idx = np.argsort(centroids)
+    target_idx = sorted_idx[from_idx]
+    target_factor = np.mean(clusters_f[target_idx]) if clusters_f[target_idx] else factors[0]
+    upper_f = lower_f = hl2[0]
+    os_f = 0
     direction = pd.Series('', index=df.index, dtype=str)
     for i in range(1, n):
-        pc = close.iloc[i-1]; cc = close.iloc[i]
-        fu = upper.iloc[i] if (upper.iloc[i] < upper.iloc[i-1] or pc > upper.iloc[i-1]) else upper.iloc[i-1]
-        fl = lower.iloc[i] if (lower.iloc[i] > lower.iloc[i-1] or pc < lower.iloc[i-1]) else lower.iloc[i-1]
-        upper.iloc[i] = fu; lower.iloc[i] = fl
-        if i == 1:
-            trend.iloc[i] = fl; direction.iloc[i] = 'buy'
-        elif trend.iloc[i-1] == upper.iloc[i-1]:
-            if cc > fu: trend.iloc[i] = fl; direction.iloc[i] = 'buy'
-            else:       trend.iloc[i] = fu; direction.iloc[i] = 'sell'
-        else:
-            if cc < fl: trend.iloc[i] = fu; direction.iloc[i] = 'sell'
-            else:       trend.iloc[i] = fl; direction.iloc[i] = 'buy'
+        up = hl2[i] + atr[i] * target_factor
+        dn = hl2[i] - atr[i] * target_factor
+        upper_f = min(up, upper_f) if close[i-1] < upper_f else up
+        lower_f = max(dn, lower_f) if close[i-1] > lower_f else dn
+        prev_os = os_f
+        if close[i] > upper_f:   os_f = 1
+        elif close[i] < lower_f: os_f = 0
+        direction.iloc[i] = 'buy' if os_f == 1 else 'sell'
     return direction
-
 def get_swing_low(df, lookback=5):
     return float(df['low'].iloc[-lookback-2:-2].min())
 
@@ -272,7 +307,7 @@ def process_symbol(symbol):
         macd_2h_p = calc_macd_histogram(df_2h,  CONFIG['MACD_FAST'], CONFIG['MACD_SLOW'], CONFIG['MACD_SIGNAL'], candle=-3)
         macd_15m  = calc_macd_histogram(df_15m, CONFIG['MACD_FAST'], CONFIG['MACD_SLOW'], CONFIG['MACD_SIGNAL'], candle=-2)
 
-        dir_15m  = supertrend(df_15m, CONFIG['ST_ATR_LEN'], CONFIG['ST_FACTOR'])
+        dir_15m  = supertrend_ai(df_15m)
         curr_15m  = dir_15m.iloc[-2]
         prev_15m  = dir_15m.iloc[-3]
         prev2_15m = dir_15m.iloc[-4]
