@@ -22,16 +22,20 @@ from flask import Flask, jsonify, request
 
 CONFIG = {
     'SYMBOLS': [
-        # Majors
-        'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT', 'DOGE/USDT',
-        # DeFi & Alts
-        'AVAX/USDT', 'LINK/USDT', 'AAVE/USDT', 'SUI/USDT', 'HYPE/USDT',
-        # IA & Tech
-        'FET/USDT', 'VIRTUAL/USDT',
-        # Memes
-        'PEPE/USDT', 'WIF/USDT', 'BONK/USDT', 'FLOKI/USDT',
-        # Wildcard
-        'INJ/USDT', 'TON/USDT', 'ARB/USDT', 'MOVE/USDT',
+        # Tier 1 - Majors
+        'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'LINK/USDT', 'TIA/USDT',
+        # Tier 2 - IA & Tech
+        'FET/USDT', 'RENDER/USDT', 'ZK/USDT',
+        # Tier 3 - DeFi & RWA
+        'ONDO/USDT', 'PENDLE/USDT', 'CRV/USDT', 'CVX/USDT',
+        # Tier 4 - Memes
+        'PEPE/USDT', 'WIF/USDT', 'DOGE/USDT', 'BONK/USDT',
+        # Tier 5 - Wildcard
+        'VIRTUAL/USDT', 'HYPE/USDT',
+        # Tier 6 - Expansions
+        'AAVE/USDT', 'NEAR/USDT', 'PYTH/USDT', 'STX/USDT', 'ZRO/USDT',
+        # Tier 7 - Nouveaux
+        'SUI/USDT', 'ENA/USDT', 'ARB/USDT', 'AVAX/USDT',
     ],
     'TELEGRAM_BOT_TOKEN': os.environ.get('TELEGRAM_BOT_TOKEN', ''),
     'TELEGRAM_CHAT_ID':   os.environ.get('TELEGRAM_CHAT_ID', ''),
