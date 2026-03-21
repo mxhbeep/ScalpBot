@@ -29,7 +29,7 @@ CONFIG = {
         # IA & Tech
         'FET/USDT', 'VIRTUAL/USDT',
         # Memes
-        'PEPE/USDT', 'WIF/USDT', 'BONK/USDT', 'FLOKI/USDT', 'POPCAT/USDT',
+        'PEPE/USDT', 'WIF/USDT', 'BONK/USDT', 'FLOKI/USDT',
         # Wildcard
         'INJ/USDT', 'TON/USDT', 'ARB/USDT', 'MOVE/USDT',
     ],
@@ -257,9 +257,9 @@ def format_tp_msg(symbol, direction, price, strat, macd_2h):
 
 def process_symbol(symbol):
     try:
-        df_4h  = fetch_ohlcv(symbol, '4H',  limit=200)
-        df_2h  = fetch_ohlcv(symbol, '2H',  limit=100)
-        df_1h  = fetch_ohlcv(symbol, '1H',  limit=200)
+        df_4h  = fetch_ohlcv(symbol, '4h',  limit=200)
+        df_2h  = fetch_ohlcv(symbol, '2h',  limit=100)
+        df_1h  = fetch_ohlcv(symbol, '1h',  limit=200)
         df_15m = fetch_ohlcv(symbol, '15m', limit=250)
 
         if df_4h is None or df_2h is None or df_1h is None or df_15m is None: return
