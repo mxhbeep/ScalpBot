@@ -1,6 +1,6 @@
 """
 SCALP BOT v3 — Double Strategy
-Stratégie A : Bias 4H + Bias 1H + MACD 15min neg/pos + flip ST 15min
+Stratégie A : Bias 4H + ST Context 15min + flip ST AI 15min
 Stratégie B : MACD 2H direction + Bias 1H + MACD 15min neg/pos + flip ST 15min
               TP partiel alerte sur retournement MACD 2H
 Pyramiding illimité, SL swing low -> break even
@@ -497,7 +497,7 @@ def send_hourly_aligned():
     msg = '\U0001f4ca <b>Aligned Report</b> ' + now + '\n' + '\u2501' * 20
 
     if bull_a or bear_a:
-        msg += '\n\n<b>STRAT A (Bias 4H+1H)</b>'
+        msg += '\n\n<b>STRAT A (Bias 4H + ST Context 15min)</b>'
         if bull_a: msg += '\n\U0001f7e2 BULL (' + str(len(bull_a)) + '):\n' + '\n'.join(sorted(bull_a))
         if bear_a: msg += '\n\U0001f534 BEAR (' + str(len(bear_a)) + '):\n' + '\n'.join(sorted(bear_a))
 
@@ -731,7 +731,7 @@ def send_start_notification():
         + '\U0001f4cb <b>STRATEGIES:</b>\n\n'
         + '<b>STRAT A</b>\n'
         + '\U0001f535 Filtre: Bias 4H (EMA13 vs SMA30)\n'
-        + '\U0001f535 Confirmation: Bias 1H\n'
+        + '\U0001f535 Zone: ST Context 15min\n'
         + '\U0001f7e2 Signal: Flip ST AI 15min\n\n'
         + '<b>STRAT B</b>\n'
         + '\U0001f535 Filtre: MACD 2H direction\n'
