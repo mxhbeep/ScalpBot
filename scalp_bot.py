@@ -105,6 +105,7 @@ LAST_SIGNAL: dict = {}
 PREP_BUFFER: list = []
 SCAN_STATE:  dict = {}
 ST_CONTEXT_15M: dict = {}  # symbol -> 'buy' | 'sell' | None
+ST_CONTEXT_1H:  dict = {}  # symbol -> 'buy' | 'sell' | None
 STATE_LOCK = threading.Lock()
 LAST_SCAN_TIME = None
 REDIS_CLIENT = None
@@ -372,9 +373,10 @@ def process_symbol(symbol):
         flip_sell = (prev_15m == 'buy'  and curr_15m == 'sell') or (prev2_15m == 'buy' and prev_15m == 'sell' and curr_15m == 'sell')
         flip      = flip_buy or flip_sell
 
-        # ST Context 15min (recu via webhook TradingView)
+        # ST Context (recu via webhook TradingView)
         with STATE_LOCK:
             ctx_15m = ST_CONTEXT_15M.get(symbol)
+            ctx_1h  = ST_CONTEXT_1H.get(symbol)
 
         # Conditions Strat A: Bias 4H + ST Context 15min zone
         a_long  = bias_4h == 'bull' and ctx_15m == 'buy'
@@ -398,6 +400,7 @@ def process_symbol(symbol):
             SCAN_STATE[symbol] = {
                 'bias_4h': bias_4h, 'bias_2h': bias_2h, 'bias_1h': bias_1h,
                 'ctx_15m': ST_CONTEXT_15M.get(symbol),
+                'ctx_1h': ST_CONTEXT_1H.get(symbol),
                 'macd_2h': round(macd_2h, 6), 'macd_15m': round(macd_15m, 6),
                 'st_15m': curr_15m, 'price': price,
                 'ts': datetime.now(timezone.utc).isoformat(),
@@ -431,7 +434,7 @@ def process_symbol(symbol):
         # Signaux
         for strat, sig_long, sig_short, kw in [
             ('A', flip_buy and a_long, flip_sell and a_short, {'bias_4h': bias_4h, 'bias_1h': bias_1h, 'macd_2h': ctx_15m, 'macd_15m': macd_15m}),
-            ('B', flip_buy and b_long  and macd_15m < 0, flip_sell and b_short and macd_15m > 0, {'bias_1h': bias_1h, 'macd_2h': macd_2h, 'macd_15m': macd_15m}),
+            ('B', flip_buy and b_long  and macd_15m < 0, flip_sell and b_short and macd_15m > 0, {'bias_1h': bias_1h, 'macd_2h': macd_2h, 'macd_15m': macd_15m, 'ctx_1h': ctx_1h}),
         ]:
             signal = 'LONG' if sig_long else ('SHORT' if sig_short else None)
             if not signal: continue
@@ -444,6 +447,12 @@ def process_symbol(symbol):
                     pos = None
 
                 if pos is None:
+                    # Premiere entree Strat B: ctx_1h obligatoire
+                    if strat == 'B':
+                        ctx_1h_needed = 'buy' if signal == 'LONG' else 'sell'
+                        if kw.get('ctx_1h') != ctx_1h_needed:
+                            logger.info('[STRAT B] ' + signal + ' ' + symbol + ' filtre: ctx_1h=' + str(kw.get('ctx_1h')) + ' requis=' + ctx_1h_needed)
+                            continue
                     POSITIONS[pos_key] = {
                         'direction': signal,
                         'entries': [{'price': price, 'ts': datetime.now(timezone.utc).isoformat()}],
@@ -667,7 +676,7 @@ def webhook():
     if symbol not in CONFIG['SYMBOLS']:
         return jsonify({'ok': False, 'reason': 'not_in_watchlist'}), 200
 
-    if alert_type == 'st_context' and tf == '15m':
+    if alert_type == 'st_context' and tf in ('15m', '1h'):
         ctx_val = None
         if val in ('buy', 'sell'):
             ctx_val = val
@@ -681,9 +690,12 @@ def webhook():
                 pass
 
         with STATE_LOCK:
-            ST_CONTEXT_15M[symbol] = ctx_val
-        logger.info('[WEBHOOK] ' + symbol + ' ST Context 15min: ' + str(ctx_val) + ' (val=' + val + ')')
-        return jsonify({'ok': True, 'symbol': symbol, 'ctx_15m': ctx_val}), 200
+            if tf == '15m':
+                ST_CONTEXT_15M[symbol] = ctx_val
+            else:
+                ST_CONTEXT_1H[symbol] = ctx_val
+        logger.info('[WEBHOOK] ' + symbol + ' ST Context ' + tf + ': ' + str(ctx_val) + ' (val=' + val + ')')
+        return jsonify({'ok': True, 'symbol': symbol, 'ctx': ctx_val, 'tf': tf}), 200
 
     return jsonify({'ok': False, 'reason': 'unknown_type'}), 200
 
