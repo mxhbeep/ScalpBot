@@ -557,12 +557,12 @@ def send_hourly_aligned():
     msg = '\U0001f4ca <b>Aligned Report</b> ' + now + '\n' + '\u2501' * 20
 
     if bull_a or bear_a:
-        msg += '\n\n<b>STRAT A (Bias 2H + ST Context 15min)</b>'
+        msg += '\n\n<b>STRAT A (Bias 4H + ST Context 15min)</b>'
         if bull_a: msg += '\n\U0001f7e2 BULL (' + str(len(bull_a)) + '):\n' + '\n'.join(sorted(bull_a))
         if bear_a: msg += '\n\U0001f534 BEAR (' + str(len(bear_a)) + '):\n' + '\n'.join(sorted(bear_a))
 
     if bull_b or bear_b:
-        msg += '\n\n<b>STRAT B (MACD 2H+Bias 1H)</b>'
+        msg += '\n\n<b>STRAT B (MACD 2H + Bias 1H + CT 1H)</b>'
         if bull_b: msg += '\n\U0001f7e2 BULL (' + str(len(bull_b)) + '):\n' + '\n'.join(sorted(bull_b))
         if bear_b: msg += '\n\U0001f534 BEAR (' + str(len(bear_b)) + '):\n' + '\n'.join(sorted(bear_b))
 
@@ -800,7 +800,7 @@ def send_start_notification():
         + '\U0001f7e2 Signal: Flip ST AI 15min\n\n'
         + '<b>STRAT B</b>\n'
         + '\U0001f535 Filtre: MACD 2H direction\n'
-        + '\U0001f535 Confirmation: Bias 1H\n'
+        + '\U0001f535 Confirmation: Bias 1H + ST Context 1H (1ere entree)\n'
         + '\U0001f7e2 Signal: Flip ST AI 15min\n'
         + '\U0001f4ca TP: alerte retournement MACD 2H\n\n'
         + '\u2501' * 20 + '\n'
