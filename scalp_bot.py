@@ -419,9 +419,9 @@ def process_symbol(symbol):
 
         # Collecte des assets en preparation (rapport groupé toutes les 15min)
         prep_entries = []
-        if a_long  and macd_15m < 0 and not flip_buy:
+        if a_long  and not flip_buy:
             prep_entries.append({'sym': symbol, 'dir': 'LONG',  'strat': 'A', 'price': price, 'bias_4h': bias_4h, 'bias_1h': bias_1h, 'macd_15m': macd_15m})
-        if a_short and macd_15m > 0 and not flip_sell:
+        if a_short and not flip_sell:
             prep_entries.append({'sym': symbol, 'dir': 'SHORT', 'strat': 'A', 'price': price, 'bias_4h': bias_4h, 'bias_1h': bias_1h, 'macd_15m': macd_15m})
         if b_long  and macd_15m < 0 and not flip_buy:
             prep_entries.append({'sym': symbol, 'dir': 'LONG',  'strat': 'B', 'price': price, 'bias_1h': bias_1h, 'macd_2h': macd_2h, 'macd_15m': macd_15m})
@@ -433,7 +433,7 @@ def process_symbol(symbol):
 
         # Signaux
         for strat, sig_long, sig_short, kw in [
-            ('A', flip_buy and a_long, flip_sell and a_short, {'bias_4h': bias_4h, 'bias_1h': bias_1h, 'macd_2h': ctx_15m, 'macd_15m': macd_15m}),
+            ('A', flip_buy and a_long and macd_15m < 0, flip_sell and a_short and macd_15m > 0, {'bias_4h': bias_4h, 'bias_1h': bias_1h, 'macd_2h': ctx_15m, 'macd_15m': macd_15m}),
             ('B', flip_buy and b_long  and macd_15m < 0, flip_sell and b_short and macd_15m > 0, {'bias_1h': bias_1h, 'macd_2h': macd_2h, 'macd_15m': macd_15m, 'ctx_1h': ctx_1h}),
         ]:
             signal = 'LONG' if sig_long else ('SHORT' if sig_short else None)
