@@ -1,8 +1,6 @@
 """
-SCALP BOT v3 — Double Strategy
+SCALP BOT v3 — Stratégie A
 Stratégie A : Bias 4H + ST Context 15min + flip ST AI 15min
-Stratégie B : MACD 2H direction + Bias 1H + MACD 15min neg/pos + flip ST 15min
-              TP partiel alerte sur retournement MACD 2H
 Pyramiding illimité, SL swing low -> break even
 """
 
@@ -105,7 +103,6 @@ LAST_SIGNAL: dict = {}
 PREP_BUFFER: list = []
 SCAN_STATE:  dict = {}
 ST_CONTEXT_15M: dict = {}  # symbol -> 'buy' | 'sell' | None
-ST_CONTEXT_1H:  dict = {}  # symbol -> 'buy' | 'sell' | None
 STATE_LOCK = threading.Lock()
 LAST_SCAN_TIME = None
 REDIS_CLIENT = None
@@ -271,7 +268,7 @@ def send_telegram(msg):
     except Exception as e:
         logger.error('Telegram: ' + str(e))
 
-def format_entry_msg(symbol, direction, price, avg_price, sl, entry_count, strat, bias_4h=None, bias_1h=None, macd_2h=None, macd_15m=None):
+def format_entry_msg(symbol, direction, price, avg_price, sl, entry_count, strat, bias_4h=None, macd_15m=None):
     emoji = '\U0001f7e2' if direction == 'LONG' else '\U0001f534'
     sl_label = 'Swing low/high' if entry_count == 1 else 'Break even'
     now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
@@ -290,9 +287,6 @@ def format_entry_msg(symbol, direction, price, avg_price, sl, entry_count, strat
     if strat == 'A' and bias_4h:
         e4 = '\U0001f7e2' if bias_4h == 'bull' else '\U0001f534'
         lines.append(e4 + ' Bias 4H: ' + bias_4h.upper())
-    elif strat == 'B' and macd_2h is not None:
-        m2h_str = ('+' if macd_2h >= 0 else '') + str(round(macd_2h, 4))
-        lines.append('\U0001f4ca MACD 2H: ' + m2h_str)
     if bias_1h:
         e1 = '\U0001f7e2' if bias_1h == 'bull' else '\U0001f534'
         lines.append(e1 + ' Bias 1H: ' + bias_1h.upper())
@@ -304,7 +298,7 @@ def format_entry_msg(symbol, direction, price, avg_price, sl, entry_count, strat
         lines.append('\U0001f4c8 Positions accumulees: ' + str(entry_count))
     return '\n'.join(lines)
 
-def format_prep_msg(symbol, direction, price, strat, bias_4h=None, bias_1h=None, macd_2h=None, macd_15m=None):
+def format_prep_msg(symbol, direction, price, strat, bias_4h=None, macd_15m=None):
     emoji = '\U0001f7e1' if direction == 'LONG' else '\U0001f7e0'
     now = datetime.now(timezone.utc).strftime('%H:%M UTC')
     lines = [
@@ -315,9 +309,6 @@ def format_prep_msg(symbol, direction, price, strat, bias_4h=None, bias_1h=None,
     if strat == 'A' and bias_4h:
         e4 = '\U0001f7e2' if bias_4h == 'bull' else '\U0001f534'
         lines.append(e4 + ' Bias 4H: ' + bias_4h.upper())
-    elif strat == 'B' and macd_2h is not None:
-        m2h_str = ('+' if macd_2h >= 0 else '') + str(round(macd_2h, 4))
-        lines.append('\U0001f4ca MACD 2H: ' + m2h_str)
     if bias_1h:
         e1 = '\U0001f7e2' if bias_1h == 'bull' else '\U0001f534'
         lines.append(e1 + ' Bias 1H: ' + bias_1h.upper())
@@ -327,40 +318,17 @@ def format_prep_msg(symbol, direction, price, strat, bias_4h=None, bias_1h=None,
     lines.append('\u23f3 En attente flip ST AI 15min ' + direction)
     return '\n'.join(lines)
 
-def format_tp_msg(symbol, direction, price, strat, macd_2h):
-    now = datetime.now(timezone.utc).strftime('%H:%M UTC')
-    flip_dir = 'BEAR' if direction == 'LONG' else 'BULL'
-    m2h_str = ('+' if macd_2h >= 0 else '') + str(round(macd_2h, 4))
-    lines = [
-        '\U0001f4ca <b>[TP PARTIEL | STRAT ' + strat + '] ' + symbol + '</b>',
-        '\u2501' * 20,
-        '\U0001f4b0 Price: $' + str(round(price, 6)),
-        '\U0001f4ca MACD 2H flip ' + flip_dir + ': ' + m2h_str,
-        '\u2705 TP partiel conseille sur position ' + direction,
-        '\u23f0 ' + now,
-    ]
-    return '\n'.join(lines)
-
-# ============================================================================ #
-# PROCESS SYMBOL
-# ============================================================================ #
-
 def process_symbol(symbol):
     try:
         df_4h  = fetch_ohlcv(symbol, '4h',  limit=200)
-        df_2h  = fetch_ohlcv(symbol, '2h',  limit=100)
         df_1h  = fetch_ohlcv(symbol, '1h',  limit=200)
         df_15m = fetch_ohlcv(symbol, '15m', limit=250)
 
-        if df_4h is None or df_2h is None or df_1h is None or df_15m is None: return
-        if len(df_4h) < 35 or len(df_2h) < 35 or len(df_1h) < 35 or len(df_15m) < 50: return
+        if df_4h is None or df_1h is None or df_15m is None: return
+        if len(df_4h) < 35 or len(df_1h) < 35 or len(df_15m) < 50: return
 
         # Indicateurs
         bias_4h   = calc_bias(df_4h, CONFIG['BIAS_EMA_LEN'], CONFIG['BIAS_SMA_LEN'])
-        bias_2h   = calc_bias(df_2h, CONFIG['BIAS_EMA_LEN'], CONFIG['BIAS_SMA_LEN'])
-        bias_1h   = calc_bias(df_1h, CONFIG['BIAS_EMA_LEN'], CONFIG['BIAS_SMA_LEN'])
-        macd_2h   = calc_macd_histogram(df_2h,  CONFIG['MACD_FAST'], CONFIG['MACD_SLOW'], CONFIG['MACD_SIGNAL'], candle=-2)
-        macd_2h_p = calc_macd_histogram(df_2h,  CONFIG['MACD_FAST'], CONFIG['MACD_SLOW'], CONFIG['MACD_SIGNAL'], candle=-3)
         macd_15m  = calc_macd_histogram(df_15m, CONFIG['MACD_FAST'], CONFIG['MACD_SLOW'], CONFIG['MACD_SIGNAL'], candle=-2)
 
         dir_15m  = supertrend_ai(df_15m)
@@ -376,46 +344,27 @@ def process_symbol(symbol):
         # ST Context (recu via webhook TradingView)
         with STATE_LOCK:
             ctx_15m = ST_CONTEXT_15M.get(symbol)
-            ctx_1h  = ST_CONTEXT_1H.get(symbol)
 
         # Conditions Strat A: Bias 4H + ST Context 15min zone
         a_long  = bias_4h == 'bull' and ctx_15m == 'buy'
         a_short = bias_4h == 'bear' and ctx_15m == 'sell'
 
-        # Conditions Strat B
-        b_long  = macd_2h > 0 and bias_1h == 'bull'
-        b_short = macd_2h < 0 and bias_1h == 'bear'
-
-        # Retournement MACD 2H (pour TP)
-        macd_2h_flip_bear = macd_2h_p > 0 and macd_2h < 0
-        macd_2h_flip_bull = macd_2h_p < 0 and macd_2h > 0
 
         # Debug log
         reason_a = 'no flip' if not flip else ('LONG A' if flip_buy and a_long else 'SHORT A' if flip_sell and a_short else 'filtre A (B4H=' + bias_4h + ' CTX=' + str(ctx_15m) + ')')
-        reason_b = 'no flip' if not flip else ('LONG B' if flip_buy and b_long and macd_15m < 0 else 'SHORT B' if flip_sell and b_short and macd_15m > 0 else 'filtre B')
-        logger.info('[SCAN] ' + symbol.ljust(20) + ' B4H=' + bias_4h + ' CTX15m=' + str(ctx_15m) + ' M2H=' + ('+' if macd_2h >= 0 else '') + str(round(macd_2h, 4)) + ' M15m=' + ('+' if macd_15m >= 0 else '') + str(round(macd_15m, 4)) + ' ST=' + curr_15m + ' flip=' + str(flip) + ' A:' + reason_a + ' B:' + reason_b)
+        logger.info('[SCAN] ' + symbol.ljust(20) + ' B4H=' + bias_4h + ' CTX15m=' + str(ctx_15m) + ' M15m=' + ('+' if macd_15m >= 0 else '') + str(round(macd_15m, 4)) + ' ST=' + curr_15m + ' flip=' + str(flip) + ' A:' + reason_a)
 
         # Update scan state
         with STATE_LOCK:
             SCAN_STATE[symbol] = {
-                'bias_4h': bias_4h, 'bias_2h': bias_2h, 'bias_1h': bias_1h,
+                'bias_4h': bias_4h,
                 'ctx_15m': ST_CONTEXT_15M.get(symbol),
-                'ctx_1h': ST_CONTEXT_1H.get(symbol),
-                'macd_2h': round(macd_2h, 6), 'macd_15m': round(macd_15m, 6),
+                'macd_15m': round(macd_15m, 6),
                 'st_15m': curr_15m, 'price': price,
                 'ts': datetime.now(timezone.utc).isoformat(),
             }
 
-        # TP partiel Strat B
         now_ts = time.time()
-        with STATE_LOCK:
-            pos_b = POSITIONS.get(symbol + '_B')
-        if pos_b:
-            d = pos_b['direction']
-            if (d == 'LONG' and macd_2h_flip_bear) or (d == 'SHORT' and macd_2h_flip_bull):
-                send_telegram(format_tp_msg(symbol, d, price, 'B', macd_2h))
-                logger.info('[TP B] ' + symbol + ' ' + d + ' MACD 2H flip')
-                audit_log({'ts': datetime.now(timezone.utc).isoformat(), 'sym': symbol, 'event': 'tp_partiel_B', 'direction': d, 'price': price})
 
         # Collecte des assets en preparation (rapport groupé toutes les 15min)
         prep_entries = []
@@ -423,18 +372,13 @@ def process_symbol(symbol):
             prep_entries.append({'sym': symbol, 'dir': 'LONG',  'strat': 'A', 'price': price, 'bias_4h': bias_4h, 'bias_1h': bias_1h, 'macd_15m': macd_15m})
         if a_short and not flip_sell:
             prep_entries.append({'sym': symbol, 'dir': 'SHORT', 'strat': 'A', 'price': price, 'bias_4h': bias_4h, 'bias_1h': bias_1h, 'macd_15m': macd_15m})
-        if b_long  and macd_15m < 0 and not flip_buy:
-            prep_entries.append({'sym': symbol, 'dir': 'LONG',  'strat': 'B', 'price': price, 'bias_1h': bias_1h, 'macd_2h': macd_2h, 'macd_15m': macd_15m})
-        if b_short and macd_15m > 0 and not flip_sell:
-            prep_entries.append({'sym': symbol, 'dir': 'SHORT', 'strat': 'B', 'price': price, 'bias_1h': bias_1h, 'macd_2h': macd_2h, 'macd_15m': macd_15m})
         if prep_entries:
             with STATE_LOCK:
                 PREP_BUFFER.extend(prep_entries)
 
         # Signaux
         for strat, sig_long, sig_short, kw in [
-            ('A', flip_buy and a_long and macd_15m < 0, flip_sell and a_short and macd_15m > 0, {'bias_4h': bias_4h, 'bias_1h': bias_1h, 'macd_2h': ctx_15m, 'macd_15m': macd_15m}),
-            ('B', flip_buy and b_long  and macd_15m < 0, flip_sell and b_short and macd_15m > 0, {'bias_1h': bias_1h, 'macd_2h': macd_2h, 'macd_15m': macd_15m, 'ctx_1h': ctx_1h}),
+            ('A', flip_buy and a_long and macd_15m < 0, flip_sell and a_short and macd_15m > 0, {'bias_4h': bias_4h, 'macd_15m': macd_15m}),
         ]:
             signal = 'LONG' if sig_long else ('SHORT' if sig_short else None)
             if not signal: continue
@@ -447,12 +391,6 @@ def process_symbol(symbol):
                     pos = None
 
                 if pos is None:
-                    # Premiere entree Strat B: ctx_1h obligatoire
-                    if strat == 'B':
-                        ctx_1h_needed = 'buy' if signal == 'LONG' else 'sell'
-                        if kw.get('ctx_1h') != ctx_1h_needed:
-                            logger.info('[STRAT B] ' + signal + ' ' + symbol + ' filtre: ctx_1h=' + str(kw.get('ctx_1h')) + ' requis=' + ctx_1h_needed)
-                            continue
                     POSITIONS[pos_key] = {
                         'direction': signal,
                         'entries': [{'price': price, 'ts': datetime.now(timezone.utc).isoformat()}],
@@ -540,18 +478,16 @@ def send_hourly_aligned():
     with STATE_LOCK:
         state_copy = dict(SCAN_STATE)
 
-    bull_a, bear_a, bull_b, bear_b = [], [], [], []
+    bull_a, bear_a = [], []
     for symbol, s in state_copy.items():
         b4 = s.get('bias_4h'); b1 = s.get('bias_1h')
-        m2 = s.get('macd_2h', 0); st = s.get('st_15m', '?')
+        st = s.get('st_15m', '?')
         e  = '\U0001f7e2' if st == 'buy' else '\U0001f534'
         pr = '$' + str(round(s.get('price', 0), 4))
         base = e + ' ' + symbol.replace('/USDT', '') + ' ' + pr
         b2 = s.get('bias_2h', b4)
         if b2 == 'bull' and ctx == 'buy': bull_a.append(base)
         if b2 == 'bear' and ctx == 'sell': bear_a.append(base)
-        if m2 > 0 and b1 == 'bull': bull_b.append(base)
-        if m2 < 0 and b1 == 'bear': bear_b.append(base)
 
     now = datetime.now(timezone.utc).strftime('%H:%M UTC')
     msg = '\U0001f4ca <b>Aligned Report</b> ' + now + '\n' + '\u2501' * 20
@@ -561,12 +497,8 @@ def send_hourly_aligned():
         if bull_a: msg += '\n\U0001f7e2 BULL (' + str(len(bull_a)) + '):\n' + '\n'.join(sorted(bull_a))
         if bear_a: msg += '\n\U0001f534 BEAR (' + str(len(bear_a)) + '):\n' + '\n'.join(sorted(bear_a))
 
-    if bull_b or bear_b:
-        msg += '\n\n<b>STRAT B (MACD 2H + Bias 1H + CT 1H)</b>'
-        if bull_b: msg += '\n\U0001f7e2 BULL (' + str(len(bull_b)) + '):\n' + '\n'.join(sorted(bull_b))
-        if bear_b: msg += '\n\U0001f534 BEAR (' + str(len(bear_b)) + '):\n' + '\n'.join(sorted(bear_b))
 
-    if not any([bull_a, bear_a, bull_b, bear_b]):
+    if not any([bull_a, bear_a]):
         return
     send_telegram(msg)
     logger.info('[HOURLY] Rapport envoye')
@@ -594,29 +526,22 @@ def handle_telegram_command(message):
     if '/aligned' in text:
         with STATE_LOCK:
             state_copy = dict(SCAN_STATE)
-        bull_a, bear_a, bull_b, bear_b = [], [], [], []
+        bull_a, bear_a = [], []
         for symbol, s in state_copy.items():
             b4 = s.get('bias_4h'); b1 = s.get('bias_1h')
-            m2 = s.get('macd_2h', 0); st = s.get('st_15m', '?')
+            st = s.get('st_15m', '?')
             e  = '\U0001f7e2' if st == 'buy' else '\U0001f534'
             pr = '$' + str(round(s.get('price', 0), 4))
             base = e + ' ' + symbol.replace('/USDT', '') + ' ' + pr
-        b2 = s.get('bias_2h', b4)
         ctx = s.get('ctx_15m')
-        if b2 == 'bull' and ctx == 'buy': bull_a.append(base)
-        if b2 == 'bear' and ctx == 'sell': bear_a.append(base)
-        if m2 > 0 and b1 == 'bull': bull_b.append(base)
-        if m2 < 0 and b1 == 'bear': bear_b.append(base)
+        if b4 == 'bull' and ctx == 'buy': bull_a.append(base)
+        if b4 == 'bear' and ctx == 'sell': bear_a.append(base)
         now = datetime.now(timezone.utc).strftime('%H:%M UTC')
         msg = '\U0001f4ca <b>Aligned</b> ' + now + '\n' + '\u2501' * 20
         if bull_a or bear_a:
             msg += '\n\n<b>STRAT A</b>'
             if bull_a: msg += '\n\U0001f7e2 BULL: ' + ', '.join(sorted([x.split(' ')[1] for x in bull_a]))
             if bear_a: msg += '\n\U0001f534 BEAR: ' + ', '.join(sorted([x.split(' ')[1] for x in bear_a]))
-        if bull_b or bear_b:
-            msg += '\n\n<b>STRAT B</b>'
-            if bull_b: msg += '\n\U0001f7e2 BULL: ' + ', '.join(sorted([x.split(' ')[1] for x in bull_b]))
-            if bear_b: msg += '\n\U0001f534 BEAR: ' + ', '.join(sorted([x.split(' ')[1] for x in bear_b]))
         url = 'https://api.telegram.org/bot' + CONFIG['TELEGRAM_BOT_TOKEN'] + '/sendMessage'
         requests.post(url, json={'chat_id': chat_id, 'text': msg, 'parse_mode': 'HTML'}, timeout=10)
 
@@ -626,8 +551,6 @@ def handle_telegram_command(message):
             pos_copy   = dict(POSITIONS)
         ba = sum(1 for s in state_copy.values() if s.get('bias_4h') == 'bull' and s.get('bias_1h') == 'bull')
         sa = sum(1 for s in state_copy.values() if s.get('bias_4h') == 'bear' and s.get('bias_1h') == 'bear')
-        bb = sum(1 for s in state_copy.values() if s.get('macd_2h', 0) > 0 and s.get('bias_1h') == 'bull')
-        sb = sum(1 for s in state_copy.values() if s.get('macd_2h', 0) < 0 and s.get('bias_1h') == 'bear')
         now = datetime.now(timezone.utc).strftime('%H:%M UTC')
         msg = (
             '\U0001f916 <b>Scalp Bot v3</b> ' + now + '\n'
@@ -635,7 +558,6 @@ def handle_telegram_command(message):
             + '\U0001f4ca Assets: ' + str(len(state_copy)) + '\n'
             + '\U0001f4cc Positions: ' + str(len(pos_copy)) + '\n'
             + '\n<b>STRAT A:</b> \U0001f7e2' + str(ba) + ' BULL | \U0001f534' + str(sa) + ' BEAR\n'
-            + '<b>STRAT B:</b> \U0001f7e2' + str(bb) + ' BULL | \U0001f534' + str(sb) + ' BEAR\n'
             + '\u23f0 Dernier scan: ' + (LAST_SCAN_TIME or 'N/A') + '\n'
         )
         url = 'https://api.telegram.org/bot' + CONFIG['TELEGRAM_BOT_TOKEN'] + '/sendMessage'
@@ -676,7 +598,7 @@ def webhook():
     if symbol not in CONFIG['SYMBOLS']:
         return jsonify({'ok': False, 'reason': 'not_in_watchlist'}), 200
 
-    if alert_type == 'st_context' and tf in ('15m', '1h'):
+    if alert_type == 'st_context' and tf == '15m':
         ctx_val = None
         if val in ('buy', 'sell'):
             ctx_val = val
@@ -690,12 +612,9 @@ def webhook():
                 pass
 
         with STATE_LOCK:
-            if tf == '15m':
-                ST_CONTEXT_15M[symbol] = ctx_val
-            else:
-                ST_CONTEXT_1H[symbol] = ctx_val
-        logger.info('[WEBHOOK] ' + symbol + ' ST Context ' + tf + ': ' + str(ctx_val) + ' (val=' + val + ')')
-        return jsonify({'ok': True, 'symbol': symbol, 'ctx': ctx_val, 'tf': tf}), 200
+            ST_CONTEXT_15M[symbol] = ctx_val
+        logger.info('[WEBHOOK] ' + symbol + ' ST Context 15min: ' + str(ctx_val) + ' (val=' + val + ')')
+        return jsonify({'ok': True, 'symbol': symbol, 'ctx_15m': ctx_val}), 200
 
     return jsonify({'ok': False, 'reason': 'unknown_type'}), 200
 
@@ -711,12 +630,10 @@ def status():
             'symbol':  symbol,
             'bias_4h': s.get('bias_4h', 'N/A'),
             'bias_1h': s.get('bias_1h', 'N/A'),
-            'macd_2h': s.get('macd_2h', 0),
-            'macd_15m': s.get('macd_15m', 0),
+                        'macd_15m': s.get('macd_15m', 0),
             'st_15m':  s.get('st_15m', 'N/A'),
             'price':   s.get('price', 0),
             'pos_a':   pos_copy.get(symbol + '_A'),
-            'pos_b':   pos_copy.get(symbol + '_B'),
         })
     return jsonify({'last_scan': LAST_SCAN_TIME, 'assets': assets})
 
@@ -724,16 +641,14 @@ def status():
 def aligned():
     with STATE_LOCK:
         state_copy = dict(SCAN_STATE)
-    bull_a, bear_a, bull_b, bear_b = [], [], [], []
+    bull_a, bear_a = [], []
     for symbol, s in state_copy.items():
         b4 = s.get('bias_4h'); b1 = s.get('bias_1h')
-        m2 = s.get('macd_2h', 0); st = s.get('st_15m')
+        st = s.get('st_15m')
         entry = {'symbol': symbol, 'price': s.get('price'), 'st_15m': st}
         if b4 == 'bull' and b1 == 'bull': bull_a.append(entry)
         if b4 == 'bear' and b1 == 'bear': bear_a.append(entry)
-        if m2 > 0 and b1 == 'bull': bull_b.append(entry)
-        if m2 < 0 and b1 == 'bear': bear_b.append(entry)
-    return jsonify({'strat_a': {'bull': bull_a, 'bear': bear_a}, 'strat_b': {'bull': bull_b, 'bear': bear_b}})
+    return jsonify({'strat_a': {'bull': bull_a, 'bear': bear_a}})
 
 @app.route('/positions')
 def positions():
@@ -798,11 +713,7 @@ def send_start_notification():
         + '\U0001f535 Filtre: Bias 4H (EMA13 vs SMA30)\n'
         + '\U0001f535 Zone: ST Context 15min\n'
         + '\U0001f7e2 Signal: Flip ST AI 15min\n\n'
-        + '<b>STRAT B</b>\n'
-        + '\U0001f535 Filtre: MACD 2H direction\n'
-        + '\U0001f535 Confirmation: Bias 1H + ST Context 1H (1ere entree)\n'
-        + '\U0001f7e2 Signal: Flip ST AI 15min\n'
-        + '\U0001f4ca TP: alerte retournement MACD 2H\n\n'
+
         + '\u2501' * 20 + '\n'
         + '\u23f0 ' + now
     )
