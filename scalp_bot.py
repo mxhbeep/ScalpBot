@@ -287,9 +287,6 @@ def format_entry_msg(symbol, direction, price, avg_price, sl, entry_count, strat
     if strat == 'A' and bias_4h:
         e4 = '\U0001f7e2' if bias_4h == 'bull' else '\U0001f534'
         lines.append(e4 + ' Bias 4H: ' + bias_4h.upper())
-    if bias_1h:
-        e1 = '\U0001f7e2' if bias_1h == 'bull' else '\U0001f534'
-        lines.append(e1 + ' Bias 1H: ' + bias_1h.upper())
     if macd_15m is not None:
         m15_str = ('+' if macd_15m >= 0 else '') + str(round(macd_15m, 4))
         lines.append('\U0001f4ca MACD 15min: ' + m15_str)
@@ -309,9 +306,6 @@ def format_prep_msg(symbol, direction, price, strat, bias_4h=None, macd_15m=None
     if strat == 'A' and bias_4h:
         e4 = '\U0001f7e2' if bias_4h == 'bull' else '\U0001f534'
         lines.append(e4 + ' Bias 4H: ' + bias_4h.upper())
-    if bias_1h:
-        e1 = '\U0001f7e2' if bias_1h == 'bull' else '\U0001f534'
-        lines.append(e1 + ' Bias 1H: ' + bias_1h.upper())
     if macd_15m is not None:
         m15_str = ('+' if macd_15m >= 0 else '') + str(round(macd_15m, 4))
         lines.append('\U0001f4ca MACD 15min: ' + m15_str)
@@ -369,9 +363,9 @@ def process_symbol(symbol):
         # Collecte des assets en preparation (rapport groupé toutes les 15min)
         prep_entries = []
         if a_long  and not flip_buy:
-            prep_entries.append({'sym': symbol, 'dir': 'LONG',  'strat': 'A', 'price': price, 'bias_4h': bias_4h, 'bias_1h': bias_1h, 'macd_15m': macd_15m})
+            prep_entries.append({'sym': symbol, 'dir': 'LONG',  'strat': 'A', 'price': price, 'bias_4h': bias_4h, 'macd_15m': macd_15m})
         if a_short and not flip_sell:
-            prep_entries.append({'sym': symbol, 'dir': 'SHORT', 'strat': 'A', 'price': price, 'bias_4h': bias_4h, 'bias_1h': bias_1h, 'macd_15m': macd_15m})
+            prep_entries.append({'sym': symbol, 'dir': 'SHORT', 'strat': 'A', 'price': price, 'bias_4h': bias_4h, 'macd_15m': macd_15m})
         if prep_entries:
             with STATE_LOCK:
                 PREP_BUFFER.extend(prep_entries)
@@ -480,7 +474,7 @@ def send_hourly_aligned():
 
     bull_a, bear_a = [], []
     for symbol, s in state_copy.items():
-        b4 = s.get('bias_4h'); b1 = s.get('bias_1h')
+        b4 = s.get('bias_4h')
         st = s.get('st_15m', '?')
         e  = '\U0001f7e2' if st == 'buy' else '\U0001f534'
         pr = '$' + str(round(s.get('price', 0), 4))
@@ -528,7 +522,7 @@ def handle_telegram_command(message):
             state_copy = dict(SCAN_STATE)
         bull_a, bear_a = [], []
         for symbol, s in state_copy.items():
-            b4 = s.get('bias_4h'); b1 = s.get('bias_1h')
+            b4 = s.get('bias_4h')
             st = s.get('st_15m', '?')
             e  = '\U0001f7e2' if st == 'buy' else '\U0001f534'
             pr = '$' + str(round(s.get('price', 0), 4))
@@ -549,8 +543,8 @@ def handle_telegram_command(message):
         with STATE_LOCK:
             state_copy = dict(SCAN_STATE)
             pos_copy   = dict(POSITIONS)
-        ba = sum(1 for s in state_copy.values() if s.get('bias_4h') == 'bull' and s.get('bias_1h') == 'bull')
-        sa = sum(1 for s in state_copy.values() if s.get('bias_4h') == 'bear' and s.get('bias_1h') == 'bear')
+        ba = sum(1 for s in state_copy.values() if s.get('bias_4h') == 'bull' and s.get('ctx_15m') == 'buy')
+        sa = sum(1 for s in state_copy.values() if s.get('bias_4h') == 'bear' and s.get('ctx_15m') == 'sell')
         now = datetime.now(timezone.utc).strftime('%H:%M UTC')
         msg = (
             '\U0001f916 <b>Scalp Bot v3</b> ' + now + '\n'
@@ -629,7 +623,7 @@ def status():
         assets.append({
             'symbol':  symbol,
             'bias_4h': s.get('bias_4h', 'N/A'),
-            'bias_1h': s.get('bias_1h', 'N/A'),
+            'bias_4h': s.get('bias_4h', 'N/A'),
                         'macd_15m': s.get('macd_15m', 0),
             'st_15m':  s.get('st_15m', 'N/A'),
             'price':   s.get('price', 0),
@@ -643,7 +637,7 @@ def aligned():
         state_copy = dict(SCAN_STATE)
     bull_a, bear_a = [], []
     for symbol, s in state_copy.items():
-        b4 = s.get('bias_4h'); b1 = s.get('bias_1h')
+        b4 = s.get('bias_4h')
         st = s.get('st_15m')
         entry = {'symbol': symbol, 'price': s.get('price'), 'st_15m': st}
         if b4 == 'bull' and b1 == 'bull': bull_a.append(entry)
