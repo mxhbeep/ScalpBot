@@ -103,6 +103,7 @@ LAST_SIGNAL: dict = {}
 PREP_BUFFER: list = []
 SCAN_STATE:  dict = {}
 ST_CONTEXT_15M: dict = {}  # symbol -> 'buy' | 'sell' | None
+CONFIRMED_TRADES: dict = {}  # pos_key -> True si entré manuellement
 STATE_LOCK = threading.Lock()
 LAST_SCAN_TIME = None
 REDIS_CLIENT = None
@@ -268,6 +269,40 @@ def send_telegram(msg):
     except Exception as e:
         logger.error('Telegram: ' + str(e))
 
+def send_telegram_with_button(msg, callback_data, button_label='✅ Entré en trade'):
+    """Envoie un message Telegram avec un bouton inline."""
+    url = 'https://api.telegram.org/bot' + CONFIG['TELEGRAM_BOT_TOKEN'] + '/sendMessage'
+    payload = {
+        'chat_id': CONFIG['TELEGRAM_CHAT_ID'],
+        'text': msg,
+        'parse_mode': 'HTML',
+        'reply_markup': {
+            'inline_keyboard': [[
+                {'text': button_label, 'callback_data': callback_data}
+            ]]
+        }
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            logger.info('Telegram envoye (avec bouton)')
+        elif resp.status_code == 429:
+            retry = resp.json().get('parameters', {}).get('retry_after', 30)
+            time.sleep(retry)
+            requests.post(url, json=payload, timeout=10)
+        else:
+            logger.error('Telegram HTTP ' + str(resp.status_code))
+    except Exception as e:
+        logger.error('Telegram button: ' + str(e))
+
+def answer_callback_query(callback_query_id, text='✅ Position confirmée !'):
+    """Répond au callback Telegram pour effacer le spinner."""
+    url = 'https://api.telegram.org/bot' + CONFIG['TELEGRAM_BOT_TOKEN'] + '/answerCallbackQuery'
+    try:
+        requests.post(url, json={'callback_query_id': callback_query_id, 'text': text}, timeout=5)
+    except Exception:
+        pass
+
 def format_entry_msg(symbol, direction, price, avg_price, sl, entry_count, strat, bias_4h=None, macd_15m=None):
     emoji = '\U0001f7e2' if direction == 'LONG' else '\U0001f534'
     sl_label = 'Swing low/high' if entry_count == 1 else 'Break even'
@@ -323,6 +358,8 @@ def process_symbol(symbol):
 
         # Indicateurs
         bias_4h   = calc_bias(df_4h, CONFIG['BIAS_EMA_LEN'], CONFIG['BIAS_SMA_LEN'])
+        bias_1h   = calc_bias(df_1h, CONFIG['BIAS_EMA_LEN'], CONFIG['BIAS_SMA_LEN'])
+        bias_15m  = calc_bias(df_15m, CONFIG['BIAS_EMA_LEN'], CONFIG['BIAS_SMA_LEN'])
         macd_15m  = calc_macd_histogram(df_15m, CONFIG['MACD_FAST'], CONFIG['MACD_SLOW'], CONFIG['MACD_SIGNAL'], candle=-2)
 
         dir_15m  = supertrend_ai(df_15m)
@@ -345,13 +382,13 @@ def process_symbol(symbol):
 
 
         # Debug log
-        reason_a = 'no flip' if not flip else ('LONG A' if flip_buy and a_long else 'SHORT A' if flip_sell and a_short else 'filtre A (B4H=' + bias_4h + ' CTX=' + str(ctx_15m) + ')')
-        logger.info('[SCAN] ' + symbol.ljust(20) + ' B4H=' + bias_4h + ' CTX15m=' + str(ctx_15m) + ' M15m=' + ('+' if macd_15m >= 0 else '') + str(round(macd_15m, 4)) + ' ST=' + curr_15m + ' flip=' + str(flip) + ' A:' + reason_a)
+        reason_a = 'no flip' if not flip else ('LONG A' if (sig_long_1st or sig_long_pyra) else 'SHORT A' if (sig_short_1st or sig_short_pyra) else 'filtre A (B4H=' + bias_4h + ' B1H=' + bias_1h + ' B15m=' + bias_15m + ' CTX=' + str(ctx_15m) + ')')
+        logger.info('[SCAN] ' + symbol.ljust(20) + ' B4H=' + bias_4h + ' B1H=' + bias_1h + ' B15m=' + bias_15m + ' CTX15m=' + str(ctx_15m) + ' ST=' + curr_15m + ' flip=' + str(flip) + ' A:' + reason_a)
 
         # Update scan state
         with STATE_LOCK:
             SCAN_STATE[symbol] = {
-                'bias_4h': bias_4h,
+                'bias_4h': bias_4h, 'bias_1h': bias_1h, 'bias_15m': bias_15m,
                 'ctx_15m': ST_CONTEXT_15M.get(symbol),
                 'macd_15m': round(macd_15m, 6),
                 'st_15m': curr_15m, 'price': price,
@@ -362,17 +399,33 @@ def process_symbol(symbol):
 
         # Collecte des assets en preparation (rapport groupé toutes les 15min)
         prep_entries = []
-        if a_long  and not flip_buy:
+        if a_long  and b15m_ok_long  and not flip_buy:
             prep_entries.append({'sym': symbol, 'dir': 'LONG',  'strat': 'A', 'price': price, 'bias_4h': bias_4h, 'macd_15m': macd_15m})
-        if a_short and not flip_sell:
+        if a_short and b15m_ok_short and not flip_sell:
             prep_entries.append({'sym': symbol, 'dir': 'SHORT', 'strat': 'A', 'price': price, 'bias_4h': bias_4h, 'macd_15m': macd_15m})
         if prep_entries:
             with STATE_LOCK:
                 PREP_BUFFER.extend(prep_entries)
 
+        # Conditions de signal
+        # Bias 15m opposé (zone de value)
+        b15m_ok_long  = bias_15m == 'bear'  # pour LONG: bias 15m bear
+        b15m_ok_short = bias_15m == 'bull'  # pour SHORT: bias 15m bull
+
+        # 1ère entrée: Bias 4H + Context 15m + Bias 15m opposé + flip
+        sig_long_1st  = flip_buy  and a_long  and b15m_ok_long
+        sig_short_1st = flip_sell and a_short and b15m_ok_short
+
+        # Pyramiding: Bias 4H + Bias 1H + Bias 15m opposé + flip (pas de ctx requis)
+        pyra_long_ok  = bias_4h == 'bull' and bias_1h == 'bull' and b15m_ok_long
+        pyra_short_ok = bias_4h == 'bear' and bias_1h == 'bear' and b15m_ok_short
+        sig_long_pyra  = flip_buy  and pyra_long_ok
+        sig_short_pyra = flip_sell and pyra_short_ok
+
         # Signaux
         for strat, sig_long, sig_short, kw in [
-            ('A', flip_buy and a_long and macd_15m < 0, flip_sell and a_short and macd_15m > 0, {'bias_4h': bias_4h, 'macd_15m': macd_15m}),
+            ('A', sig_long_1st or sig_long_pyra, sig_short_1st or sig_short_pyra,
+             {'bias_4h': bias_4h, 'bias_1h': bias_1h, 'bias_15m': bias_15m, 'ctx_15m': ctx_15m, 'macd_15m': macd_15m}),
         ]:
             signal = 'LONG' if sig_long else ('SHORT' if sig_short else None)
             if not signal: continue
@@ -382,9 +435,13 @@ def process_symbol(symbol):
                 pos = POSITIONS.get(pos_key)
                 if pos and pos['direction'] != signal:
                     del POSITIONS[pos_key]
+                    CONFIRMED_TRADES.pop(pos_key, None)
                     pos = None
 
                 if pos is None:
+                    # 1ère entrée : Context 15m obligatoire
+                    if not (sig_long_1st or sig_short_1st):
+                        continue  # pyramiding sans position existante = ignorer
                     POSITIONS[pos_key] = {
                         'direction': signal,
                         'entries': [{'price': price, 'ts': datetime.now(timezone.utc).isoformat()}],
@@ -394,6 +451,13 @@ def process_symbol(symbol):
                     }
                     pos = POSITIONS[pos_key]
                 else:
+                    # Pyramiding : confirmation manuelle requise + Bias 4H + Bias 1H + Bias 15m opposé
+                    if not CONFIRMED_TRADES.get(pos_key):
+                        logger.info('[PYRA] ' + symbol + ' non confirmé manuellement, skip')
+                        continue
+                    pyra_ok = pyra_long_ok if signal == 'LONG' else pyra_short_ok
+                    if not pyra_ok:
+                        continue
                     # Cooldown entre entrées
                     last_entry_ts = pos['entries'][-1]['ts']
                     last_ts = datetime.fromisoformat(last_entry_ts).timestamp()
@@ -409,7 +473,12 @@ def process_symbol(symbol):
                 sl          = pos['sl']
 
             msg = format_entry_msg(symbol, signal, price, avg_price, sl, entry_count, strat, **kw)
-            send_telegram(msg)
+            if entry_count == 1:
+                # 1ere entree: bouton de confirmation
+                cb_data = 'confirm:' + pos_key
+                send_telegram_with_button(msg, cb_data)
+            else:
+                send_telegram(msg)
             logger.info('[STRAT ' + strat + '] ' + signal + ' #' + str(entry_count) + ' ' + symbol + ' @ ' + str(price))
             audit_log({'ts': datetime.now(timezone.utc).isoformat(), 'sym': symbol, 'signal': signal, 'strat': strat, 'price': price, 'avg_price': avg_price, 'sl': sl, 'entry_count': entry_count})
 
@@ -591,6 +660,30 @@ def webhook():
 
     if symbol not in CONFIG['SYMBOLS']:
         return jsonify({'ok': False, 'reason': 'not_in_watchlist'}), 200
+
+    # Callback query (bouton inline Telegram)
+    if 'callback_query' in data:
+        cq = data['callback_query']
+        cq_id   = cq.get('id')
+        cb_data = cq.get('data', '')
+        if cb_data.startswith('confirm:'):
+            pos_key = cb_data[len('confirm:'):]
+            with STATE_LOCK:
+                CONFIRMED_TRADES[pos_key] = True
+            answer_callback_query(cq_id, '✅ Position confirmée ! Pyramiding activé.')
+            logger.info('[CONFIRM] Position confirmée: ' + pos_key)
+            # Edit message pour indiquer confirmation
+            try:
+                msg_id = cq.get('message', {}).get('message_id')
+                chat_id = cq.get('message', {}).get('chat', {}).get('id')
+                requests.post(
+                    'https://api.telegram.org/bot' + CONFIG['TELEGRAM_BOT_TOKEN'] + '/editMessageReplyMarkup',
+                    json={'chat_id': chat_id, 'message_id': msg_id, 'reply_markup': {'inline_keyboard': [[{'text': '✅ Entré en trade', 'callback_data': 'done'}]]}},
+                    timeout=5
+                )
+            except Exception:
+                pass
+        return jsonify({'ok': True}), 200
 
     if alert_type == 'st_context' and tf == '15m':
         ctx_val = None
