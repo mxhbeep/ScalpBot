@@ -6,7 +6,6 @@ Pyramiding illimité, SL swing low -> break even
 
 import os, time, json, logging, requests, threading
 from datetime import datetime, timezone, timedelta
-from typing import Optional
 
 import ccxt
 import pandas as pd
@@ -99,13 +98,15 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 POSITIONS: dict = {}
-LAST_SIGNAL: dict = {}
 PREP_BUFFER: list = []
 SCAN_STATE:  dict = {}
 ST_CONTEXT_15M: dict = {}  # symbol -> 'buy' | 'sell' | None
 CONFIRMED_TRADES: dict = {}  # pos_key -> True si entré manuellement
 STATE_LOCK = threading.Lock()
 LAST_SCAN_TIME = None
+LAST_ALERT_TS: dict = {}  # pos_key -> timestamp dernière alerte envoyée
+ALERT_COOLDOWN = 900  # 15min minimum entre deux alertes pour le même asset/strat
+_LAST_PERSIST_TS = 0.0  # timestamp du dernier persist_weekly_state
 REDIS_CLIENT = None
 
 # Stats hebdomadaires — créneaux horaires (heure Taiwan UTC+8)
@@ -139,9 +140,14 @@ def audit_log(entry):
         except Exception as e:
             logger.error('Redis audit: ' + str(e))
 
-def persist_weekly_state():
+def persist_weekly_state(force=False):
+    global _LAST_PERSIST_TS
     if not REDIS_CLIENT:
         return
+    now = time.time()
+    if not force and now - _LAST_PERSIST_TS < 60:
+        return  # throttle: max 1 persist/60s
+    _LAST_PERSIST_TS = now
     try:
         with STATE_LOCK:
             ctx_snapshot = dict(ST_CONTEXT_15M)
@@ -177,6 +183,42 @@ def load_weekly_state():
     except Exception as e:
         logger.error('Redis load weekly: ' + str(e))
 
+def persist_positions():
+    if not REDIS_CLIENT:
+        return
+    try:
+        with STATE_LOCK:
+            pos_snapshot = dict(POSITIONS)
+            conf_snapshot = dict(CONFIRMED_TRADES)
+        REDIS_CLIENT.set('scalp_positions', json.dumps({
+            'positions': pos_snapshot,
+            'confirmed': conf_snapshot,
+        }))
+    except Exception as e:
+        logger.error('Redis persist positions: ' + str(e))
+
+def load_positions():
+    if not REDIS_CLIENT:
+        return
+    try:
+        raw = REDIS_CLIENT.get('scalp_positions')
+        if not raw:
+            return
+        payload = json.loads(raw)
+        # Rétrocompatibilité: ancien format était juste le dict positions
+        if isinstance(payload, dict) and 'positions' in payload:
+            pos = payload.get('positions', {})
+            conf = payload.get('confirmed', {})
+        else:
+            pos = payload
+            conf = {}
+        with STATE_LOCK:
+            POSITIONS.update(pos)
+            CONFIRMED_TRADES.update(conf)
+        logger.info('Positions restaurees depuis Redis: ' + str(len(POSITIONS)) + ' positions | ' + str(len(CONFIRMED_TRADES)) + ' confirmees')
+    except Exception as e:
+        logger.error('Redis load positions: ' + str(e))
+
 def track_signal_hour(signal):
     """Incrémente le compteur du créneau horaire courant (heure Taiwan UTC+8)."""
     tw_hour = datetime.now(timezone(timedelta(hours=8))).strftime('%H')
@@ -184,6 +226,15 @@ def track_signal_hour(signal):
         if tw_hour not in HOURLY_STATS:
             HOURLY_STATS[tw_hour] = {'LONG': 0, 'SHORT': 0}
         HOURLY_STATS[tw_hour][signal] = HOURLY_STATS[tw_hour].get(signal, 0) + 1
+
+def should_send_alert(pos_key):
+    """Retourne True si aucune alerte n'a été envoyée pour ce pos_key dans les 15 dernières minutes."""
+    now = time.time()
+    last = LAST_ALERT_TS.get(pos_key, 0)
+    if now - last >= ALERT_COOLDOWN:
+        LAST_ALERT_TS[pos_key] = now
+        return True
+    return False
 
 # ============================================================================ #
 # EXCHANGE
@@ -307,7 +358,6 @@ def supertrend_ai(df, atr_len=6, min_mult=1.0, max_mult=2.0, step=1.0,
         dn = hl2[i] - atr[i] * target_factor
         upper_f = min(up, upper_f) if close[i-1] < upper_f else up
         lower_f = max(dn, lower_f) if close[i-1] > lower_f else dn
-        prev_os = os_f
         if close[i] > upper_f:   os_f = 1
         elif close[i] < lower_f: os_f = 0
         direction.iloc[i] = 'buy' if os_f == 1 else 'sell'
@@ -328,6 +378,9 @@ def calc_sl(direction, df_15m, avg_price, entry_count):
 # ============================================================================ #
 
 def send_telegram(msg):
+    if not CONFIG['TELEGRAM_BOT_TOKEN'] or not CONFIG['TELEGRAM_CHAT_ID']:
+        logger.warning('Telegram non configuré (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID manquants)')
+        return
     url     = 'https://api.telegram.org/bot' + CONFIG['TELEGRAM_BOT_TOKEN'] + '/sendMessage'
     payload = {'chat_id': CONFIG['TELEGRAM_CHAT_ID'], 'text': msg, 'parse_mode': 'HTML'}
     try:
@@ -345,6 +398,9 @@ def send_telegram(msg):
 
 def send_telegram_with_button(msg, callback_data, button_label='✅ Entré en trade'):
     """Envoie un message Telegram avec un bouton inline."""
+    if not CONFIG['TELEGRAM_BOT_TOKEN'] or not CONFIG['TELEGRAM_CHAT_ID']:
+        logger.warning('Telegram non configuré (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID manquants)')
+        return
     url = 'https://api.telegram.org/bot' + CONFIG['TELEGRAM_BOT_TOKEN'] + '/sendMessage'
     payload = {
         'chat_id': CONFIG['TELEGRAM_CHAT_ID'],
@@ -377,7 +433,7 @@ def answer_callback_query(callback_query_id, text='✅ Position confirmée !'):
     except Exception:
         pass
 
-def format_entry_msg(symbol, direction, price, avg_price, sl, entry_count, strat, bias_4h=None, macd_15m=None):
+def format_entry_msg(symbol, direction, price, avg_price, sl, entry_count, strat, bias_4h=None, bias_1h=None, bias_15m=None, ctx_15m=None, macd_15m=None):
     emoji = '\U0001f7e2' if direction == 'LONG' else '\U0001f534'
     sl_label = 'Swing low/high' if entry_count == 1 else 'Break even'
     now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
@@ -392,10 +448,20 @@ def format_entry_msg(symbol, direction, price, avg_price, sl, entry_count, strat
         '\U0001f6d1 SL (' + sl_label + '): $' + str(round(sl, 6)),
         '\U0001f3e6 Exchange: OKX',
         '\u23f0 ' + now,
+        '\u2501' * 20,
     ]
-    if strat == 'A' and bias_4h:
+    if bias_4h:
         e4 = '\U0001f7e2' if bias_4h == 'bull' else '\U0001f534'
         lines.append(e4 + ' Bias 4H: ' + bias_4h.upper())
+    if bias_1h:
+        e1 = '\U0001f7e2' if bias_1h == 'bull' else '\U0001f534'
+        lines.append(e1 + ' Bias 1H: ' + bias_1h.upper())
+    if bias_15m:
+        e15 = '\U0001f7e2' if bias_15m == 'bull' else '\U0001f534'
+        lines.append(e15 + ' Bias 15m: ' + bias_15m.upper())
+    if ctx_15m:
+        ec = '\U0001f7e2' if ctx_15m == 'buy' else '\U0001f534'
+        lines.append(ec + ' ST Context 15m: ' + ctx_15m.upper())
     if macd_15m is not None:
         m15_str = ('+' if macd_15m >= 0 else '') + str(round(macd_15m, 4))
         lines.append('\U0001f4ca MACD 15min: ' + m15_str)
@@ -509,6 +575,7 @@ def process_symbol(symbol):
                 if pos and pos['direction'] != signal:
                     del POSITIONS[pos_key]
                     CONFIRMED_TRADES.pop(pos_key, None)
+                    LAST_ALERT_TS.pop(pos_key, None)  # reset cooldown au flip de direction
                     pos = None
 
                 if pos is None:
@@ -545,6 +612,9 @@ def process_symbol(symbol):
                 avg_price   = pos['avg_price']
                 sl          = pos['sl']
 
+            if not should_send_alert(pos_key):
+                logger.info('[COOLDOWN] ' + pos_key + ' skip (cooldown 15min)')
+                continue
             msg = format_entry_msg(symbol, signal, price, avg_price, sl, entry_count, strat, **kw)
             if entry_count == 1:
                 # 1ere entree: bouton de confirmation
@@ -553,6 +623,7 @@ def process_symbol(symbol):
             else:
                 send_telegram(msg)
             track_signal_hour(signal)
+            persist_positions()
             logger.info('[STRAT ' + strat + '] ' + signal + ' #' + str(entry_count) + ' ' + symbol + ' @ ' + str(price))
             audit_log({'ts': datetime.now(timezone.utc).isoformat(), 'sym': symbol, 'signal': signal, 'strat': strat, 'price': price, 'avg_price': avg_price, 'sl': sl, 'entry_count': entry_count})
 
@@ -679,8 +750,7 @@ def handle_telegram_command(message):
             msg += '\n\n<b>STRAT A</b>'
             if bull_a: msg += '\n\U0001f7e2 BULL: ' + ', '.join(sorted([x.split(' ')[1] for x in bull_a]))
             if bear_a: msg += '\n\U0001f534 BEAR: ' + ', '.join(sorted([x.split(' ')[1] for x in bear_a]))
-        url = 'https://api.telegram.org/bot' + CONFIG['TELEGRAM_BOT_TOKEN'] + '/sendMessage'
-        requests.post(url, json={'chat_id': chat_id, 'text': msg, 'parse_mode': 'HTML'}, timeout=10)
+        send_telegram(msg)
 
     elif '/status' in text:
         with STATE_LOCK:
@@ -697,8 +767,7 @@ def handle_telegram_command(message):
             + '\n<b>STRAT A:</b> \U0001f7e2' + str(ba) + ' BULL | \U0001f534' + str(sa) + ' BEAR\n'
             + '\u23f0 Dernier scan: ' + (LAST_SCAN_TIME or 'N/A') + '\n'
         )
-        url = 'https://api.telegram.org/bot' + CONFIG['TELEGRAM_BOT_TOKEN'] + '/sendMessage'
-        requests.post(url, json={'chat_id': chat_id, 'text': msg, 'parse_mode': 'HTML'}, timeout=10)
+        send_telegram(msg)
 
 # ============================================================================ #
 # FLASK
@@ -745,7 +814,10 @@ def webhook():
     alert_type  = data.get('type', '').lower()
     tf          = data.get('tf', '').lower()
     val         = str(data.get('value', '')).strip().lower()
-    price       = data.get('price', 0)
+    try:
+        price = float(data.get('price', 0) or 0)
+    except (TypeError, ValueError):
+        price = 0.0
 
     # Normaliser le symbole: BTCUSDT -> BTC/USDT
     symbol = raw_symbol.upper()
@@ -802,6 +874,17 @@ def aligned():
         if b4 == 'bear' and ctx == 'sell': bear_a.append(entry)
     return jsonify({'strat_a': {'bull': bull_a, 'bear': bear_a}})
 
+@app.route('/health')
+def health():
+    return jsonify({
+        'status': 'running',
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'assets': len(CONFIG['SYMBOLS']),
+        'positions': len(POSITIONS),
+        'redis': 'ok' if REDIS_CLIENT else 'unavailable',
+        'last_scan': LAST_SCAN_TIME,
+    }), 200
+
 @app.route('/positions')
 def positions():
     with STATE_LOCK:
@@ -837,6 +920,7 @@ def reset_position(symbol):
     with STATE_LOCK:
         if key in POSITIONS:
             del POSITIONS[key]
+            persist_positions()
             return jsonify({'status': 'reset ' + key})
     return jsonify({'status': 'pas de position'}), 404
 
@@ -866,7 +950,7 @@ def send_weekly_report():
         send_telegram(msg)
         HOURLY_STATS.clear()
         WEEKLY_START = datetime.now(timezone.utc)
-        persist_weekly_state()
+        persist_weekly_state(force=True)
         return
 
     # Trier les créneaux par total décroissant
@@ -905,7 +989,7 @@ def send_weekly_report():
 
     HOURLY_STATS.clear()
     WEEKLY_START = datetime.now(timezone.utc)
-    persist_weekly_state()
+    persist_weekly_state(force=True)
 
 
 def weekly_scheduler():
@@ -946,6 +1030,7 @@ if __name__ == '__main__':
     logger.info('Demarrage Scalp Bot v3...')
     init_redis()
     load_weekly_state()
+    load_positions()
     send_start_notification()
     threading.Thread(target=scanner_loop, daemon=True).start()
     threading.Thread(target=hourly_scheduler, daemon=True).start()
