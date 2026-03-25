@@ -958,7 +958,12 @@ def send_weekly_report():
     tw = timezone(timedelta(hours=8))
     now = datetime.now(tw)
     week_start = WEEKLY_START.astimezone(tw)
-    total = sum(v.get('LONG', 0) + v.get('SHORT', 0) for v in HOURLY_STATS.values())
+
+    # Snapshot sous lock pour éviter les races avec track_signal_hour
+    with STATE_LOCK:
+        stats_snapshot = {k: dict(v) for k, v in HOURLY_STATS.items()}
+
+    total = sum(v.get('LONG', 0) + v.get('SHORT', 0) for v in stats_snapshot.values())
 
     if total == 0:
         msg = (
@@ -968,14 +973,15 @@ def send_weekly_report():
             + 'Aucune alerte cette semaine.'
         )
         send_telegram(msg)
-        HOURLY_STATS.clear()
+        with STATE_LOCK:
+            HOURLY_STATS.clear()
         WEEKLY_START = datetime.now(timezone.utc)
         persist_weekly_state(force=True)
         return
 
     # Trier les créneaux par total décroissant
     ranked = sorted(
-        HOURLY_STATS.items(),
+        stats_snapshot.items(),
         key=lambda x: x[1].get('LONG', 0) + x[1].get('SHORT', 0),
         reverse=True
     )
@@ -1007,7 +1013,8 @@ def send_weekly_report():
     send_telegram(msg)
     logger.info('[WEEKLY] Rapport hebdo créneaux envoyé')
 
-    HOURLY_STATS.clear()
+    with STATE_LOCK:
+        HOURLY_STATS.clear()
     WEEKLY_START = datetime.now(timezone.utc)
     persist_weekly_state(force=True)
 
