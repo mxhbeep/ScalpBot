@@ -85,6 +85,7 @@ CONFIG = {
     ],
     'TELEGRAM_BOT_TOKEN': os.environ.get('TELEGRAM_BOT_TOKEN', ''),
     'TELEGRAM_CHAT_ID':   os.environ.get('TELEGRAM_CHAT_ID', ''),
+    'TELEGRAM_WEBHOOK_SECRET': os.environ.get('TELEGRAM_WEBHOOK_SECRET', ''),
     'BIAS_EMA_LEN':  13,
     'BIAS_SMA_LEN':  30,
     'SWING_LOOKBACK': 5,
@@ -434,6 +435,22 @@ def answer_callback_query(callback_query_id, text='✅ Position confirmée !'):
         requests.post(url, json={'callback_query_id': callback_query_id, 'text': text}, timeout=5)
     except Exception:
         pass
+
+def is_authorized_telegram_callback(callback_query):
+    """
+    Vérifie qu'un callback Telegram provient du chat autorisé et, si configuré,
+    que le secret token du webhook est valide.
+    """
+    secret = CONFIG.get('TELEGRAM_WEBHOOK_SECRET')
+    if secret:
+        header_secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token', '')
+        if header_secret != secret:
+            return False
+    expected_chat_id = str(CONFIG.get('TELEGRAM_CHAT_ID', '')).strip()
+    callback_chat_id = str(callback_query.get('message', {}).get('chat', {}).get('id', '')).strip()
+    if expected_chat_id and callback_chat_id and callback_chat_id != expected_chat_id:
+        return False
+    return True
 
 def format_entry_msg(symbol, direction, price, avg_price, sl, entry_count, strat, bias_4h=None, bias_1h=None, bias_15m=None, ctx_15m=None, macd_15m=None):
     emoji = '\U0001f7e2' if direction == 'LONG' else '\U0001f534'
@@ -801,6 +818,9 @@ def webhook():
     # Callback query (bouton inline Telegram) — traité en premier, pas de symbol requis
     if 'callback_query' in data:
         cq = data['callback_query']
+        if not is_authorized_telegram_callback(cq):
+            logger.warning('[SECURITY] Callback Telegram refuse (secret/chat non autorise)')
+            return jsonify({'ok': False, 'reason': 'unauthorized_callback'}), 403
         cq_id   = cq.get('id')
         cb_data = cq.get('data', '')
         if cb_data.startswith('confirm:'):
@@ -948,6 +968,14 @@ def reset_position(symbol):
 def telegram_webhook():
     data = request.get_json(silent=True)
     if not data: return jsonify({'ok': True})
+
+    secret = CONFIG.get('TELEGRAM_WEBHOOK_SECRET')
+    if secret:
+        header_secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token', '')
+        if header_secret != secret:
+            logger.warning('[SECURITY] Telegram webhook refuse (secret invalide)')
+            return jsonify({'ok': False, 'reason': 'unauthorized'}), 403
+
     message = data.get('message') or data.get('edited_message')
     if message:
         threading.Thread(target=handle_telegram_command, args=(message,), daemon=True).start()
