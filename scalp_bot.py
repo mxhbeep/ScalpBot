@@ -143,9 +143,12 @@ def persist_weekly_state():
     if not REDIS_CLIENT:
         return
     try:
+        with STATE_LOCK:
+            ctx_snapshot = dict(ST_CONTEXT_15M)
         payload = {
-            'hourly_stats': HOURLY_STATS,
-            'weekly_start': WEEKLY_START.isoformat(),
+            'hourly_stats':   HOURLY_STATS,
+            'weekly_start':   WEEKLY_START.isoformat(),
+            'st_context_15m': ctx_snapshot,
         }
         REDIS_CLIENT.set('scalp_weekly_state', json.dumps(payload))
     except Exception as e:
@@ -164,7 +167,13 @@ def load_weekly_state():
         ws = payload.get('weekly_start')
         if ws:
             WEEKLY_START = datetime.fromisoformat(ws)
-        logger.info('Stats hebdo restaurees depuis Redis | créneaux=' + str(len(HOURLY_STATS)))
+        ctx = payload.get('st_context_15m', {})
+        with STATE_LOCK:
+            ST_CONTEXT_15M.update(ctx)
+        logger.info(
+            'Stats hebdo restaurees depuis Redis | créneaux=' + str(len(HOURLY_STATS))
+            + ' | ctx_15m=' + str(len(ST_CONTEXT_15M)) + ' assets'
+        )
     except Exception as e:
         logger.error('Redis load weekly: ' + str(e))
 
@@ -754,6 +763,7 @@ def webhook():
 
         with STATE_LOCK:
             ST_CONTEXT_15M[symbol] = ctx_val
+        persist_weekly_state()
         logger.info('[WEBHOOK] ' + symbol + ' ST Context 15min: ' + str(ctx_val) + ' (val=' + val + ')')
         return jsonify({'ok': True, 'symbol': symbol, 'ctx_15m': ctx_val}), 200
 
