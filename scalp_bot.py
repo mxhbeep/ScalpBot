@@ -140,6 +140,29 @@ def audit_log(entry):
 
 exchange = ccxt.okx({'enableRateLimit': True})
 
+def parse_st_context_value(val, trend_level=1.96):
+    """
+    Convertit la valeur brute du ST Context (plot_1 = Short time context) en 'buy', 'sell' ou None.
+    Accepte les strings 'buy'/'sell' (rétrocompatibilité) et les valeurs numériques
+    envoyées par TradingView via {{plot_1}}.
+      plot_1 > +trend_level  → zone baissière → 'sell'
+      plot_1 < -trend_level  → zone haussière → 'buy'
+      entre les deux         → neutre         → None
+    """
+    s = str(val).strip().lower()
+    if s in ('buy', 'sell'):
+        return s
+    if s in ('', 'none', 'null', 'neutral', 'na', 'n/a', 'nan'):
+        return None
+    try:
+        fval = float(s)
+        if fval > trend_level:    return 'sell'
+        elif fval < -trend_level: return 'buy'
+        else:                     return None
+    except (ValueError, TypeError):
+        logger.warning('[WARN] ST Context valeur invalide: \'' + str(val) + '\'')
+        return None
+
 def fetch_ohlcv(symbol, timeframe, limit=250):
     try:
         raw = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
@@ -380,6 +403,20 @@ def process_symbol(symbol):
         a_long  = bias_4h == 'bull' and ctx_15m == 'buy'
         a_short = bias_4h == 'bear' and ctx_15m == 'sell'
 
+        # Conditions de signal
+        # Bias 15m opposé (zone de value)
+        b15m_ok_long  = bias_15m == 'bear'  # pour LONG: bias 15m bear
+        b15m_ok_short = bias_15m == 'bull'  # pour SHORT: bias 15m bull
+
+        # 1ère entrée: Bias 4H + Context 15m + Bias 15m opposé + flip
+        sig_long_1st  = flip_buy  and a_long  and b15m_ok_long
+        sig_short_1st = flip_sell and a_short and b15m_ok_short
+
+        # Pyramiding: Bias 4H + Bias 1H + Bias 15m opposé + flip (pas de ctx requis)
+        pyra_long_ok  = bias_4h == 'bull' and bias_1h == 'bull' and b15m_ok_long
+        pyra_short_ok = bias_4h == 'bear' and bias_1h == 'bear' and b15m_ok_short
+        sig_long_pyra  = flip_buy  and pyra_long_ok
+        sig_short_pyra = flip_sell and pyra_short_ok
 
         # Debug log
         reason_a = 'no flip' if not flip else ('LONG A' if (sig_long_1st or sig_long_pyra) else 'SHORT A' if (sig_short_1st or sig_short_pyra) else 'filtre A (B4H=' + bias_4h + ' B1H=' + bias_1h + ' B15m=' + bias_15m + ' CTX=' + str(ctx_15m) + ')')
@@ -406,21 +443,6 @@ def process_symbol(symbol):
         if prep_entries:
             with STATE_LOCK:
                 PREP_BUFFER.extend(prep_entries)
-
-        # Conditions de signal
-        # Bias 15m opposé (zone de value)
-        b15m_ok_long  = bias_15m == 'bear'  # pour LONG: bias 15m bear
-        b15m_ok_short = bias_15m == 'bull'  # pour SHORT: bias 15m bull
-
-        # 1ère entrée: Bias 4H + Context 15m + Bias 15m opposé + flip
-        sig_long_1st  = flip_buy  and a_long  and b15m_ok_long
-        sig_short_1st = flip_sell and a_short and b15m_ok_short
-
-        # Pyramiding: Bias 4H + Bias 1H + Bias 15m opposé + flip (pas de ctx requis)
-        pyra_long_ok  = bias_4h == 'bull' and bias_1h == 'bull' and b15m_ok_long
-        pyra_short_ok = bias_4h == 'bear' and bias_1h == 'bear' and b15m_ok_short
-        sig_long_pyra  = flip_buy  and pyra_long_ok
-        sig_short_pyra = flip_sell and pyra_short_ok
 
         # Signaux
         for strat, sig_long, sig_short, kw in [
@@ -548,9 +570,9 @@ def send_hourly_aligned():
         e  = '\U0001f7e2' if st == 'buy' else '\U0001f534'
         pr = '$' + str(round(s.get('price', 0), 4))
         base = e + ' ' + symbol.replace('/USDT', '') + ' ' + pr
-        b2 = s.get('bias_2h', b4)
-        if b2 == 'bull' and ctx == 'buy': bull_a.append(base)
-        if b2 == 'bear' and ctx == 'sell': bear_a.append(base)
+        ctx = s.get('ctx_15m')
+        if b4 == 'bull' and ctx == 'buy': bull_a.append(base)
+        if b4 == 'bear' and ctx == 'sell': bear_a.append(base)
 
     now = datetime.now(timezone.utc).strftime('%H:%M UTC')
     msg = '\U0001f4ca <b>Aligned Report</b> ' + now + '\n' + '\u2501' * 20
@@ -596,9 +618,9 @@ def handle_telegram_command(message):
             e  = '\U0001f7e2' if st == 'buy' else '\U0001f534'
             pr = '$' + str(round(s.get('price', 0), 4))
             base = e + ' ' + symbol.replace('/USDT', '') + ' ' + pr
-        ctx = s.get('ctx_15m')
-        if b4 == 'bull' and ctx == 'buy': bull_a.append(base)
-        if b4 == 'bear' and ctx == 'sell': bear_a.append(base)
+            ctx = s.get('ctx_15m')
+            if b4 == 'bull' and ctx == 'buy': bull_a.append(base)
+            if b4 == 'bear' and ctx == 'sell': bear_a.append(base)
         now = datetime.now(timezone.utc).strftime('%H:%M UTC')
         msg = '\U0001f4ca <b>Aligned</b> ' + now + '\n' + '\u2501' * 20
         if bull_a or bear_a:
@@ -644,6 +666,29 @@ def webhook():
     if not data:
         return jsonify({'ok': False}), 400
 
+    # Callback query (bouton inline Telegram) — traité en premier, pas de symbol requis
+    if 'callback_query' in data:
+        cq = data['callback_query']
+        cq_id   = cq.get('id')
+        cb_data = cq.get('data', '')
+        if cb_data.startswith('confirm:'):
+            pos_key = cb_data[len('confirm:'):]
+            with STATE_LOCK:
+                CONFIRMED_TRADES[pos_key] = True
+            answer_callback_query(cq_id, '✅ Position confirmée ! Pyramiding activé.')
+            logger.info('[CONFIRM] Position confirmée: ' + pos_key)
+            try:
+                msg_id = cq.get('message', {}).get('message_id')
+                chat_id = cq.get('message', {}).get('chat', {}).get('id')
+                requests.post(
+                    'https://api.telegram.org/bot' + CONFIG['TELEGRAM_BOT_TOKEN'] + '/editMessageReplyMarkup',
+                    json={'chat_id': chat_id, 'message_id': msg_id, 'reply_markup': {'inline_keyboard': [[{'text': '✅ Entré en trade', 'callback_data': 'done'}]]}},
+                    timeout=5
+                )
+            except Exception:
+                pass
+        return jsonify({'ok': True}), 200
+
     raw_symbol  = data.get('symbol', '')
     alert_type  = data.get('type', '').lower()
     tf          = data.get('tf', '').lower()
@@ -661,42 +706,8 @@ def webhook():
     if symbol not in CONFIG['SYMBOLS']:
         return jsonify({'ok': False, 'reason': 'not_in_watchlist'}), 200
 
-    # Callback query (bouton inline Telegram)
-    if 'callback_query' in data:
-        cq = data['callback_query']
-        cq_id   = cq.get('id')
-        cb_data = cq.get('data', '')
-        if cb_data.startswith('confirm:'):
-            pos_key = cb_data[len('confirm:'):]
-            with STATE_LOCK:
-                CONFIRMED_TRADES[pos_key] = True
-            answer_callback_query(cq_id, '✅ Position confirmée ! Pyramiding activé.')
-            logger.info('[CONFIRM] Position confirmée: ' + pos_key)
-            # Edit message pour indiquer confirmation
-            try:
-                msg_id = cq.get('message', {}).get('message_id')
-                chat_id = cq.get('message', {}).get('chat', {}).get('id')
-                requests.post(
-                    'https://api.telegram.org/bot' + CONFIG['TELEGRAM_BOT_TOKEN'] + '/editMessageReplyMarkup',
-                    json={'chat_id': chat_id, 'message_id': msg_id, 'reply_markup': {'inline_keyboard': [[{'text': '✅ Entré en trade', 'callback_data': 'done'}]]}},
-                    timeout=5
-                )
-            except Exception:
-                pass
-        return jsonify({'ok': True}), 200
-
     if alert_type == 'st_context' and tf == '15m':
-        ctx_val = None
-        if val in ('buy', 'sell'):
-            ctx_val = val
-        else:
-            try:
-                fval = float(val)
-                if fval < -1.96:   ctx_val = 'buy'
-                elif fval > 1.96:  ctx_val = 'sell'
-                else:              ctx_val = None
-            except (ValueError, TypeError):
-                pass
+        ctx_val = parse_st_context_value(val)
 
         with STATE_LOCK:
             ST_CONTEXT_15M[symbol] = ctx_val
@@ -716,8 +727,8 @@ def status():
         assets.append({
             'symbol':  symbol,
             'bias_4h': s.get('bias_4h', 'N/A'),
-            'bias_4h': s.get('bias_4h', 'N/A'),
-                        'macd_15m': s.get('macd_15m', 0),
+            'ctx_15m': s.get('ctx_15m', 'N/A'),
+            'macd_15m': s.get('macd_15m', 0),
             'st_15m':  s.get('st_15m', 'N/A'),
             'price':   s.get('price', 0),
             'pos_a':   pos_copy.get(symbol + '_A'),
@@ -732,9 +743,10 @@ def aligned():
     for symbol, s in state_copy.items():
         b4 = s.get('bias_4h')
         st = s.get('st_15m')
-        entry = {'symbol': symbol, 'price': s.get('price'), 'st_15m': st}
-        if b4 == 'bull' and b1 == 'bull': bull_a.append(entry)
-        if b4 == 'bear' and b1 == 'bear': bear_a.append(entry)
+        ctx = s.get('ctx_15m')
+        entry = {'symbol': symbol, 'price': s.get('price'), 'st_15m': st, 'ctx_15m': ctx}
+        if b4 == 'bull' and ctx == 'buy':  bull_a.append(entry)
+        if b4 == 'bear' and ctx == 'sell': bear_a.append(entry)
     return jsonify({'strat_a': {'bull': bull_a, 'bear': bear_a}})
 
 @app.route('/positions')
