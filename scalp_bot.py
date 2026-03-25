@@ -108,6 +108,11 @@ STATE_LOCK = threading.Lock()
 LAST_SCAN_TIME = None
 REDIS_CLIENT = None
 
+# Stats hebdomadaires — créneaux horaires (heure Taiwan UTC+8)
+# clé: "HH" (ex: "14") -> {'LONG': int, 'SHORT': int}
+HOURLY_STATS: dict = {}
+WEEKLY_START: datetime = datetime.now(timezone.utc)
+
 # ============================================================================ #
 # REDIS
 # ============================================================================ #
@@ -133,6 +138,43 @@ def audit_log(entry):
             REDIS_CLIENT.ltrim('scalp_audit_v3', 0, 999)
         except Exception as e:
             logger.error('Redis audit: ' + str(e))
+
+def persist_weekly_state():
+    if not REDIS_CLIENT:
+        return
+    try:
+        payload = {
+            'hourly_stats': HOURLY_STATS,
+            'weekly_start': WEEKLY_START.isoformat(),
+        }
+        REDIS_CLIENT.set('scalp_weekly_state', json.dumps(payload))
+    except Exception as e:
+        logger.error('Redis persist weekly: ' + str(e))
+
+def load_weekly_state():
+    global HOURLY_STATS, WEEKLY_START
+    if not REDIS_CLIENT:
+        return
+    try:
+        raw = REDIS_CLIENT.get('scalp_weekly_state')
+        if not raw:
+            return
+        payload = json.loads(raw)
+        HOURLY_STATS = payload.get('hourly_stats', {})
+        ws = payload.get('weekly_start')
+        if ws:
+            WEEKLY_START = datetime.fromisoformat(ws)
+        logger.info('Stats hebdo restaurees depuis Redis | créneaux=' + str(len(HOURLY_STATS)))
+    except Exception as e:
+        logger.error('Redis load weekly: ' + str(e))
+
+def track_signal_hour(signal):
+    """Incrémente le compteur du créneau horaire courant (heure Taiwan UTC+8)."""
+    tw_hour = datetime.now(timezone(timedelta(hours=8))).strftime('%H')
+    with STATE_LOCK:
+        if tw_hour not in HOURLY_STATS:
+            HOURLY_STATS[tw_hour] = {'LONG': 0, 'SHORT': 0}
+        HOURLY_STATS[tw_hour][signal] = HOURLY_STATS[tw_hour].get(signal, 0) + 1
 
 # ============================================================================ #
 # EXCHANGE
@@ -501,6 +543,7 @@ def process_symbol(symbol):
                 send_telegram_with_button(msg, cb_data)
             else:
                 send_telegram(msg)
+            track_signal_hour(signal)
             logger.info('[STRAT ' + strat + '] ' + signal + ' #' + str(entry_count) + ' ' + symbol + ' @ ' + str(price))
             audit_log({'ts': datetime.now(timezone.utc).isoformat(), 'sym': symbol, 'signal': signal, 'strat': strat, 'price': price, 'avg_price': avg_price, 'sl': sl, 'entry_count': entry_count})
 
@@ -796,6 +839,77 @@ def telegram_webhook():
         threading.Thread(target=handle_telegram_command, args=(message,), daemon=True).start()
     return jsonify({'ok': True})
 
+def send_weekly_report():
+    global HOURLY_STATS, WEEKLY_START
+    tw = timezone(timedelta(hours=8))
+    now = datetime.now(tw)
+    week_start = WEEKLY_START.astimezone(tw)
+    total = sum(v.get('LONG', 0) + v.get('SHORT', 0) for v in HOURLY_STATS.values())
+
+    if total == 0:
+        msg = (
+            '📊 <b>[RAPPORT HEBDO SCALP]</b>\n'
+            + '━' * 20 + '\n'
+            + '📅 ' + week_start.strftime('%d/%m') + ' → ' + now.strftime('%d/%m/%Y') + '\n'
+            + 'Aucune alerte cette semaine.'
+        )
+        send_telegram(msg)
+        HOURLY_STATS.clear()
+        WEEKLY_START = datetime.now(timezone.utc)
+        persist_weekly_state()
+        return
+
+    # Trier les créneaux par total décroissant
+    ranked = sorted(
+        HOURLY_STATS.items(),
+        key=lambda x: x[1].get('LONG', 0) + x[1].get('SHORT', 0),
+        reverse=True
+    )
+
+    msg = (
+        '📊 <b>[RAPPORT HEBDO SCALP]</b>\n'
+        + '━' * 20 + '\n'
+        + '📅 ' + week_start.strftime('%d/%m') + ' → ' + now.strftime('%d/%m/%Y') + '\n'
+        + '🔔 Total alertes: <b>' + str(total) + '</b>\n\n'
+        + '⏰ <b>Créneaux horaires (Taiwan UTC+8)</b>\n'
+        + '─' * 20 + '\n'
+    )
+
+    medals = ['🥇', '🥈', '🥉']
+    for i, (hour, counts) in enumerate(ranked):
+        lon = counts.get('LONG', 0)
+        sho = counts.get('SHORT', 0)
+        tot = lon + sho
+        pct = round(tot / total * 100) if total else 0
+        bar = '█' * (pct // 10) + '░' * (10 - pct // 10)
+        medal = medals[i] if i < 3 else '  '
+        msg += (
+            medal + ' <b>' + hour + 'h–' + str(int(hour) + 1).zfill(2) + 'h</b>  '
+            + bar + '  ' + str(tot) + ' (' + str(pct) + '%)\n'
+            + '   🟢 LONG: ' + str(lon) + '  🔴 SHORT: ' + str(sho) + '\n'
+        )
+
+    msg += '\n⏰ ' + now.strftime('%d/%m/%Y %H:%M') + ' (Taiwan)'
+    send_telegram(msg)
+    logger.info('[WEEKLY] Rapport hebdo créneaux envoyé')
+
+    HOURLY_STATS.clear()
+    WEEKLY_START = datetime.now(timezone.utc)
+    persist_weekly_state()
+
+
+def weekly_scheduler():
+    """Envoie le rapport hebdo dimanche à minuit heure Taiwan (UTC+8)."""
+    logger.info('[WEEKLY] Scheduler rapport hebdo démarré (dimanche minuit Taiwan)')
+    while True:
+        now = datetime.now(timezone(timedelta(hours=8)))
+        if now.weekday() == 6 and now.hour == 0 and now.minute == 0:
+            send_weekly_report()
+            time.sleep(61)
+        else:
+            time.sleep(30)
+
+
 # ============================================================================ #
 # DÉMARRAGE
 # ============================================================================ #
@@ -821,7 +935,9 @@ def send_start_notification():
 if __name__ == '__main__':
     logger.info('Demarrage Scalp Bot v3...')
     init_redis()
+    load_weekly_state()
     send_start_notification()
     threading.Thread(target=scanner_loop, daemon=True).start()
     threading.Thread(target=hourly_scheduler, daemon=True).start()
+    threading.Thread(target=weekly_scheduler, daemon=True).start()
     app.run(host='0.0.0.0', port=CONFIG['PORT'])
