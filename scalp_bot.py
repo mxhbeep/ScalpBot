@@ -105,6 +105,7 @@ CONFIRMED_TRADES: dict = {}  # pos_key -> True si entré manuellement
 STATE_LOCK = threading.Lock()
 LAST_SCAN_TIME = None
 LAST_ALERT_TS: dict = {}  # pos_key -> timestamp dernière alerte envoyée
+SCAN_IN_PROGRESS = False  # flag anti-scan concurrent
 ALERT_COOLDOWN = 900  # 15min minimum entre deux alertes pour le même asset/strat
 _LAST_PERSIST_TS = 0.0  # timestamp du dernier persist_weekly_state
 REDIS_CLIENT = None
@@ -230,10 +231,11 @@ def track_signal_hour(signal):
 def should_send_alert(pos_key):
     """Retourne True si aucune alerte n'a été envoyée pour ce pos_key dans les 15 dernières minutes."""
     now = time.time()
-    last = LAST_ALERT_TS.get(pos_key, 0)
-    if now - last >= ALERT_COOLDOWN:
-        LAST_ALERT_TS[pos_key] = now
-        return True
+    with STATE_LOCK:
+        last = LAST_ALERT_TS.get(pos_key, 0)
+        if now - last >= ALERT_COOLDOWN:
+            LAST_ALERT_TS[pos_key] = now
+            return True
     return False
 
 # ============================================================================ #
@@ -664,14 +666,23 @@ def send_prep_report():
     logger.info('[PREP] Rapport groupe envoye ' + str(len(entries)) + ' assets')
 
 def scan_all():
-    global LAST_SCAN_TIME
-    logger.info('Scan ' + str(len(CONFIG['SYMBOLS'])) + ' assets...')
-    LAST_SCAN_TIME = datetime.now(timezone.utc).isoformat()
-    for symbol in CONFIG['SYMBOLS']:
-        process_symbol(symbol)
-        time.sleep(0.3)
-    send_prep_report()
-    logger.info('Scan termine')
+    global LAST_SCAN_TIME, SCAN_IN_PROGRESS
+    with STATE_LOCK:
+        if SCAN_IN_PROGRESS:
+            logger.warning('[SCAN] Scan déjà en cours — skip')
+            return
+        SCAN_IN_PROGRESS = True
+    try:
+        logger.info('Scan ' + str(len(CONFIG['SYMBOLS'])) + ' assets...')
+        LAST_SCAN_TIME = datetime.now(timezone.utc).isoformat()
+        for symbol in CONFIG['SYMBOLS']:
+            process_symbol(symbol)
+            time.sleep(0.3)
+        send_prep_report()
+        logger.info('Scan termine')
+    finally:
+        with STATE_LOCK:
+            SCAN_IN_PROGRESS = False
 
 def scanner_loop():
     while True:
@@ -893,7 +904,10 @@ def positions():
 @app.route('/audit')
 def audit():
     symbol_filter = request.args.get('symbol')
-    limit = int(request.args.get('limit', 100))
+    try:
+        limit = max(1, min(500, int(request.args.get('limit', 100))))
+    except (ValueError, TypeError):
+        return jsonify({'error': 'limit doit être un entier entre 1 et 500'}), 400
     if not REDIS_CLIENT:
         return jsonify({'error': 'Redis non connecte'}), 503
     try:
@@ -909,6 +923,9 @@ def audit():
 
 @app.route('/scan', methods=['POST'])
 def force_scan():
+    with STATE_LOCK:
+        if SCAN_IN_PROGRESS:
+            return jsonify({'status': 'scan déjà en cours'}), 409
     threading.Thread(target=scan_all, daemon=True).start()
     return jsonify({'status': 'scan lance'})
 
@@ -917,11 +934,14 @@ def reset_position(symbol):
     sym  = symbol.replace('-', '/').upper()
     strat = request.args.get('strat', 'A')
     key  = sym + '_' + strat
+    found = False
     with STATE_LOCK:
         if key in POSITIONS:
             del POSITIONS[key]
-            persist_positions()
-            return jsonify({'status': 'reset ' + key})
+            found = True
+    if found:
+        persist_positions()  # hors du lock pour éviter deadlock
+        return jsonify({'status': 'reset ' + key})
     return jsonify({'status': 'pas de position'}), 404
 
 @app.route('/telegram', methods=['POST'])
