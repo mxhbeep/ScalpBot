@@ -949,6 +949,23 @@ def force_scan():
     threading.Thread(target=scan_all, daemon=True).start()
     return jsonify({'status': 'scan lance'})
 
+@app.route('/reset_all', methods=['POST'])
+def reset_all():
+    """Remet tout l'état à zéro (positions, confirmed trades, scan state, context)."""
+    with STATE_LOCK:
+        POSITIONS.clear()
+        CONFIRMED_TRADES.clear()
+        SCAN_STATE.clear()
+        ST_CONTEXT_15M.clear()
+        LAST_ALERT_TS.clear()
+    if REDIS_CLIENT:
+        try:
+            REDIS_CLIENT.delete('scalp_positions')
+        except Exception as e:
+            logger.error('Redis reset_all: ' + str(e))
+    logger.info('[RESET] État complet remis à zéro')
+    return jsonify({'status': 'reset', 'message': 'État complet remis à zéro'}), 200
+
 @app.route('/reset/<path:symbol>', methods=['POST'])
 def reset_position(symbol):
     sym  = symbol.replace('-', '/').upper()
