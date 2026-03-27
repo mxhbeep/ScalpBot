@@ -102,6 +102,7 @@ POSITIONS: dict = {}
 PREP_BUFFER: list = []
 SCAN_STATE:  dict = {}
 ST_CONTEXT_15M: dict = {}  # symbol -> 'buy' | 'sell' | None
+ST_AI_15M: dict = {}       # symbol -> 'buy' | 'sell' | None (recu via webhook TradingView)
 CONFIRMED_TRADES: dict = {}  # pos_key -> True si entré manuellement
 STATE_LOCK = threading.Lock()
 LAST_SCAN_TIME = None
@@ -153,10 +154,13 @@ def persist_weekly_state(force=False):
     try:
         with STATE_LOCK:
             ctx_snapshot = dict(ST_CONTEXT_15M)
+        with STATE_LOCK:
+            st_ai_snapshot = dict(ST_AI_15M)
         payload = {
             'hourly_stats':   HOURLY_STATS,
             'weekly_start':   WEEKLY_START.isoformat(),
             'st_context_15m': ctx_snapshot,
+            'st_ai_15m':      st_ai_snapshot,
         }
         REDIS_CLIENT.set('scalp_weekly_state', json.dumps(payload))
     except Exception as e:
@@ -176,8 +180,10 @@ def load_weekly_state():
         if ws:
             WEEKLY_START = datetime.fromisoformat(ws)
         ctx = payload.get('st_context_15m', {})
+        st_ai = payload.get('st_ai_15m', {})
         with STATE_LOCK:
             ST_CONTEXT_15M.update(ctx)
+            ST_AI_15M.update(st_ai)
         logger.info(
             'Stats hebdo restaurees depuis Redis | créneaux=' + str(len(HOURLY_STATS))
             + ' | ctx_15m=' + str(len(ST_CONTEXT_15M)) + ' assets'
@@ -266,6 +272,19 @@ def parse_st_context_value(val, trend_level=1.96):
         else:                     return None
     except (ValueError, TypeError):
         logger.warning('[WARN] ST Context valeur invalide: \'' + str(val) + '\'')
+        return None
+
+def parse_supertrend_value(val):
+    """Convertit la valeur brute du SuperTrend AI en 'buy' ou 'sell'.
+    Accepte 'buy'/'sell' (ancien format) et '1'/'0' (nouveau format via {{plot_2}}).
+    """
+    s = str(val).strip().lower()
+    if s == 'buy'  or s == '1': return 'buy'
+    if s == 'sell' or s == '0': return 'sell'
+    try:
+        return 'buy' if float(s) >= 0.5 else 'sell'
+    except (ValueError, TypeError):
+        logger.warning('[WARN] SuperTrend valeur invalide: '' + str(val) + ''')
         return None
 
 def fetch_ohlcv(symbol, timeframe, limit=250):
@@ -521,19 +540,18 @@ def process_symbol(symbol):
         bias_15m  = calc_bias(df_15m, CONFIG['BIAS_EMA_LEN'], CONFIG['BIAS_SMA_LEN'])
         macd_15m  = calc_macd_histogram(df_15m, CONFIG['MACD_FAST'], CONFIG['MACD_SLOW'], CONFIG['MACD_SIGNAL'], candle=-2)
 
-        dir_15m  = supertrend_ai(df_15m)
-        curr_15m  = dir_15m.iloc[-2]
-        prev_15m  = dir_15m.iloc[-3]
-        prev2_15m = dir_15m.iloc[-4]
-        price     = float(df_15m['close'].iloc[-2])
+        price = float(df_15m['close'].iloc[-1])
 
-        flip_buy  = (prev_15m == 'sell' and curr_15m == 'buy') or (prev2_15m == 'sell' and prev_15m == 'buy' and curr_15m == 'buy')
-        flip_sell = (prev_15m == 'buy'  and curr_15m == 'sell') or (prev2_15m == 'buy' and prev_15m == 'sell' and curr_15m == 'sell')
-        flip      = flip_buy or flip_sell
-
-        # ST Context (recu via webhook TradingView)
+        # ST AI 15min et ST Context — reçus via webhook TradingView
         with STATE_LOCK:
-            ctx_15m = ST_CONTEXT_15M.get(symbol)
+            ctx_15m  = ST_CONTEXT_15M.get(symbol)
+            curr_15m = ST_AI_15M.get(symbol)
+
+        # Flip détecté via webhook : on compare avec l'état précédent en SCAN_STATE
+        prev_st = SCAN_STATE.get(symbol, {}).get('st_15m')
+        flip_buy  = curr_15m == 'buy'  and prev_st == 'sell'
+        flip_sell = curr_15m == 'sell' and prev_st == 'buy'
+        flip      = flip_buy or flip_sell
 
         # Conditions Strat A: Bias 4H + ST Context 15min zone
         a_long  = bias_4h == 'bull' and ctx_15m == 'buy'
@@ -863,12 +881,19 @@ def webhook():
 
     if alert_type == 'st_context' and tf == '15m':
         ctx_val = parse_st_context_value(val)
-
         with STATE_LOCK:
             ST_CONTEXT_15M[symbol] = ctx_val
         persist_weekly_state()
         logger.info('[WEBHOOK] ' + symbol + ' ST Context 15min: ' + str(ctx_val) + ' (val=' + val + ')')
         return jsonify({'ok': True, 'symbol': symbol, 'ctx_15m': ctx_val}), 200
+
+    if alert_type == 'supertrend' and tf == '15m':
+        st_val = parse_supertrend_value(val)
+        with STATE_LOCK:
+            ST_AI_15M[symbol] = st_val
+        persist_weekly_state()
+        logger.info('[WEBHOOK] ' + symbol + ' ST AI 15min: ' + str(st_val) + ' (val=' + val + ')')
+        return jsonify({'ok': True, 'symbol': symbol, 'st_15m': st_val}), 200
 
     return jsonify({'ok': False, 'reason': 'unknown_type'}), 200
 
