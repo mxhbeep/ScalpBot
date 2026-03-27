@@ -574,7 +574,7 @@ def process_symbol(symbol):
 
         # Debug log
         reason_a = 'no flip' if not flip else ('LONG A' if (sig_long_1st or sig_long_pyra) else 'SHORT A' if (sig_short_1st or sig_short_pyra) else 'filtre A (B4H=' + bias_4h + ' B1H=' + bias_1h + ' B15m=' + bias_15m + ' CTX=' + str(ctx_15m) + ')')
-        logger.info('[SCAN] ' + symbol.ljust(20) + ' B4H=' + bias_4h + ' B1H=' + bias_1h + ' B15m=' + bias_15m + ' CTX15m=' + str(ctx_15m) + ' ST=' + curr_15m + ' flip=' + str(flip) + ' A:' + reason_a)
+        logger.info('[SCAN] ' + symbol.ljust(20) + ' B4H=' + bias_4h + ' B1H=' + bias_1h + ' B15m=' + bias_15m + ' CTX15m=' + str(ctx_15m) + ' ST=' + str(curr_15m) + ' flip=' + str(flip) + ' A:' + reason_a)
 
         # Update scan state
         with STATE_LOCK:
