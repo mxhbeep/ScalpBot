@@ -13,6 +13,7 @@ import redis as redis_lib
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from flask import Flask, request, jsonify
+import pandas as pd
 
 # ============================================================================
 # CONFIGURATION
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 CONFIG = {
-    'TELEGRAM_BOT_TOKEN': os.environ.get('SCALP_BOT_TOKEN', '8611960882:AAHAV92pE99M4cqRFS3b5HKMVzfpuw1Gj5g'),
+    'TELEGRAM_BOT_TOKEN': os.environ.get('TELEGRAM_BOT_TOKEN', ''),
     'TELEGRAM_CHAT_ID':   os.environ.get('TELEGRAM_CHAT_ID', ''),
     'REDIS_URL':          os.environ.get('REDIS_URL', ''),
     'MIN_COOLDOWN':       3600,   # 1H entrée
@@ -57,6 +58,68 @@ CONFIG = {
         'ZEC/USDT':     {'exchange': 'okx'},
     }
 }
+
+# ============================================================================
+# OKX — Calcul Bias 1H
+# ============================================================================
+
+def fetch_ohlcv_okx(symbol, tf, limit=100):
+    """Fetch OHLCV depuis OKX API publique."""
+    try:
+        inst_id = symbol.replace('/', '-')
+        bar_map = {'1h': '1H', '4h': '4H', '1d': '1D'}
+        bar = bar_map.get(tf, '1H')
+        url = f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar={bar}&limit={limit}"
+        resp = requests.get(url, timeout=10)
+        data = resp.json().get('data', [])
+        if not data:
+            return None
+        df = pd.DataFrame(data, columns=['ts','o','h','l','c','vol','volCcy','volCcyQuote','confirm'])
+        df = df[df['confirm'] == '1'].copy()
+        df['close'] = df['c'].astype(float)
+        df = df.iloc[::-1].reset_index(drop=True)
+        return df
+    except Exception as e:
+        logger.debug(f"[OKX] {symbol} {tf}: {e}")
+        return None
+
+def calc_bias(df, ema_len=13, sma_len=30):
+    """Calcule le bias EMA/SMA."""
+    try:
+        if df is None or len(df) < sma_len:
+            return None
+        close = df['close']
+        ema = close.ewm(span=ema_len, adjust=False).mean().iloc[-1]
+        sma = close.rolling(sma_len).mean().iloc[-1]
+        c   = close.iloc[-1]
+        if c > ema and ema > sma:
+            return 'bull'
+        if c < ema and ema < sma:
+            return 'bear'
+        return None
+    except:
+        return None
+
+def update_bias_1h():
+    """Met à jour le Bias 1H pour tous les assets toutes les 15min."""
+    logger.info("📊 Scheduler Bias 1H démarré")
+    while True:
+        try:
+            for symbol in list(CONFIG['SYMBOLS'].keys()):
+                try:
+                    df = fetch_ohlcv_okx(symbol, '1h', limit=50)
+                    if df is not None:
+                        bias = calc_bias(df, ema_len=13, sma_len=30)
+                        with STATE_LOCK:
+                            init_symbol(symbol)
+                            MOMENTUM_STATE[symbol]['bias_1h'] = bias
+                except Exception as e:
+                    logger.debug(f"[BIAS] {symbol}: {e}")
+            logger.info("[BIAS] Mise à jour Bias 1H terminée")
+        except Exception as e:
+            logger.error(f"[BIAS] Erreur: {e}")
+        time.sleep(900)  # toutes les 15min
+
 
 # ============================================================================
 # STATE
@@ -452,6 +515,10 @@ def startup():
             logger.info(f"✅ Telegram webhook configuré: {wh_url}")
         except Exception as e:
             logger.warning(f"⚠️ Webhook setup: {e}")
+
+    # Démarrer le scheduler Bias 1H
+    bias_thread = threading.Thread(target=update_bias_1h, daemon=True)
+    bias_thread.start()
 
     send_telegram(
         "🚀 <b>Scalping Bot démarré</b>\n"
