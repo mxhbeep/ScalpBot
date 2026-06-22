@@ -1,7 +1,4 @@
-ccxt>=4.4.30
-pandas>=2.2.3
-numpy>=2.0.0
-requests>=2.32.3
-gunicorn>=23.0.0
-redis>=5.0.0
 flask>=3.0.0
+gunicorn>=21.0.0
+requests>=2.31.0
+redis>=5.0.0
