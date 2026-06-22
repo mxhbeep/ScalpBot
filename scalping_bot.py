@@ -233,8 +233,8 @@ def should_send(symbol, key, cooldown=3600, event_id=None):
     return False
 
 def send_telegram(msg):
-    tok  = CONFIG['TELEGRAM_BOT_TOKEN']
-    chat = CONFIG['TELEGRAM_CHAT_ID']
+    tok  = os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
+    chat = os.environ.get('TELEGRAM_CHAT_ID', '')
     if not tok or not chat:
         logger.warning("⚠️ Token ou chat_id manquant")
         return
@@ -252,8 +252,8 @@ def send_telegram(msg):
         logger.error(f"Telegram error: {e}")
 
 def send_telegram_with_buttons(msg, callback_key):
-    tok  = CONFIG['TELEGRAM_BOT_TOKEN']
-    chat = CONFIG['TELEGRAM_CHAT_ID']
+    tok  = os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
+    chat = os.environ.get('TELEGRAM_CHAT_ID', '')
     if not tok or not chat:
         return
     try:
@@ -434,7 +434,7 @@ def telegram_callback():
         chat_id = cb.get('message', {}).get('chat', {}).get('id')
         msg_id  = cb.get('message', {}).get('message_id')
         user    = cb.get('from', {}).get('first_name', 'User')
-        tok     = CONFIG['TELEGRAM_BOT_TOKEN']
+        tok     = os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
 
         if tok and cb_id:
             requests.post(f"https://api.telegram.org/bot{tok}/answerCallbackQuery",
@@ -501,7 +501,7 @@ def startup():
     init_redis()
     load_state()
 
-    tok      = CONFIG['TELEGRAM_BOT_TOKEN']
+    tok      = os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
     base_url = os.environ.get('SCALP_PUBLIC_URL', '').rstrip('/')
     if tok and base_url:
         try:
