@@ -129,7 +129,7 @@ def update_bias_1h():
 # STATE
 # ============================================================================
 
-STATE_LOCK       = threading.Lock()
+STATE_LOCK       = threading.RLock()  # RLock pour éviter deadlock (should_send appelé dans le lock)
 MOMENTUM_STATE   = {}   # symbol -> {st_ai_15m, st_ai_3h, bias_1h, last_st_15m, ...}
 SCALP_POSITIONS  = {}   # f"{symbol}_SCALP" -> {direction, entry_count}
 PYRA_ENABLED     = {}   # f"{symbol}_SCALP" -> True
@@ -164,6 +164,7 @@ def persist_state():
             'positions':  dict(SCALP_POSITIONS),
             'pyra':       dict(PYRA_ENABLED),
             'signals':    LAST_SIGNALS,
+            'events':     LAST_SIGNAL_EVENTS,
         }
         REDIS_CLIENT.set('scalp_bot_state', json.dumps(payload))
     except Exception as e:
@@ -181,7 +182,8 @@ def load_state():
         MOMENTUM_STATE  = payload.get('momentum', {})
         SCALP_POSITIONS.update(payload.get('positions', {}))
         PYRA_ENABLED.update(payload.get('pyra', {}))
-        LAST_SIGNALS    = payload.get('signals', {})
+        LAST_SIGNALS       = payload.get('signals', {})
+        LAST_SIGNAL_EVENTS.update(payload.get('events', {}))
         # Nettoyer les assets hors watchlist
         stale = [s for s in list(MOMENTUM_STATE) if s not in CONFIG['SYMBOLS']]
         for s in stale:
@@ -360,6 +362,7 @@ def webhook():
                 pos = SCALP_POSITIONS.get(pos_key)
                 if pos and pos['direction'] != direction:
                     SCALP_POSITIONS.pop(pos_key, None)
+                    PYRA_ENABLED.pop(pos_key, None)
                     pos = None
 
                 is_entry = (st_3h_ok and bias_1h_ok and pos is None)
@@ -374,6 +377,7 @@ def webhook():
 
                 if is_entry and should_send(symbol, f"scalp_entry_{st_15m}", event_id=event_id, cooldown=3600):
                     SCALP_POSITIONS[pos_key] = {'direction': direction, 'entry_count': 1}
+                    PYRA_ENABLED.pop(pos_key, None)  # reset pyramiding sur nouvelle entrée
                     pos = SCALP_POSITIONS[pos_key]
                 else:
                     is_entry = False
@@ -488,7 +492,10 @@ def index():
 @app.route('/reset', methods=['POST'])
 def reset():
     secret = os.environ.get('ADMIN_SECRET', '')
-    if secret and request.headers.get('X-Admin-Secret') != secret:
+    if not secret:
+        logger.error('ADMIN_SECRET non défini — /reset refusé')
+        return jsonify({'error': 'unauthorized'}), 401
+    if request.headers.get('X-Admin-Secret') != secret:
         return jsonify({'error': 'unauthorized'}), 401
     with STATE_LOCK:
         SCALP_POSITIONS.clear()
