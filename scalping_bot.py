@@ -159,19 +159,20 @@ def persist_state():
     if not REDIS_CLIENT:
         return
     try:
-        payload = {
-            'momentum':   MOMENTUM_STATE,
-            'positions':  dict(SCALP_POSITIONS),
-            'pyra':       dict(PYRA_ENABLED),
-            'signals':    LAST_SIGNALS,
-            'events':     LAST_SIGNAL_EVENTS,
-        }
+        with STATE_LOCK:
+            payload = {
+                'momentum':   dict(MOMENTUM_STATE),
+                'positions':  dict(SCALP_POSITIONS),
+                'pyra':       dict(PYRA_ENABLED),
+                'signals':    dict(LAST_SIGNALS),
+                'events':     dict(LAST_SIGNAL_EVENTS),
+            }
         REDIS_CLIENT.set('scalp_bot_state', json.dumps(payload))
     except Exception as e:
         logger.error(f"Redis save error: {e}")
 
 def load_state():
-    global MOMENTUM_STATE, SCALP_POSITIONS, PYRA_ENABLED, LAST_SIGNALS
+    global MOMENTUM_STATE, SCALP_POSITIONS, PYRA_ENABLED, LAST_SIGNALS, LAST_SIGNAL_EVENTS
     if not REDIS_CLIENT:
         return
     try:
@@ -183,7 +184,6 @@ def load_state():
         SCALP_POSITIONS.update(payload.get('positions', {}))
         PYRA_ENABLED.update(payload.get('pyra', {}))
         LAST_SIGNALS       = payload.get('signals', {})
-        global LAST_SIGNAL_EVENTS
         LAST_SIGNAL_EVENTS = payload.get('events', {})
         # Nettoyer les assets hors watchlist
         stale = [s for s in list(MOMENTUM_STATE) if s not in CONFIG['SYMBOLS']]
@@ -453,6 +453,7 @@ def telegram_callback():
             key = cb_data[len('pyra_on:'):]
             with STATE_LOCK:
                 PYRA_ENABLED[key] = True
+            persist_state()
             logger.info(f"[PYRA] Activé: {key}")
             if tok and chat_id and msg_id:
                 requests.post(f"https://api.telegram.org/bot{tok}/editMessageReplyMarkup",
@@ -465,6 +466,7 @@ def telegram_callback():
             key = cb_data[len('pyra_off:'):]
             with STATE_LOCK:
                 PYRA_ENABLED.pop(key, None)
+            persist_state()
             logger.info(f"[PYRA] Ignoré: {key}")
             if tok and chat_id and msg_id:
                 requests.post(f"https://api.telegram.org/bot{tok}/editMessageReplyMarkup",
