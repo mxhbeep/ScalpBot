@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot — ST AI 3H + Bias 1H + flip ST AI 15m
+# Scalping Bot — ST AI 4H + Bias 1H + flip ST AI 15m
 # Service Railway séparé
 
 import json
@@ -130,7 +130,7 @@ def update_bias_1h():
 # ============================================================================
 
 STATE_LOCK       = threading.RLock()  # RLock pour éviter deadlock (should_send appelé dans le lock)
-MOMENTUM_STATE   = {}   # symbol -> {st_ai_15m, st_ai_3h, bias_1h, last_st_15m, ...}
+MOMENTUM_STATE   = {}   # symbol -> {st_ai_15m, st_ai_4h, bias_1h, last_st_15m, ...}
 SCALP_POSITIONS  = {}   # f"{symbol}_SCALP" -> {direction, entry_count}
 PYRA_ENABLED     = {}   # f"{symbol}_SCALP" -> True
 LAST_SIGNALS     = {}
@@ -202,10 +202,10 @@ def init_symbol(symbol):
     if symbol not in MOMENTUM_STATE:
         MOMENTUM_STATE[symbol] = {
             'st_ai_15m':    None,
-            'st_ai_3h':     None,
+            'st_ai_4h':     None,
             'bias_1h':      None,
             'last_st_15m':  None,
-            'st_3h_flipped': False,
+            'st_4h_flipped': False,
         }
 
 def format_price(price):
@@ -304,7 +304,7 @@ def webhook():
     event_id   = data.get('event_id') or data.get('time') or str(time.time())
 
     # Normaliser tf
-    tf_aliases = {'15': '15m', '60': '1h', '180': '3h', '3hr': '3h', '3hour': '3h'}
+    tf_aliases = {'15': '15m', '60': '1h', '180': '3h', '3hr': '3h', '3hour': '3h', '240': '4h', '4hr': '4h', '4hour': '4h'}
     tf = tf_aliases.get(tf, tf)
 
     # Normaliser symbol
@@ -334,12 +334,12 @@ def webhook():
             m['st_ai_15m'] = parsed
             if prev_15m and parsed and parsed != prev_15m:
                 m['last_st_15m'] = prev_15m
-        elif tf == '3h':
-            prev_3h = m.get('st_ai_3h')
-            m['st_ai_3h'] = parsed
-            m['st_3h_flipped'] = bool(prev_3h and parsed and parsed != prev_3h)
-            if m['st_3h_flipped'] and prev_3h:
-                m['last_st_3h'] = prev_3h
+        elif tf == '4h':
+            prev_4h = m.get('st_ai_4h')
+            m['st_ai_4h'] = parsed
+            m['st_4h_flipped'] = bool(prev_4h and parsed and parsed != prev_4h)
+            if m['st_4h_flipped'] and prev_4h:
+                m['last_st_4h'] = prev_4h
 
     elif alert_type == 'bias':
         bias_val = str(val).lower() if val else None
@@ -353,14 +353,14 @@ def webhook():
         flipped = (st_15m is not None and prev is not None and st_15m != prev)
 
         if flipped:
-            st_3h   = m.get('st_ai_3h')
+            st_4h   = m.get('st_ai_4h')
             bias_1h = m.get('bias_1h')
 
             direction  = "LONG" if st_15m == 'buy' else "SHORT"
-            exp_st_3h  = 'buy'  if direction == 'LONG' else 'sell'
+            exp_st_4h  = 'buy'  if direction == 'LONG' else 'sell'
             exp_bias   = 'bull' if direction == 'LONG' else 'bear'
 
-            st_3h_ok  = st_3h  == exp_st_3h
+            st_4h_ok  = st_4h  == exp_st_4h
             bias_1h_ok = bias_1h == exp_bias
 
             pos_key = f"{symbol}_SCALP"
@@ -371,12 +371,12 @@ def webhook():
                     PYRA_ENABLED.pop(pos_key, None)
                     pos = None
 
-                is_entry = (st_3h_ok and bias_1h_ok and pos is None)
+                is_entry = (st_4h_ok and bias_1h_ok and pos is None)
                 opp      = 'sell' if st_15m == 'buy' else 'buy'
                 guard_ok = m.get('last_st_15m') == opp
                 is_pyra  = bool(
                     pos and pos['direction'] == direction
-                    and st_3h_ok and bias_1h_ok
+                    and st_4h_ok and bias_1h_ok
                     and PYRA_ENABLED.get(pos_key, False)
                     and guard_ok
                 )
@@ -397,7 +397,7 @@ def webhook():
                     f"💰 Price: ${format_price(price)}\n"
                     f"🏦 Exchange: OKX\n"
                     f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-                    f"✅ ST AI 3H: {(st_3h or '?').upper()} (filtre)\n"
+                    f"✅ ST AI 4H: {(st_4h or '?').upper()} (filtre)\n"
                     f"✅ Bias 1H: {(bias_1h or '?').upper()} (EMA13/SMA30)\n"
                     f"✅ SuperTrend AI 15m: {st_15m.upper()} (SIGNAL)",
                     pos_key
@@ -419,7 +419,7 @@ def webhook():
                     f"📈 Direction: {direction}\n"
                     f"💰 Price: ${format_price(price)}\n"
                     f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-                    f"✅ ST AI 3H: {(st_3h or '?').upper()}\n"
+                    f"✅ ST AI 4H: {(st_4h or '?').upper()}\n"
                     f"✅ Bias 1H: {(bias_1h or '?').upper()}\n"
                     f"✅ SuperTrend AI 15m: {st_15m.upper()} (PYRAMIDING)\n"
                     f"🛡️ Guard: flip opposé validé"
@@ -546,7 +546,7 @@ def startup():
         "🚀 <b>Scalping Bot démarré</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 Assets: {len(CONFIG['SYMBOLS'])}\n"
-        f"⚙️ Stratégie: ST AI 3H + Bias 1H + flip ST AI 15m\n"
+        f"⚙️ Stratégie: ST AI 4H + Bias 1H + flip ST AI 15m\n"
         f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}"
     )
 
