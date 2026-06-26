@@ -263,7 +263,8 @@ def send_telegram_with_buttons(msg, callback_key):
     tok  = os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
     chat = os.environ.get('TELEGRAM_CHAT_ID', '')
     if not tok or not chat:
-        return
+        logger.warning("⚠️ Token ou chat_id manquant — position créée sans notification")
+        return False
     try:
         keyboard = {"inline_keyboard": [[
             {"text": "📈 Activer pyramiding", "callback_data": f"pyra_on:{callback_key}"},
@@ -276,10 +277,13 @@ def send_telegram_with_buttons(msg, callback_key):
         )
         if resp.status_code == 200:
             logger.info("✅ Telegram avec boutons envoyé")
+            return True
         else:
             logger.error(f"❌ Telegram buttons {resp.status_code}: {resp.text[:100]}")
+            return False
     except Exception as e:
         logger.error(f"Telegram buttons error: {e}")
+        return False
 
 # ============================================================================
 # WEBHOOK
@@ -386,7 +390,7 @@ def webhook():
 
             if is_entry and pos:
                 emoji = "🟢" if direction == "LONG" else "🔴"
-                send_telegram_with_buttons(
+                tg_sent = send_telegram_with_buttons(
                     f"{emoji} <b>[SCALP - ENTREE]</b> {symbol}\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"📈 Direction: {direction}\n"
@@ -398,6 +402,8 @@ def webhook():
                     f"✅ SuperTrend AI 15m: {st_15m.upper()} (SIGNAL)",
                     pos_key
                 )
+                if not tg_sent:
+                    logger.warning(f"[SCALP] Entrée {symbol} créée mais notification Telegram échouée")
                 logger.info(f"[SCALP] Entrée: {symbol} {direction}")
                 persist_state()
 
