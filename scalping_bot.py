@@ -105,16 +105,20 @@ def update_bias_1h():
     logger.info("📊 Scheduler Bias 1H démarré")
     while True:
         try:
+            # Calculer tous les bias HORS du lock (les fetches OKX peuvent être longs)
+            results = {}
             for symbol in list(CONFIG['SYMBOLS'].keys()):
                 try:
                     df = fetch_ohlcv_okx(symbol, '1h', limit=50)
                     if df is not None:
-                        bias = calc_bias(df, ema_len=13, sma_len=30)
-                        with STATE_LOCK:
-                            init_symbol(symbol)
-                            MOMENTUM_STATE[symbol]['bias_1h'] = bias
+                        results[symbol] = calc_bias(df, ema_len=13, sma_len=30)
                 except Exception as e:
                     logger.debug(f"[BIAS] {symbol}: {e}")
+            # Mettre à jour l'état avec des locks courts symbol par symbol
+            for symbol, bias in results.items():
+                with STATE_LOCK:
+                    init_symbol(symbol)
+                    MOMENTUM_STATE[symbol]['bias_1h'] = bias
             logger.info("[BIAS] Mise à jour Bias 1H terminée")
         except Exception as e:
             logger.error(f"[BIAS] Erreur: {e}")

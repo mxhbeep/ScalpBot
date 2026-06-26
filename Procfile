@@ -1,1 +1,1 @@
-web: gunicorn --workers 1 --timeout 120 scalping_bot:app
+web: gunicorn --workers 1 --timeout 300 scalping_bot:app
