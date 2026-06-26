@@ -183,7 +183,8 @@ def load_state():
         SCALP_POSITIONS.update(payload.get('positions', {}))
         PYRA_ENABLED.update(payload.get('pyra', {}))
         LAST_SIGNALS       = payload.get('signals', {})
-        LAST_SIGNAL_EVENTS.update(payload.get('events', {}))
+        global LAST_SIGNAL_EVENTS
+        LAST_SIGNAL_EVENTS = payload.get('events', {})
         # Nettoyer les assets hors watchlist
         stale = [s for s in list(MOMENTUM_STATE) if s not in CONFIG['SYMBOLS']]
         for s in stale:
@@ -501,6 +502,7 @@ def reset():
         SCALP_POSITIONS.clear()
         PYRA_ENABLED.clear()
         LAST_SIGNALS.clear()
+        LAST_SIGNAL_EVENTS.clear()
     persist_state()
     return jsonify({'status': 'reset'}), 200
 
