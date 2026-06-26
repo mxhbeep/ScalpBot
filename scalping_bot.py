@@ -167,7 +167,8 @@ def persist_state():
                 'signals':    dict(LAST_SIGNALS),
                 'events':     dict(LAST_SIGNAL_EVENTS),
             }
-        REDIS_CLIENT.set('scalp_bot_state', json.dumps(payload))
+            serialized = json.dumps(payload)
+        REDIS_CLIENT.set('scalp_bot_state', serialized)
     except Exception as e:
         logger.error(f"Redis save error: {e}")
 
@@ -181,8 +182,8 @@ def load_state():
             return
         payload = json.loads(raw)
         MOMENTUM_STATE  = payload.get('momentum', {})
-        SCALP_POSITIONS.update(payload.get('positions', {}))
-        PYRA_ENABLED.update(payload.get('pyra', {}))
+        SCALP_POSITIONS    = payload.get('positions', {})
+        PYRA_ENABLED       = payload.get('pyra', {})
         LAST_SIGNALS       = payload.get('signals', {})
         LAST_SIGNAL_EVENTS = payload.get('events', {})
         # Nettoyer les assets hors watchlist
