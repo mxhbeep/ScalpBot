@@ -513,6 +513,21 @@ def reset():
         LAST_SIGNALS.clear()
         LAST_SIGNAL_EVENTS.clear()
     persist_state()
+
+    # Auto sync_scalp depuis le bot principal
+    main_url   = os.environ.get('MAIN_BOT_URL', '').rstrip('/')
+    admin_secret = os.environ.get('ADMIN_SECRET', '')
+    if main_url and admin_secret:
+        try:
+            resp = requests.post(
+                f'{main_url}/sync_scalp',
+                headers={'X-Admin-Secret': admin_secret},
+                timeout=10
+            )
+            logger.info(f'[RESET] sync_scalp auto: {resp.status_code}')
+        except Exception as e:
+            logger.warning(f'[RESET] sync_scalp auto échoué: {e}')
+
     return jsonify({'status': 'reset'}), 200
 
 # ============================================================================
