@@ -351,7 +351,7 @@ def webhook():
     elif alert_type == 'st_context':
         try:
             ctx_val = float(val)
-            ctx_parsed = 'buy' if ctx_val > 0 else 'sell' if ctx_val < 0 else None
+            ctx_parsed = 'buy' if ctx_val < -1.96 else 'sell' if ctx_val > 1.96 else None
         except:
             ctx_parsed = None
         if tf == '5m':
@@ -379,7 +379,7 @@ def webhook():
         if alert_type == 'st_context' and tf == '5m':
             try:
                 ctx_val = float(val)
-                ctx_parsed = 'buy' if ctx_val > 0 else 'sell' if ctx_val < 0 else None
+                ctx_parsed = 'buy' if ctx_val < -1.96 else 'sell' if ctx_val > 1.96 else None
             except:
                 ctx_parsed = None
             if ctx_parsed is None:
