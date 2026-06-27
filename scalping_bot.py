@@ -384,6 +384,9 @@ def webhook():
                 ctx_parsed = None
             if ctx_parsed is None:
                 return jsonify({'status': 'ok'}), 200
+            # Mettre à jour ctx_5m avec la valeur reçue
+            m['st_context_5m'] = ctx_parsed
+            ctx_5m = ctx_parsed
             signal_direction = "LONG" if ctx_parsed == 'buy' else "SHORT"
             signal_type      = 'ctx5m'
         elif alert_type == 'supertrend' and tf == '15m' and flipped_15m:
@@ -415,6 +418,8 @@ def webhook():
                 pos = None
 
             # Entrée — uniquement sur ST Context 5m
+            # ctx_15m None = neutre = pas bloquant
+            antichop_blocked = (ctx_15m == opp_ctx) if ctx_15m is not None else False
             is_entry = (
                 signal_type == 'ctx5m'
                 and st_4h_ok and bias_1h_ok
