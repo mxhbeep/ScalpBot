@@ -201,11 +201,13 @@ def load_state():
 def init_symbol(symbol):
     if symbol not in MOMENTUM_STATE:
         MOMENTUM_STATE[symbol] = {
-            'st_ai_15m':    None,
-            'st_ai_4h':     None,
-            'bias_1h':      None,
-            'last_st_15m':  None,
-            'st_4h_flipped': False,
+            'st_ai_15m':      None,
+            'st_ai_4h':       None,
+            'bias_1h':        None,
+            'last_st_15m':    None,
+            'st_4h_flipped':  False,
+            'st_context_5m':  None,
+            'st_context_15m': None,
         }
 
 def format_price(price):
@@ -346,86 +348,140 @@ def webhook():
         if bias_val in ('bull', 'bear', 'neutral') and tf == '1h':
             m['bias_1h'] = bias_val if bias_val != 'neutral' else None
 
+    elif alert_type == 'st_context':
+        try:
+            ctx_val = float(val)
+            ctx_parsed = 'buy' if ctx_val > 0 else 'sell' if ctx_val < 0 else None
+        except:
+            ctx_parsed = None
+        if tf == '5m':
+            m['st_context_5m'] = ctx_parsed
+        elif tf == '15m':
+            m['st_context_15m'] = ctx_parsed
+
     # ── Logique SCALP ─────────────────────────────────────────────────
-    if alert_type == 'supertrend' and tf == '15m':
-        st_15m = m.get('st_ai_15m')
-        prev   = m.get('last_st_15m')
-        flipped = (st_15m is not None and prev is not None and st_15m != prev)
+    # ENTRÉE : ST Context 5m aligné + ST AI 4H + Bias 1H
+    #          Anti-chop : ST Context 15m opposé → bloqué
+    # PYRAMIDING : ST Context 5m OU flip ST AI 15m
+    #   Si ctx 5m  → anti-chop : ST Context 15m opposé
+    #   Si flip 15m → anti-chop : ST Context 5m opposé
 
-        if flipped:
-            st_4h   = m.get('st_ai_4h')
-            bias_1h = m.get('bias_1h')
+    if alert_type in ('st_context', 'supertrend') and tf in ('5m', '15m'):
+        st_4h      = m.get('st_ai_4h')
+        bias_1h    = m.get('bias_1h')
+        ctx_5m     = m.get('st_context_5m')
+        ctx_15m    = m.get('st_context_15m')
+        st_15m     = m.get('st_ai_15m')
+        prev_15m   = m.get('last_st_15m')
+        flipped_15m = (st_15m is not None and prev_15m is not None and st_15m != prev_15m)
 
-            direction  = "LONG" if st_15m == 'buy' else "SHORT"
-            exp_st_4h  = 'buy'  if direction == 'LONG' else 'sell'
-            exp_bias   = 'bull' if direction == 'LONG' else 'bear'
+        # Déterminer la direction candidate selon le signal reçu
+        if alert_type == 'st_context' and tf == '5m':
+            try:
+                ctx_val = float(val)
+                ctx_parsed = 'buy' if ctx_val > 0 else 'sell' if ctx_val < 0 else None
+            except:
+                ctx_parsed = None
+            if ctx_parsed is None:
+                return jsonify({'status': 'ok'}), 200
+            signal_direction = "LONG" if ctx_parsed == 'buy' else "SHORT"
+            signal_type      = 'ctx5m'
+        elif alert_type == 'supertrend' and tf == '15m' and flipped_15m:
+            signal_direction = "LONG" if st_15m == 'buy' else "SHORT"
+            signal_type      = 'flip15m'
+        else:
+            return jsonify({'status': 'ok'}), 200
 
-            st_4h_ok  = st_4h  == exp_st_4h
-            bias_1h_ok = bias_1h == exp_bias
+        exp_st_4h  = 'buy'  if signal_direction == 'LONG' else 'sell'
+        exp_bias   = 'bull' if signal_direction == 'LONG' else 'bear'
+        exp_ctx    = 'buy'  if signal_direction == 'LONG' else 'sell'
+        opp_ctx    = 'sell' if signal_direction == 'LONG' else 'buy'
 
-            pos_key = f"{symbol}_SCALP"
+        st_4h_ok   = st_4h  == exp_st_4h
+        bias_1h_ok = bias_1h == exp_bias
+
+        # Anti-chop selon le signal
+        if signal_type == 'ctx5m':
+            antichop_blocked = ctx_15m == opp_ctx
+        else:  # flip15m
+            antichop_blocked = ctx_5m  == opp_ctx
+
+        pos_key = f"{symbol}_SCALP"
+        with STATE_LOCK:
+            pos = SCALP_POSITIONS.get(pos_key)
+            if pos and pos['direction'] != signal_direction:
+                SCALP_POSITIONS.pop(pos_key, None)
+                PYRA_ENABLED.pop(pos_key, None)
+                pos = None
+
+            # Entrée — uniquement sur ST Context 5m
+            is_entry = (
+                signal_type == 'ctx5m'
+                and st_4h_ok and bias_1h_ok
+                and not antichop_blocked
+                and pos is None
+            )
+
+            # Pyramiding — sur ctx5m OU flip15m
+            is_pyra = bool(
+                pos and pos['direction'] == signal_direction
+                and st_4h_ok and bias_1h_ok
+                and not antichop_blocked
+                and PYRA_ENABLED.get(pos_key, False)
+            )
+
+            if is_entry and should_send(symbol, f"scalp_entry_{exp_ctx}", event_id=event_id, cooldown=3600):
+                SCALP_POSITIONS[pos_key] = {'direction': signal_direction, 'entry_count': 1}
+                PYRA_ENABLED.pop(pos_key, None)
+                pos = SCALP_POSITIONS[pos_key]
+            else:
+                is_entry = False
+
+        if is_entry and pos:
+            emoji = "\U0001f7e2" if signal_direction == "LONG" else "\U0001f534"
+            antichop_txt = f"ST Context 15m: {(ctx_15m or 'NEUTRE').upper()} (anti-chop)"
+            tg_sent = send_telegram_with_buttons(
+                f"{emoji} <b>[SCALP - ENTREE]</b> {symbol}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📈 Direction: {signal_direction}\n"
+                f"💰 Price: ${format_price(price)}\n"
+                f"🏦 Exchange: OKX\n"
+                f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
+                f"✅ ST AI 4H: {(st_4h or '?').upper()} (filtre)\n"
+                f"✅ Bias 1H: {(bias_1h or '?').upper()} (EMA13/SMA30)\n"
+                f"✅ ST Context 5m: {(ctx_5m or '?').upper()} (SIGNAL)\n"
+                f"✅ {antichop_txt}",
+                pos_key
+            )
+            if not tg_sent:
+                logger.warning(f"[SCALP] Entrée {symbol} créée mais notification Telegram échouée")
+            logger.info(f"[SCALP] Entrée: {symbol} {signal_direction} | signal={signal_type}")
+            persist_state()
+
+        elif is_pyra and should_send(symbol, f"scalp_pyra_{signal_type}_{exp_ctx}", event_id=event_id, cooldown=1800):
             with STATE_LOCK:
-                pos = SCALP_POSITIONS.get(pos_key)
-                if pos and pos['direction'] != direction:
-                    SCALP_POSITIONS.pop(pos_key, None)
-                    PYRA_ENABLED.pop(pos_key, None)
-                    pos = None
-
-                is_entry = (st_4h_ok and bias_1h_ok and pos is None)
-                opp      = 'sell' if st_15m == 'buy' else 'buy'
-                guard_ok = m.get('last_st_15m') == opp
-                is_pyra  = bool(
-                    pos and pos['direction'] == direction
-                    and st_4h_ok and bias_1h_ok
-                    and PYRA_ENABLED.get(pos_key, False)
-                    and guard_ok
-                )
-
-                if is_entry and should_send(symbol, f"scalp_entry_{st_15m}", event_id=event_id, cooldown=3600):
-                    SCALP_POSITIONS[pos_key] = {'direction': direction, 'entry_count': 1}
-                    PYRA_ENABLED.pop(pos_key, None)  # reset pyramiding sur nouvelle entrée
-                    pos = SCALP_POSITIONS[pos_key]
-                else:
-                    is_entry = False
-
-            if is_entry and pos:
-                emoji = "🟢" if direction == "LONG" else "🔴"
-                tg_sent = send_telegram_with_buttons(
-                    f"{emoji} <b>[SCALP - ENTREE]</b> {symbol}\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📈 Direction: {direction}\n"
-                    f"💰 Price: ${format_price(price)}\n"
-                    f"🏦 Exchange: OKX\n"
-                    f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-                    f"✅ ST AI 4H: {(st_4h or '?').upper()} (filtre)\n"
-                    f"✅ Bias 1H: {(bias_1h or '?').upper()} (EMA13/SMA30)\n"
-                    f"✅ SuperTrend AI 15m: {st_15m.upper()} (SIGNAL)",
-                    pos_key
-                )
-                if not tg_sent:
-                    logger.warning(f"[SCALP] Entrée {symbol} créée mais notification Telegram échouée")
-                logger.info(f"[SCALP] Entrée: {symbol} {direction}")
-                persist_state()
-
-            elif is_pyra and should_send(symbol, f"scalp_pyra_{st_15m}", event_id=event_id, cooldown=1800):
-                with STATE_LOCK:
-                    pos['entry_count'] += 1
-                    m['last_st_15m'] = None
-                    count = pos['entry_count']
-                emoji = "🟢" if direction == "LONG" else "🔴"
-                send_telegram(
-                    f"{emoji} <b>[SCALP - PYRAMIDING #{count}]</b> {symbol}\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📈 Direction: {direction}\n"
-                    f"💰 Price: ${format_price(price)}\n"
-                    f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-                    f"✅ ST AI 4H: {(st_4h or '?').upper()}\n"
-                    f"✅ Bias 1H: {(bias_1h or '?').upper()}\n"
-                    f"✅ SuperTrend AI 15m: {st_15m.upper()} (PYRAMIDING)\n"
-                    f"🛡️ Guard: flip opposé validé"
-                )
-                logger.info(f"[SCALP] Pyramiding #{count}: {symbol} {direction}")
-                persist_state()
+                pos['entry_count'] += 1
+                count = pos['entry_count']
+            emoji = "\U0001f7e2" if signal_direction == "LONG" else "\U0001f534"
+            if signal_type == 'ctx5m':
+                signal_txt   = f"ST Context 5m: {(ctx_5m or '?').upper()}"
+                antichop_txt = f"ST Context 15m: {(ctx_15m or 'NEUTRE').upper()} (anti-chop)"
+            else:
+                signal_txt   = f"ST AI 15m: {(st_15m or '?').upper()} (flip)"
+                antichop_txt = f"ST Context 5m: {(ctx_5m or 'NEUTRE').upper()} (anti-chop)"
+            send_telegram(
+                f"{emoji} <b>[SCALP - PYRAMIDING #{count}]</b> {symbol}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📈 Direction: {signal_direction}\n"
+                f"💰 Price: ${format_price(price)}\n"
+                f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
+                f"✅ ST AI 4H: {(st_4h or '?').upper()}\n"
+                f"✅ Bias 1H: {(bias_1h or '?').upper()}\n"
+                f"✅ {signal_txt}\n"
+                f"✅ {antichop_txt}"
+            )
+            logger.info(f"[SCALP] Pyramiding #{count}: {symbol} {signal_direction} | signal={signal_type}")
+            persist_state()
 
     return jsonify({'status': 'ok'}), 200
 
