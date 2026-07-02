@@ -32,30 +32,10 @@ CONFIG = {
     'PYRA_COOLDOWN':      1800,   # 30min pyramiding
 
     'SYMBOLS': {
-        'AAVE/USDT':    {'exchange': 'okx'},
-        'APT/USDT':     {'exchange': 'okx'},
-        'ARB/USDT':     {'exchange': 'okx'},
         'AVAX/USDT':    {'exchange': 'okx'},
-        'BCH/USDT':     {'exchange': 'okx'},
-        'BTC/USDT':     {'exchange': 'okx'},
-        'DOGE/USDT':    {'exchange': 'okx'},
-        'ETC/USDT':     {'exchange': 'okx'},
-        'ETH/USDT':     {'exchange': 'okx'},
-        'FIL/USDT':     {'exchange': 'okx'},
-        'HBAR/USDT':    {'exchange': 'okx'},
         'INJ/USDT':     {'exchange': 'okx'},
-        'LINK/USDT':    {'exchange': 'okx'},
         'LTC/USDT':     {'exchange': 'okx'},
-        'NEAR/USDT':    {'exchange': 'okx'},
-        'ONDO/USDT':    {'exchange': 'okx'},
-        'RENDER/USDT':  {'exchange': 'okx'},
-        'SAND/USDT':    {'exchange': 'okx'},
-        'SOL/USDT':     {'exchange': 'okx'},
-        'SUI/USDT':     {'exchange': 'okx'},
-        'UNI/USDT':     {'exchange': 'okx'},
-        'VIRTUAL/USDT': {'exchange': 'okx'},
         'XRP/USDT':     {'exchange': 'okx'},
-        'ZEC/USDT':     {'exchange': 'okx'},
     }
 }
 
@@ -202,12 +182,15 @@ def init_symbol(symbol):
     if symbol not in MOMENTUM_STATE:
         MOMENTUM_STATE[symbol] = {
             'st_ai_15m':      None,
+            'st_ai_1h':       None,
             'st_ai_4h':       None,
             'bias_1h':        None,
             'last_st_15m':    None,
+            'last_st_1h':     None,
             'st_4h_flipped':  False,
             'st_context_5m':  None,
             'st_context_15m': None,
+            'st_context_1h':  None,
         }
 
 def format_price(price):
@@ -343,10 +326,55 @@ def webhook():
             if m['st_4h_flipped'] and prev_4h:
                 m['last_st_4h'] = prev_4h
 
+    elif alert_type == 'supertrend' and tf == '1h':
+        parsed_1h = parse_st_value(val)
+        prev_1h   = m.get('st_ai_1h')
+        m['st_ai_1h']   = parsed_1h
+        m['last_st_1h'] = prev_1h
+        # Alerte flip ST AI 1H + Context 1H aligné
+        flipped_1h = (parsed_1h is not None and prev_1h is not None and parsed_1h != prev_1h)
+        if flipped_1h:
+            ctx_1h = m.get('st_context_1h')
+            exp    = parsed_1h  # 'buy' ou 'sell'
+            if ctx_1h == exp:
+                direction_1h = 'LONG' if parsed_1h == 'buy' else 'SHORT'
+                emoji = '🟢' if direction_1h == 'LONG' else '🔴'
+                msg_1h = (
+                    f"{emoji} <b>[INFO - ST AI 1H + CTX 1H]</b> {symbol}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📈 Direction: {direction_1h}\n"
+                    f"💰 Price: ${format_price(price)}\n"
+                    f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
+                    f"✅ Flip ST AI 1H: {parsed_1h.upper()}\n"
+                    f"✅ ST Context 1H: {ctx_1h.upper()}"
+                )
+                send_telegram(msg_1h)
+                logger.info(f"[INFO] Flip ST AI 1H + Ctx 1H aligné: {symbol} {direction_1h}")
+
     elif alert_type == 'bias':
         bias_val = str(val).lower() if val else None
         if bias_val in ('bull', 'bear', 'neutral') and tf == '1h':
-            m['bias_1h'] = bias_val if bias_val != 'neutral' else None
+            prev_bias = m.get('bias_1h')
+            new_bias_val = bias_val if bias_val != 'neutral' else None
+            m['bias_1h'] = new_bias_val
+            # Alerte changement Bias 1H + Context 1H aligné
+            if prev_bias != new_bias_val and new_bias_val is not None:
+                ctx_1h = m.get('st_context_1h')
+                exp_ctx = 'buy' if new_bias_val == 'bull' else 'sell'
+                if ctx_1h == exp_ctx:
+                    direction_b = 'LONG' if new_bias_val == 'bull' else 'SHORT'
+                    emoji = '🟢' if direction_b == 'LONG' else '🔴'
+                    msg_bias = (
+                        f"{emoji} <b>[INFO - BIAS 1H + CTX 1H]</b> {symbol}\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📈 Direction: {direction_b}\n"
+                        f"💰 Price: ${format_price(price)}\n"
+                        f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
+                        f"✅ Bias 1H: {new_bias_val.upper()} (changement)\n"
+                        f"✅ ST Context 1H: {ctx_1h.upper()}"
+                    )
+                    send_telegram(msg_bias)
+                    logger.info(f"[INFO] Bias 1H changé + Ctx 1H aligné: {symbol} {direction_b}")
 
     elif alert_type == 'st_context':
         try:
@@ -358,6 +386,8 @@ def webhook():
             m['st_context_5m'] = ctx_parsed
         elif tf == '15m':
             m['st_context_15m'] = ctx_parsed
+        elif tf == '1h':
+            m['st_context_1h'] = ctx_parsed
 
     # ── Logique SCALP ─────────────────────────────────────────────────
     # ENTRÉE : ST Context 5m aligné + ST AI 4H + Bias 1H
