@@ -35,6 +35,7 @@ CONFIG = {
         'AVAX/USDT':    {'exchange': 'okx'},
         'INJ/USDT':     {'exchange': 'okx'},
         'LTC/USDT':     {'exchange': 'okx'},
+        'SUI/USDT':     {'exchange': 'okx'},
         'XRP/USDT':     {'exchange': 'okx'},
     }
 }
