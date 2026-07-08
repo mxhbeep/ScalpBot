@@ -189,9 +189,10 @@ def init_symbol(symbol):
             'last_st_15m':    None,
             'last_st_1h':     None,
             'st_4h_flipped':  False,
-            'st_context_5m':  None,
-            'st_context_15m': None,
-            'st_context_1h':  None,
+            'st_context_5m':    None,
+            'st_context_15m':   None,
+            'st_context_lt_5m': None,
+            'st_context_1h':    None,
         }
 
 def format_price(price):
@@ -377,6 +378,14 @@ def webhook():
                     send_telegram(msg_bias)
                     logger.info(f"[INFO] Bias 1H changé + Ctx 1H aligné: {symbol} {direction_b}")
 
+    elif alert_type == 'st_context_lt' and tf == '5m':
+        try:
+            lt_val = float(val)
+            lt_parsed = 'buy' if lt_val < -1.96 else 'sell' if lt_val > 1.96 else None
+        except:
+            lt_parsed = None
+        m['st_context_lt_5m'] = lt_parsed
+
     elif alert_type == 'st_context':
         try:
             ctx_val = float(val)
@@ -450,7 +459,10 @@ def webhook():
 
             # Entrée — uniquement sur ST Context 5m
             # ctx_15m None = neutre = pas bloquant
-            antichop_blocked = (ctx_15m == opp_ctx) if ctx_15m is not None else False
+            ctx_lt_5m = m.get('st_context_lt_5m')
+            antichop_15m = (ctx_15m == opp_ctx) if ctx_15m is not None else False
+            antichop_lt5m = (ctx_lt_5m == exp_ctx) if ctx_lt_5m is not None else False
+            antichop_blocked = antichop_15m or antichop_lt5m
             is_entry = (
                 signal_type == 'ctx5m'
                 and st_4h_ok and bias_1h_ok
