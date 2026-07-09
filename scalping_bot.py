@@ -400,79 +400,78 @@ def webhook():
             m['st_context_1h'] = ctx_parsed
 
     # ── Logique SCALP ─────────────────────────────────────────────────
-    # ENTRÉE : ST Context 5m aligné + ST AI 4H + Bias 1H
-    #          Anti-chop : ST Context 15m opposé → bloqué
-    # PYRAMIDING : ST Context 5m OU flip ST AI 15m
-    #   Si ctx 5m  → anti-chop : ST Context 15m opposé
-    #   Si flip 15m → anti-chop : ST Context 5m opposé
+    # ENTRÉE PRINCIPALE  : ST Context 5m  + ST AI 4H + Bias 1H
+    #   Anti-chop : ST Context 15m opposé OU ST Context LT 5m même sens
+    # ENTRÉE SECONDAIRE  : flip ST AI 15m + ST AI 4H + Bias 1H
+    #   Anti-chop : ST Context 5m opposé
+    # PYRAMIDING         : flip ST AI 15m + ST AI 4H + Bias 1H (stop si Bias 1H change)
+    #   Cooldown 30min
 
     if alert_type in ('st_context', 'supertrend') and tf in ('5m', '15m'):
-        st_4h      = m.get('st_ai_4h')
-        bias_1h    = m.get('bias_1h')
-        ctx_5m     = m.get('st_context_5m')
-        ctx_15m    = m.get('st_context_15m')
-        st_15m     = m.get('st_ai_15m')
-        prev_15m   = m.get('last_st_15m')
+        st_4h       = m.get('st_ai_4h')
+        bias_1h     = m.get('bias_1h')
+        ctx_5m      = m.get('st_context_5m')
+        ctx_15m     = m.get('st_context_15m')
+        ctx_lt_5m   = m.get('st_context_lt_5m')
+        st_15m      = m.get('st_ai_15m')
+        prev_15m    = m.get('last_st_15m')
         flipped_15m = (st_15m is not None and prev_15m is not None and st_15m != prev_15m)
 
-        # Déterminer la direction candidate selon le signal reçu
+        # ── Déterminer signal et direction ──────────────────────────
         if alert_type == 'st_context' and tf == '5m':
             try:
-                ctx_val = float(val)
+                ctx_val    = float(val)
                 ctx_parsed = 'buy' if ctx_val < -1.96 else 'sell' if ctx_val > 1.96 else None
             except:
                 ctx_parsed = None
             if ctx_parsed is None:
                 return jsonify({'status': 'ok'}), 200
-            # Mettre à jour ctx_5m avec la valeur reçue
             m['st_context_5m'] = ctx_parsed
-            ctx_5m = ctx_parsed
-            signal_direction = "LONG" if ctx_parsed == 'buy' else "SHORT"
-            signal_type      = 'ctx5m'
+            ctx_5m             = ctx_parsed
+            signal_direction   = "LONG" if ctx_parsed == 'buy' else "SHORT"
+            signal_type        = 'ctx5m'
         elif alert_type == 'supertrend' and tf == '15m' and flipped_15m:
             signal_direction = "LONG" if st_15m == 'buy' else "SHORT"
             signal_type      = 'flip15m'
         else:
             return jsonify({'status': 'ok'}), 200
 
-        exp_st_4h  = 'buy'  if signal_direction == 'LONG' else 'sell'
-        exp_bias   = 'bull' if signal_direction == 'LONG' else 'bear'
-        exp_ctx    = 'buy'  if signal_direction == 'LONG' else 'sell'
-        opp_ctx    = 'sell' if signal_direction == 'LONG' else 'buy'
+        exp_st_4h = 'buy'  if signal_direction == 'LONG' else 'sell'
+        exp_bias  = 'bull' if signal_direction == 'LONG' else 'bear'
+        exp_ctx   = 'buy'  if signal_direction == 'LONG' else 'sell'
+        opp_ctx   = 'sell' if signal_direction == 'LONG' else 'buy'
 
-        st_4h_ok   = st_4h  == exp_st_4h
+        st_4h_ok   = st_4h   == exp_st_4h
         bias_1h_ok = bias_1h == exp_bias
 
-        # Anti-chop selon le signal
+        # ── Anti-chop selon le signal ────────────────────────────────
         if signal_type == 'ctx5m':
-            antichop_blocked = ctx_15m == opp_ctx
+            antichop_15m  = (ctx_15m   == opp_ctx) if ctx_15m   is not None else False
+            antichop_lt5m = (ctx_lt_5m == exp_ctx) if ctx_lt_5m is not None else False
+            antichop_blocked = antichop_15m or antichop_lt5m
         else:  # flip15m
-            antichop_blocked = ctx_5m  == opp_ctx
+            antichop_blocked = (ctx_5m == opp_ctx) if ctx_5m is not None else False
 
         pos_key = f"{symbol}_SCALP"
         with STATE_LOCK:
             pos = SCALP_POSITIONS.get(pos_key)
+            # Retournement → reset position
             if pos and pos['direction'] != signal_direction:
                 SCALP_POSITIONS.pop(pos_key, None)
                 PYRA_ENABLED.pop(pos_key, None)
                 pos = None
 
-            # Entrée — uniquement sur ST Context 5m
-            # ctx_15m None = neutre = pas bloquant
-            ctx_lt_5m = m.get('st_context_lt_5m')
-            antichop_15m = (ctx_15m == opp_ctx) if ctx_15m is not None else False
-            antichop_lt5m = (ctx_lt_5m == exp_ctx) if ctx_lt_5m is not None else False
-            antichop_blocked = antichop_15m or antichop_lt5m
+            # Entrée principale (ctx5m) ou secondaire (flip15m)
             is_entry = (
-                signal_type == 'ctx5m'
-                and st_4h_ok and bias_1h_ok
+                st_4h_ok and bias_1h_ok
                 and not antichop_blocked
                 and pos is None
             )
 
-            # Pyramiding — sur ctx5m OU flip15m
+            # Pyramiding — uniquement sur flip15m, Bias 1H doit rester aligné
             is_pyra = bool(
-                pos and pos['direction'] == signal_direction
+                signal_type == 'flip15m'
+                and pos and pos['direction'] == signal_direction
                 and st_4h_ok and bias_1h_ok
                 and not antichop_blocked
                 and PYRA_ENABLED.get(pos_key, False)
@@ -487,7 +486,12 @@ def webhook():
 
         if is_entry and pos:
             emoji = "\U0001f7e2" if signal_direction == "LONG" else "\U0001f534"
-            antichop_txt = f"ST Context 15m: {(ctx_15m or 'NEUTRE').upper()} (anti-chop)"
+            if signal_type == 'ctx5m':
+                signal_txt   = f"ST Context 5m: {(ctx_5m or '?').upper()} (SIGNAL PRINCIPAL)"
+                antichop_txt = f"ST Context 15m: {(ctx_15m or 'NEUTRE').upper()} | LT 5m: {(ctx_lt_5m or 'NEUTRE').upper()}"
+            else:
+                signal_txt   = f"Flip ST AI 15m: {(st_15m or '?').upper()} (SIGNAL SECONDAIRE)"
+                antichop_txt = f"ST Context 5m: {(ctx_5m or 'NEUTRE').upper()} (anti-chop)"
             tg_sent = send_telegram_with_buttons(
                 f"{emoji} <b>[SCALP - ENTREE]</b> {symbol}\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -497,8 +501,8 @@ def webhook():
                 f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
                 f"✅ ST AI 4H: {(st_4h or '?').upper()} (filtre)\n"
                 f"✅ Bias 1H: {(bias_1h or '?').upper()} (EMA13/SMA30)\n"
-                f"✅ ST Context 5m: {(ctx_5m or '?').upper()} (SIGNAL)\n"
-                f"✅ {antichop_txt}",
+                f"✅ {signal_txt}\n"
+                f"ℹ️ {antichop_txt}",
                 pos_key
             )
             if not tg_sent:
@@ -506,17 +510,11 @@ def webhook():
             logger.info(f"[SCALP] Entrée: {symbol} {signal_direction} | signal={signal_type}")
             persist_state()
 
-        elif is_pyra and should_send(symbol, f"scalp_pyra_{signal_type}_{exp_ctx}", event_id=event_id, cooldown=1800):
+        elif is_pyra and should_send(symbol, f"scalp_pyra_{exp_ctx}", event_id=event_id, cooldown=1800):
             with STATE_LOCK:
                 pos['entry_count'] += 1
                 count = pos['entry_count']
             emoji = "\U0001f7e2" if signal_direction == "LONG" else "\U0001f534"
-            if signal_type == 'ctx5m':
-                signal_txt   = f"ST Context 5m: {(ctx_5m or '?').upper()}"
-                antichop_txt = f"ST Context 15m: {(ctx_15m or 'NEUTRE').upper()} (anti-chop)"
-            else:
-                signal_txt   = f"ST AI 15m: {(st_15m or '?').upper()} (flip)"
-                antichop_txt = f"ST Context 5m: {(ctx_5m or 'NEUTRE').upper()} (anti-chop)"
             send_telegram(
                 f"{emoji} <b>[SCALP - PYRAMIDING #{count}]</b> {symbol}\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -525,11 +523,12 @@ def webhook():
                 f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
                 f"✅ ST AI 4H: {(st_4h or '?').upper()}\n"
                 f"✅ Bias 1H: {(bias_1h or '?').upper()}\n"
-                f"✅ {signal_txt}\n"
-                f"✅ {antichop_txt}"
+                f"✅ Flip ST AI 15m: {(st_15m or '?').upper()}\n"
+                f"ℹ️ ST Context 5m: {(ctx_5m or 'NEUTRE').upper()} (anti-chop)"
             )
-            logger.info(f"[SCALP] Pyramiding #{count}: {symbol} {signal_direction} | signal={signal_type}")
+            logger.info(f"[SCALP] Pyramiding #{count}: {symbol} {signal_direction}")
             persist_state()
+
 
     return jsonify({'status': 'ok'}), 200
 
