@@ -208,11 +208,10 @@ def format_price(price):
         return str(price)
 
 def parse_st_value(val):
-    try:
-        v = float(val)
-        return 'buy' if v == 1 else 'sell' if v == 0 else None
-    except:
-        return None
+    normalized = str(val).strip().lower()
+    if normalized in ('1', 'buy'):  return 'buy'
+    if normalized in ('0', 'sell'): return 'sell'
+    return None
 
 def should_send(symbol, key, cooldown=3600, event_id=None):
     now = time.time()
@@ -314,13 +313,19 @@ def webhook():
     logger.info(f"📥 Webhook: {symbol} | tf={tf} | type={alert_type} | val={val}")
 
     # ── Mise à jour état ──────────────────────────────────────────────
+    flipped_15m  = False  # calculé ci-dessous si supertrend 15m
+    state_changed = False  # True si état modifié → persist à la fin
     if alert_type == 'supertrend':
         parsed = parse_st_value(val)
+        if parsed is None:
+            logger.warning(f"[WEBHOOK] SuperTrend invalide: {symbol} tf={tf} value={val!r}")
+            return jsonify({'status': 'ignored', 'reason': 'invalid_supertrend'}), 200
 
         if tf == '15m':
             # Point 2 : calculer flip avant mise à jour
             prev_15m    = m.get('st_ai_15m')
             m['st_ai_15m'] = parsed
+            state_changed = True
             flipped_15m = (prev_15m is not None and parsed is not None and parsed != prev_15m)
             if flipped_15m:
                 m['last_st_15m'] = prev_15m  # garder pour guard pyramiding
@@ -330,6 +335,7 @@ def webhook():
             prev_1h      = m.get('st_ai_1h')
             m['st_ai_1h']   = parsed
             m['last_st_1h'] = prev_1h
+            state_changed = True
             flipped_1h   = (prev_1h is not None and parsed is not None and parsed != prev_1h)
             if flipped_1h:
                 ctx_1h = m.get('st_context_1h')
@@ -351,11 +357,11 @@ def webhook():
         elif tf == '4h':
             prev_4h = m.get('st_ai_4h')
             m['st_ai_4h'] = parsed
+            state_changed = True
             m['st_4h_flipped'] = bool(prev_4h and parsed and parsed != prev_4h)
             if m['st_4h_flipped'] and prev_4h:
                 m['last_st_4h'] = prev_4h
-            # Point 3 : persister immédiatement après changement 4H
-            persist_state()
+            state_changed = True
 
 
     elif alert_type == 'bias':
@@ -364,6 +370,7 @@ def webhook():
             prev_bias = m.get('bias_1h')
             new_bias_val = bias_val if bias_val != 'neutral' else None
             m['bias_1h'] = new_bias_val
+            state_changed = True
             # Alerte changement Bias 1H + Context 1H aligné
             if prev_bias != new_bias_val and new_bias_val is not None:
                 ctx_1h = m.get('st_context_1h')
@@ -387,22 +394,28 @@ def webhook():
         try:
             lt_val = float(val)
             lt_parsed = 'buy' if lt_val < -1.96 else 'sell' if lt_val > 1.96 else None
-        except:
-            lt_parsed = None
+        except (TypeError, ValueError):
+            logger.warning(f"[WEBHOOK] ST Context LT invalide: {symbol} tf={tf} value={val!r}")
+            return jsonify({'status': 'ignored', 'reason': 'invalid_st_context_lt'}), 200
         m['st_context_lt_5m'] = lt_parsed
+        state_changed = True
 
     elif alert_type == 'st_context':
         try:
             ctx_val = float(val)
             ctx_parsed = 'buy' if ctx_val < -1.96 else 'sell' if ctx_val > 1.96 else None
-        except:
-            ctx_parsed = None
+        except (TypeError, ValueError):
+            logger.warning(f"[WEBHOOK] ST Context invalide: {symbol} tf={tf} value={val!r}")
+            return jsonify({'status': 'ignored', 'reason': 'invalid_st_context'}), 200
         if tf == '5m':
             m['st_context_5m'] = ctx_parsed
+            state_changed = True
         elif tf == '15m':
             m['st_context_15m'] = ctx_parsed
+            state_changed = True
         elif tf == '1h':
             m['st_context_1h'] = ctx_parsed
+            state_changed = True
 
     # ── Logique SCALP ─────────────────────────────────────────────────
     # ENTRÉE PRINCIPALE  : ST Context 5m  + ST AI 4H + Bias 1H
@@ -419,29 +432,23 @@ def webhook():
         ctx_15m     = m.get('st_context_15m')
         ctx_lt_5m   = m.get('st_context_lt_5m')
         st_15m      = m.get('st_ai_15m')
-        # flipped_15m calculé lors de la mise à jour état (pas depuis last_st_15m)
-        flipped_15m = (alert_type == 'supertrend' and tf == '15m' and
-                       m.get('last_st_15m') is not None and
-                       st_15m is not None and
-                       m.get('last_st_15m') != st_15m)
+        # flipped_15m calculé dans le bloc mise à jour état ci-dessus
 
         # ── Déterminer signal et direction ──────────────────────────
+        should_evaluate = False
         if alert_type == 'st_context' and tf == '5m':
-            try:
-                ctx_val    = float(val)
-                ctx_parsed = 'buy' if ctx_val < -1.96 else 'sell' if ctx_val > 1.96 else None
-            except:
-                ctx_parsed = None
-            if ctx_parsed is None:
-                return jsonify({'status': 'ok'}), 200
-            m['st_context_5m'] = ctx_parsed
-            ctx_5m             = ctx_parsed
-            signal_direction   = "LONG" if ctx_parsed == 'buy' else "SHORT"
-            signal_type        = 'ctx5m'
+            if ctx_5m is not None:
+                signal_direction = "LONG" if ctx_5m == 'buy' else "SHORT"
+                signal_type      = 'ctx5m'
+                should_evaluate  = True
         elif alert_type == 'supertrend' and tf == '15m' and flipped_15m:
             signal_direction = "LONG" if st_15m == 'buy' else "SHORT"
             signal_type      = 'flip15m'
-        else:
+            should_evaluate  = True
+
+        if not should_evaluate:
+            if state_changed:
+                persist_state()
             return jsonify({'status': 'ok'}), 200
 
         exp_st_4h = 'buy'  if signal_direction == 'LONG' else 'sell'
@@ -463,17 +470,12 @@ def webhook():
         pos_key = f"{symbol}_SCALP"
         with STATE_LOCK:
             pos = SCALP_POSITIONS.get(pos_key)
-            # Retournement → reset position seulement si filtres validés
-            if pos and pos['direction'] != signal_direction and st_4h_ok and bias_1h_ok:
-                SCALP_POSITIONS.pop(pos_key, None)
-                PYRA_ENABLED.pop(pos_key, None)
-                pos = None
 
-            # Entrée principale (ctx5m) ou secondaire (flip15m)
-            is_entry = (
+            # Candidat à l'entrée (retournement ou nouvelle position)
+            candidate = (
                 st_4h_ok and bias_1h_ok
                 and not antichop_blocked
-                and pos is None
+                and (pos is None or pos['direction'] != signal_direction)
             )
 
             # Pyramiding — uniquement sur flip15m, Bias 1H doit rester aligné
@@ -485,12 +487,20 @@ def webhook():
                 and PYRA_ENABLED.get(pos_key, False)
             )
 
-            if is_entry and should_send(symbol, f"scalp_entry_{exp_ctx}", event_id=event_id, cooldown=3600):
+            # Entrée atomique : suppression ancienne + création nouvelle
+            if candidate and should_send(symbol, f"scalp_entry_{exp_ctx}", event_id=event_id, cooldown=3600):
                 SCALP_POSITIONS[pos_key] = {'direction': signal_direction, 'entry_count': 1}
                 PYRA_ENABLED.pop(pos_key, None)
                 pos = SCALP_POSITIONS[pos_key]
+                is_entry = True
             else:
                 is_entry = False
+                if not candidate:
+                    logger.info(
+                        f"[SCALP BLOCKED] {symbol} signal={signal_type} dir={signal_direction} "
+                        f"st4h={st_4h}/{exp_st_4h} bias={bias_1h}/{exp_bias} "
+                        f"antichop={antichop_blocked} pos={pos['direction'] if pos else None}"
+                    )
 
         if is_entry and pos:
             emoji = "\U0001f7e2" if signal_direction == "LONG" else "\U0001f534"
@@ -516,7 +526,7 @@ def webhook():
             if not tg_sent:
                 logger.warning(f"[SCALP] Entrée {symbol} créée mais notification Telegram échouée")
             logger.info(f"[SCALP] Entrée: {symbol} {signal_direction} | signal={signal_type}")
-            persist_state()
+            state_changed = True
 
         elif is_pyra and should_send(symbol, f"scalp_pyra_{exp_ctx}", event_id=event_id, cooldown=1800):
             with STATE_LOCK:
@@ -535,8 +545,12 @@ def webhook():
                 f"ℹ️ ST Context 5m: {(ctx_5m or 'NEUTRE').upper()} (anti-chop)"
             )
             logger.info(f"[SCALP] Pyramiding #{count}: {symbol} {signal_direction}")
-            persist_state()
+            state_changed = True
 
+
+    # Persister si état modifié
+    if state_changed:
+        persist_state()
 
     return jsonify({'status': 'ok'}), 200
 
