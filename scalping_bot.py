@@ -641,17 +641,29 @@ def reset():
 
     # Auto sync_scalp depuis le bot principal
     main_url   = os.environ.get('MAIN_BOT_URL', '').rstrip('/')
+    if main_url and not main_url.startswith(('https://', 'http://')):
+        main_url = f'https://{main_url}'
     admin_secret = os.environ.get('ADMIN_SECRET', '')
     if main_url and admin_secret:
-        try:
-            resp = requests.post(
-                f'{main_url}/sync_scalp',
-                headers={'X-Admin-Secret': admin_secret},
-                timeout=10
-            )
-            logger.info(f'[RESET] sync_scalp auto: {resp.status_code}')
-        except Exception as e:
-            logger.warning(f'[RESET] sync_scalp auto échoué: {e}')
+        def _sync_after_reset():
+            time.sleep(1)
+            try:
+                resp = requests.post(
+                    f'{main_url}/sync_scalp',
+                    headers={'X-Admin-Secret': admin_secret},
+                    timeout=15,
+                )
+                if not 200 <= resp.status_code < 300:
+                    raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+                data   = resp.json()
+                sent   = data.get('sent', [])
+                errors = data.get('errors', [])
+                logger.info(f"[RESET] sync_scalp: {len(sent)} assets, erreurs: {len(errors)}")
+                if errors:
+                    logger.warning(f"[RESET] sync_scalp erreurs: {errors}")
+            except Exception as e:
+                logger.warning(f"[RESET] sync_scalp échoué: {e}")
+        threading.Thread(target=_sync_after_reset, daemon=True).start()
 
     return jsonify({'status': 'reset'}), 200
 
@@ -665,6 +677,8 @@ def startup():
 
     tok      = os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
     base_url = os.environ.get('SCALP_PUBLIC_URL', '').rstrip('/')
+    if base_url and not base_url.startswith(('https://', 'http://')):
+        base_url = f'https://{base_url}'
     if tok and base_url:
         try:
             wh_url    = f"{base_url}/telegram_callback"
@@ -672,15 +686,45 @@ def startup():
             tg_secret  = os.environ.get('SCALP_TELEGRAM_SECRET', '')
             if tg_secret:
                 wh_payload['secret_token'] = tg_secret
-            requests.post(f"https://api.telegram.org/bot{tok}/setWebhook",
+            resp_wh = requests.post(f"https://api.telegram.org/bot{tok}/setWebhook",
                          json=wh_payload, timeout=10)
-            logger.info(f"✅ Telegram webhook configuré: {wh_url}")
+            if resp_wh.status_code == 200 and resp_wh.json().get('ok'):
+                logger.info(f"✅ Telegram webhook configuré: {wh_url}")
+            else:
+                logger.warning(f"⚠️ Telegram webhook erreur: {resp_wh.text[:100]}")
         except Exception as e:
             logger.warning(f"⚠️ Webhook setup: {e}")
 
     # Démarrer le scheduler Bias 1H
     bias_thread = threading.Thread(target=update_bias_1h, daemon=True)
     bias_thread.start()
+
+    # Sync état 4H depuis bot principal au démarrage
+    main_url     = os.environ.get('MAIN_BOT_URL', '').rstrip('/')
+    if main_url and not main_url.startswith(('https://', 'http://')):
+        main_url = f'https://{main_url}'
+    admin_secret = os.environ.get('ADMIN_SECRET', '')
+    if main_url and admin_secret:
+        def _sync():
+            import time as _time
+            _time.sleep(5)  # laisser le bot principal répondre
+            try:
+                resp = requests.post(
+                    f'{main_url}/sync_scalp',
+                    headers={'X-Admin-Secret': admin_secret},
+                    timeout=15
+                )
+                if not 200 <= resp.status_code < 300:
+                    raise RuntimeError(f"sync_scalp HTTP {resp.status_code}: {resp.text[:200]}")
+                data   = resp.json()
+                sent   = data.get('sent', [])
+                errors = data.get('errors', [])
+                logger.info(f"[STARTUP] sync_scalp: {len(sent)} assets, erreurs: {len(errors)}")
+                if errors:
+                    logger.warning(f"[STARTUP] sync_scalp erreurs: {errors}")
+            except Exception as e:
+                logger.warning(f'[STARTUP] sync_scalp échoué: {e}')
+        threading.Thread(target=_sync, daemon=True).start()
 
     send_telegram(
         "🚀 <b>Scalping Bot démarré</b>\n"
