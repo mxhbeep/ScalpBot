@@ -316,42 +316,47 @@ def webhook():
     # ── Mise à jour état ──────────────────────────────────────────────
     if alert_type == 'supertrend':
         parsed = parse_st_value(val)
+
         if tf == '15m':
-            prev_15m = m.get('st_ai_15m')
+            # Point 2 : calculer flip avant mise à jour
+            prev_15m    = m.get('st_ai_15m')
             m['st_ai_15m'] = parsed
-            if prev_15m and parsed and parsed != prev_15m:
-                m['last_st_15m'] = prev_15m
+            flipped_15m = (prev_15m is not None and parsed is not None and parsed != prev_15m)
+            if flipped_15m:
+                m['last_st_15m'] = prev_15m  # garder pour guard pyramiding
+
+        elif tf == '1h':
+            # Point 1 : 1H intégré dans le bloc supertrend
+            prev_1h      = m.get('st_ai_1h')
+            m['st_ai_1h']   = parsed
+            m['last_st_1h'] = prev_1h
+            flipped_1h   = (prev_1h is not None and parsed is not None and parsed != prev_1h)
+            if flipped_1h:
+                ctx_1h = m.get('st_context_1h')
+                if ctx_1h == parsed:
+                    direction_1h = 'LONG' if parsed == 'buy' else 'SHORT'
+                    emoji = '\U0001f7e2' if direction_1h == 'LONG' else '\U0001f534'
+                    msg_1h = (
+                        f"{emoji} <b>[INFO - ST AI 1H + CTX 1H]</b> {symbol}\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📈 Direction: {direction_1h}\n"
+                        f"💰 Price: ${format_price(price)}\n"
+                        f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
+                        f"✅ Flip ST AI 1H: {parsed.upper()}\n"
+                        f"✅ ST Context 1H: {ctx_1h.upper()}"
+                    )
+                    send_telegram(msg_1h)
+                    logger.info(f"[INFO] Flip ST AI 1H + Ctx 1H: {symbol} {direction_1h}")
+
         elif tf == '4h':
             prev_4h = m.get('st_ai_4h')
             m['st_ai_4h'] = parsed
             m['st_4h_flipped'] = bool(prev_4h and parsed and parsed != prev_4h)
             if m['st_4h_flipped'] and prev_4h:
                 m['last_st_4h'] = prev_4h
+            # Point 3 : persister immédiatement après changement 4H
+            persist_state()
 
-    elif alert_type == 'supertrend' and tf == '1h':
-        parsed_1h = parse_st_value(val)
-        prev_1h   = m.get('st_ai_1h')
-        m['st_ai_1h']   = parsed_1h
-        m['last_st_1h'] = prev_1h
-        # Alerte flip ST AI 1H + Context 1H aligné
-        flipped_1h = (parsed_1h is not None and prev_1h is not None and parsed_1h != prev_1h)
-        if flipped_1h:
-            ctx_1h = m.get('st_context_1h')
-            exp    = parsed_1h  # 'buy' ou 'sell'
-            if ctx_1h == exp:
-                direction_1h = 'LONG' if parsed_1h == 'buy' else 'SHORT'
-                emoji = '🟢' if direction_1h == 'LONG' else '🔴'
-                msg_1h = (
-                    f"{emoji} <b>[INFO - ST AI 1H + CTX 1H]</b> {symbol}\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📈 Direction: {direction_1h}\n"
-                    f"💰 Price: ${format_price(price)}\n"
-                    f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-                    f"✅ Flip ST AI 1H: {parsed_1h.upper()}\n"
-                    f"✅ ST Context 1H: {ctx_1h.upper()}"
-                )
-                send_telegram(msg_1h)
-                logger.info(f"[INFO] Flip ST AI 1H + Ctx 1H aligné: {symbol} {direction_1h}")
 
     elif alert_type == 'bias':
         bias_val = str(val).lower() if val else None
@@ -414,8 +419,11 @@ def webhook():
         ctx_15m     = m.get('st_context_15m')
         ctx_lt_5m   = m.get('st_context_lt_5m')
         st_15m      = m.get('st_ai_15m')
-        prev_15m    = m.get('last_st_15m')
-        flipped_15m = (st_15m is not None and prev_15m is not None and st_15m != prev_15m)
+        # flipped_15m calculé lors de la mise à jour état (pas depuis last_st_15m)
+        flipped_15m = (alert_type == 'supertrend' and tf == '15m' and
+                       m.get('last_st_15m') is not None and
+                       st_15m is not None and
+                       m.get('last_st_15m') != st_15m)
 
         # ── Déterminer signal et direction ──────────────────────────
         if alert_type == 'st_context' and tf == '5m':
@@ -455,8 +463,8 @@ def webhook():
         pos_key = f"{symbol}_SCALP"
         with STATE_LOCK:
             pos = SCALP_POSITIONS.get(pos_key)
-            # Retournement → reset position
-            if pos and pos['direction'] != signal_direction:
+            # Retournement → reset position seulement si filtres validés
+            if pos and pos['direction'] != signal_direction and st_4h_ok and bias_1h_ok:
                 SCALP_POSITIONS.pop(pos_key, None)
                 PYRA_ENABLED.pop(pos_key, None)
                 pos = None
