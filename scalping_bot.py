@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot — ST AI 4H + Bias 1H + flip ST AI 15m
+# Scalping Bot — ST AI 4H + Bias 2H + flip ST AI 15m
 # Service Railway séparé
 
 import json
@@ -41,14 +41,14 @@ CONFIG = {
 }
 
 # ============================================================================
-# OKX — Calcul Bias 1H
+# OKX — Calcul Bias 2H
 # ============================================================================
 
 def fetch_ohlcv_okx(symbol, tf, limit=100):
     """Fetch OHLCV depuis OKX API publique."""
     try:
         inst_id = symbol.replace('/', '-')
-        bar_map = {'1h': '1H', '4h': '4H', '1d': '1D'}
+        bar_map = {'1h': '1H', '2h': '2H', '4h': '4H', '1d': '1D'}
         bar = bar_map.get(tf, '1H')
         url = f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar={bar}&limit={limit}"
         resp = requests.get(url, timeout=10)
@@ -81,16 +81,16 @@ def calc_bias(df, ema_len=13, sma_len=30):
     except:
         return None
 
-def update_bias_1h():
-    """Met à jour le Bias 1H pour tous les assets toutes les 15min."""
-    logger.info("📊 Scheduler Bias 1H démarré")
+def update_bias_2h():
+    """Met à jour le Bias 2H pour tous les assets toutes les 15min."""
+    logger.info("📊 Scheduler Bias 2H démarré")
     while True:
         try:
             # Calculer tous les bias HORS du lock (les fetches OKX peuvent être longs)
             results = {}
             for symbol in list(CONFIG['SYMBOLS'].keys()):
                 try:
-                    df = fetch_ohlcv_okx(symbol, '1h', limit=50)
+                    df = fetch_ohlcv_okx(symbol, '2h', limit=50)
                     if df is not None:
                         results[symbol] = calc_bias(df, ema_len=13, sma_len=30)
                 except Exception as e:
@@ -99,8 +99,8 @@ def update_bias_1h():
             for symbol, bias in results.items():
                 with STATE_LOCK:
                     init_symbol(symbol)
-                    MOMENTUM_STATE[symbol]['bias_1h'] = bias
-            logger.info("[BIAS] Mise à jour Bias 1H terminée")
+                    MOMENTUM_STATE[symbol]['bias_2h'] = bias
+            logger.info("[BIAS] Mise à jour Bias 2H terminée")
         except Exception as e:
             logger.error(f"[BIAS] Erreur: {e}")
         time.sleep(900)  # toutes les 15min
@@ -111,7 +111,7 @@ def update_bias_1h():
 # ============================================================================
 
 STATE_LOCK       = threading.RLock()  # RLock pour éviter deadlock (should_send appelé dans le lock)
-MOMENTUM_STATE   = {}   # symbol -> {st_ai_15m, st_ai_4h, bias_1h, last_st_15m, ...}
+MOMENTUM_STATE   = {}   # symbol -> {st_ai_15m, st_ai_4h, bias_2h, last_st_15m, ...}
 SCALP_POSITIONS  = {}   # f"{symbol}_SCALP" -> {direction, entry_count}
 PYRA_ENABLED     = {}   # f"{symbol}_SCALP" -> True
 LAST_SIGNALS     = {}
@@ -186,6 +186,7 @@ def init_symbol(symbol):
             'st_ai_1h':       None,
             'st_ai_4h':       None,
             'bias_1h':        None,
+            'bias_2h':        None,
             'last_st_15m':    None,
             'last_st_1h':     None,
             'st_4h_flipped':  False,
@@ -418,16 +419,16 @@ def webhook():
             state_changed = True
 
     # ── Logique SCALP ─────────────────────────────────────────────────
-    # ENTRÉE PRINCIPALE  : ST Context 5m  + ST AI 4H + Bias 1H
+    # ENTRÉE PRINCIPALE  : ST Context 5m  + ST AI 4H + Bias 2H
     #   Anti-chop : ST Context 15m opposé OU ST Context LT 5m même sens
-    # ENTRÉE SECONDAIRE  : flip ST AI 15m + ST AI 4H + Bias 1H
+    # ENTRÉE SECONDAIRE  : flip ST AI 15m + ST AI 4H + Bias 2H
     #   Anti-chop : ST Context 5m opposé
-    # PYRAMIDING         : flip ST AI 15m + ST AI 4H + Bias 1H (stop si Bias 1H change)
+    # PYRAMIDING         : flip ST AI 15m + ST AI 4H + Bias 2H (stop si Bias 2H change)
     #   Cooldown 30min
 
     if alert_type in ('st_context', 'supertrend') and tf in ('5m', '15m'):
         st_4h       = m.get('st_ai_4h')
-        bias_1h     = m.get('bias_1h')
+        bias_2h     = m.get('bias_2h')
         ctx_5m      = m.get('st_context_5m')
         ctx_15m     = m.get('st_context_15m')
         ctx_lt_5m   = m.get('st_context_lt_5m')
@@ -457,7 +458,7 @@ def webhook():
         opp_ctx   = 'sell' if signal_direction == 'LONG' else 'buy'
 
         st_4h_ok   = st_4h   == exp_st_4h
-        bias_1h_ok = bias_1h == exp_bias
+        bias_2h_ok = bias_2h == exp_bias
 
         # ── Anti-chop selon le signal ────────────────────────────────
         if signal_type == 'ctx5m':
@@ -473,16 +474,16 @@ def webhook():
 
             # Candidat à l'entrée (retournement ou nouvelle position)
             candidate = (
-                st_4h_ok and bias_1h_ok
+                st_4h_ok and bias_2h_ok
                 and not antichop_blocked
                 and (pos is None or pos['direction'] != signal_direction)
             )
 
-            # Pyramiding — uniquement sur flip15m, Bias 1H doit rester aligné
+            # Pyramiding — uniquement sur flip15m, Bias 2H doit rester aligné
             is_pyra = bool(
                 signal_type == 'flip15m'
                 and pos and pos['direction'] == signal_direction
-                and st_4h_ok and bias_1h_ok
+                and st_4h_ok and bias_2h_ok
                 and not antichop_blocked
                 and PYRA_ENABLED.get(pos_key, False)
             )
@@ -498,7 +499,7 @@ def webhook():
                 if not candidate:
                     logger.info(
                         f"[SCALP BLOCKED] {symbol} signal={signal_type} dir={signal_direction} "
-                        f"st4h={st_4h}/{exp_st_4h} bias={bias_1h}/{exp_bias} "
+                        f"st4h={st_4h}/{exp_st_4h} bias2h={bias_2h}/{exp_bias} "
                         f"antichop={antichop_blocked} pos={pos['direction'] if pos else None}"
                     )
 
@@ -518,7 +519,7 @@ def webhook():
                 f"🏦 Exchange: OKX\n"
                 f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
                 f"✅ ST AI 4H: {(st_4h or '?').upper()} (filtre)\n"
-                f"✅ Bias 1H: {(bias_1h or '?').upper()} (EMA13/SMA30)\n"
+                f"✅ Bias 2H: {(bias_2h or '?').upper()} (EMA13/SMA30)\n"
                 f"✅ {signal_txt}\n"
                 f"ℹ️ {antichop_txt}",
                 pos_key
@@ -540,7 +541,7 @@ def webhook():
                 f"💰 Price: ${format_price(price)}\n"
                 f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
                 f"✅ ST AI 4H: {(st_4h or '?').upper()}\n"
-                f"✅ Bias 1H: {(bias_1h or '?').upper()}\n"
+                f"✅ Bias 2H: {(bias_2h or '?').upper()}\n"
                 f"✅ Flip ST AI 15m: {(st_15m or '?').upper()}\n"
                 f"ℹ️ ST Context 5m: {(ctx_5m or 'NEUTRE').upper()} (anti-chop)"
             )
@@ -695,8 +696,8 @@ def startup():
         except Exception as e:
             logger.warning(f"⚠️ Webhook setup: {e}")
 
-    # Démarrer le scheduler Bias 1H
-    bias_thread = threading.Thread(target=update_bias_1h, daemon=True)
+    # Démarrer le scheduler Bias 2H
+    bias_thread = threading.Thread(target=update_bias_2h, daemon=True)
     bias_thread.start()
 
     # Sync état 4H depuis bot principal au démarrage
@@ -730,11 +731,10 @@ def startup():
         "🚀 <b>Scalping Bot démarré</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 Assets: {len(CONFIG['SYMBOLS'])}\n"
-        f"⚙️ Stratégie: ST AI 4H + Bias 1H + flip ST AI 15m\n"
+        f"⚙️ Stratégie: ST AI 4H + Bias 2H + flip ST AI 15m\n"
         f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}"
     )
 
 if os.environ.get('ENABLE_SCALP_BOT', '1') == '1':
     t = threading.Thread(target=startup, daemon=True)
     t.start()
-
