@@ -95,14 +95,33 @@ def update_bias_2h():
                 try:
                     df = fetch_ohlcv_okx(symbol, '2h', limit=50)
                     if df is not None:
-                        results[symbol] = calc_bias(df, ema_len=13, sma_len=30)
+                        results[symbol] = {
+                            'bias': calc_bias(df, ema_len=13, sma_len=30),
+                            'price': float(df['close'].iloc[-1]) if len(df) else None,
+                        }
                 except Exception as e:
                     logger.debug(f"[BIAS] {symbol}: {e}")
             # Mettre à jour l'état avec des locks courts symbol par symbol
-            for symbol, bias in results.items():
+            pending_alerts = []
+            for symbol, result in results.items():
+                bias = result.get('bias')
+                price = result.get('price')
                 with STATE_LOCK:
                     init_symbol(symbol)
-                    MOMENTUM_STATE[symbol]['bias_2h'] = bias
+                    m = MOMENTUM_STATE[symbol]
+                    prev_bias = m.get('bias_2h')
+                    bias_ready = bool(m.get('bias_2h_ready') or prev_bias is not None)
+                    m['bias_2h'] = bias
+                    m['bias_2h_ready'] = True
+                    if bias_ready and bias is not None and bias != prev_bias:
+                        m['last_bias_2h_change_ts'] = time.time()
+                        alert = build_ctx2h_bias2h_alert(symbol, price)
+                        if alert:
+                            pending_alerts.append(alert)
+            for msg, log_msg in pending_alerts:
+                send_telegram(msg)
+                logger.info(log_msg)
+            persist_state()
             logger.info("[BIAS] Mise à jour Bias 2H terminée")
         except Exception as e:
             logger.error(f"[BIAS] Erreur: {e}")
@@ -187,16 +206,22 @@ def init_symbol(symbol):
         MOMENTUM_STATE[symbol] = {
             'st_ai_15m':      None,
             'st_ai_1h':       None,
+            'st_ai_2h':       None,
             'st_ai_4h':       None,
             'bias_1h':        None,
             'bias_2h':        None,
             'last_st_15m':    None,
             'last_st_1h':     None,
+            'last_st_2h':     None,
             'st_4h_flipped':  False,
             'st_context_5m':    None,
             'st_context_15m':   None,
             'st_context_lt_5m': None,
             'st_context_1h':    None,
+            'st_context_2h':    None,
+            'bias_2h_ready':    False,
+            'last_bias_2h_change_ts': None,
+            'last_st_ai_2h_flip_ts': None,
         }
 
 def format_price(price):
@@ -229,6 +254,73 @@ def should_send(symbol, key, cooldown=3600, event_id=None):
                 LAST_SIGNAL_EVENTS[k] = event_id
             return True
     return False
+
+def build_ctx2h_bias2h_alert(symbol, price=None):
+    m = MOMENTUM_STATE.get(symbol, {})
+    bias_2h = m.get('bias_2h')
+    ctx_2h = m.get('st_context_2h')
+    change_ts = m.get('last_bias_2h_change_ts')
+    if bias_2h not in ('bull', 'bear') or not change_ts:
+        return None
+
+    exp_ctx = 'buy' if bias_2h == 'bull' else 'sell'
+    if ctx_2h != exp_ctx:
+        return None
+
+    # Tolere l'ordre d'arrivee entre le scheduler Bias 2H et TradingView Context 2H.
+    if time.time() - float(change_ts) > 3 * 3600:
+        return None
+
+    event_id = f"ctx2h_bias2h:{symbol}:{bias_2h}:{int(float(change_ts))}"
+    if not should_send(symbol, 'ctx2h_bias2h', cooldown=6 * 3600, event_id=event_id):
+        return None
+
+    direction = 'LONG' if bias_2h == 'bull' else 'SHORT'
+    emoji = '\U0001f7e2' if direction == 'LONG' else '\U0001f534'
+    msg = (
+        f"{emoji} <b>[INFO - CTX 2H + BIAS 2H]</b> {symbol}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 Direction: {direction}\n"
+        f"💰 Price: ${format_price(price)}\n"
+        f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
+        f"✅ ST Context 2H: {ctx_2h.upper()}\n"
+        f"✅ Bias 2H: {bias_2h.upper()} (changement)"
+    )
+    log_msg = f"[INFO] Context 2H + Bias 2H change: {symbol} {direction}"
+    return msg, log_msg
+
+def build_ctx2h_stai2h_alert(symbol, price=None):
+    m = MOMENTUM_STATE.get(symbol, {})
+    st_ai_2h = m.get('st_ai_2h')
+    ctx_2h = m.get('st_context_2h')
+    flip_ts = m.get('last_st_ai_2h_flip_ts')
+    if st_ai_2h not in ('buy', 'sell') or not flip_ts:
+        return None
+
+    if ctx_2h != st_ai_2h:
+        return None
+
+    # Tolere l'ordre d'arrivee entre le flip ST AI 2H et TradingView Context 2H.
+    if time.time() - float(flip_ts) > 3 * 3600:
+        return None
+
+    event_id = f"ctx2h_stai2h:{symbol}:{st_ai_2h}:{int(float(flip_ts))}"
+    if not should_send(symbol, 'ctx2h_stai2h', cooldown=6 * 3600, event_id=event_id):
+        return None
+
+    direction = 'LONG' if st_ai_2h == 'buy' else 'SHORT'
+    emoji = '\U0001f7e2' if direction == 'LONG' else '\U0001f534'
+    msg = (
+        f"{emoji} <b>[INFO - CTX 2H + ST AI 2H]</b> {symbol}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 Direction: {direction}\n"
+        f"💰 Price: ${format_price(price)}\n"
+        f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
+        f"✅ ST Context 2H: {ctx_2h.upper()}\n"
+        f"✅ Flip ST AI 2H: {st_ai_2h.upper()}"
+    )
+    log_msg = f"[INFO] Context 2H + Flip ST AI 2H: {symbol} {direction}"
+    return msg, log_msg
 
 def send_telegram(msg):
     tok  = os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
@@ -294,7 +386,7 @@ def webhook():
     event_id   = data.get('event_id') or data.get('time') or str(time.time())
 
     # Normaliser tf
-    tf_aliases = {'15': '15m', '60': '1h', '180': '3h', '3hr': '3h', '3hour': '3h', '240': '4h', '4hr': '4h', '4hour': '4h'}
+    tf_aliases = {'15': '15m', '60': '1h', '120': '2h', '2hr': '2h', '2hour': '2h', '180': '3h', '3hr': '3h', '3hour': '3h', '240': '4h', '4hr': '4h', '4hour': '4h'}
     tf = tf_aliases.get(tf, tf)
 
     # Normaliser symbol
@@ -341,23 +433,19 @@ def webhook():
             m['last_st_1h'] = prev_1h
             state_changed = True
             flipped_1h   = (prev_1h is not None and parsed is not None and parsed != prev_1h)
-            if flipped_1h:
-                ctx_1h = m.get('st_context_1h')
-                if ctx_1h == parsed:
-                    direction_1h = 'LONG' if parsed == 'buy' else 'SHORT'
-                    emoji = '\U0001f7e2' if direction_1h == 'LONG' else '\U0001f534'
-                    msg_1h = (
-                        f"{emoji} <b>[INFO - ST AI 1H + CTX 1H]</b> {symbol}\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"📈 Direction: {direction_1h}\n"
-                        f"💰 Price: ${format_price(price)}\n"
-                        f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-                        f"✅ Flip ST AI 1H: {parsed.upper()}\n"
-                        f"✅ ST Context 1H: {ctx_1h.upper()}"
-                    )
-                    send_telegram(msg_1h)
-                    logger.info(f"[INFO] Flip ST AI 1H + Ctx 1H: {symbol} {direction_1h}")
-
+        elif tf == '2h':
+            prev_2h = m.get('st_ai_2h')
+            m['st_ai_2h'] = parsed
+            m['last_st_2h'] = prev_2h
+            state_changed = True
+            flipped_2h = (prev_2h is not None and parsed is not None and parsed != prev_2h)
+            if flipped_2h:
+                m['last_st_ai_2h_flip_ts'] = time.time()
+                alert = build_ctx2h_stai2h_alert(symbol, price)
+                if alert:
+                    msg, log_msg = alert
+                    send_telegram(msg)
+                    logger.info(log_msg)
         elif tf == '4h':
             prev_4h = m.get('st_ai_4h')
             m['st_ai_4h'] = parsed
@@ -375,25 +463,7 @@ def webhook():
             new_bias_val = bias_val if bias_val != 'neutral' else None
             m['bias_1h'] = new_bias_val
             state_changed = True
-            # Alerte changement Bias 1H + Context 1H aligné
-            if prev_bias != new_bias_val and new_bias_val is not None:
-                ctx_1h = m.get('st_context_1h')
-                exp_ctx = 'buy' if new_bias_val == 'bull' else 'sell'
-                if ctx_1h == exp_ctx:
-                    direction_b = 'LONG' if new_bias_val == 'bull' else 'SHORT'
-                    emoji = '🟢' if direction_b == 'LONG' else '🔴'
-                    msg_bias = (
-                        f"{emoji} <b>[INFO - BIAS 1H + CTX 1H]</b> {symbol}\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"📈 Direction: {direction_b}\n"
-                        f"💰 Price: ${format_price(price)}\n"
-                        f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-                        f"✅ Bias 1H: {new_bias_val.upper()} (changement)\n"
-                        f"✅ ST Context 1H: {ctx_1h.upper()}"
-                    )
-                    send_telegram(msg_bias)
-                    logger.info(f"[INFO] Bias 1H changé + Ctx 1H aligné: {symbol} {direction_b}")
-
+            
     elif alert_type == 'st_context_lt' and tf == '5m':
         try:
             lt_val = float(val)
@@ -420,6 +490,19 @@ def webhook():
         elif tf == '1h':
             m['st_context_1h'] = ctx_parsed
             state_changed = True
+        elif tf == '2h':
+            m['st_context_2h'] = ctx_parsed
+            state_changed = True
+            alert = build_ctx2h_bias2h_alert(symbol, price)
+            if alert:
+                msg, log_msg = alert
+                send_telegram(msg)
+                logger.info(log_msg)
+            alert = build_ctx2h_stai2h_alert(symbol, price)
+            if alert:
+                msg, log_msg = alert
+                send_telegram(msg)
+                logger.info(log_msg)
 
     # ── Logique SCALP ─────────────────────────────────────────────────
     # ENTRÉE PRINCIPALE  : ST Context 5m  + ST AI 4H + Bias 2H
