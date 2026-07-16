@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot — ST AI 4H + Bias 2H + flip ST AI 15m
+# Scalping Bot — ST AI 1H + Bias 15m + Zone Context 1m
 # Service Railway séparé
 
 import json
@@ -44,14 +44,14 @@ CONFIG = {
 }
 
 # ============================================================================
-# OKX — Calcul Bias 2H
+# OKX — Calcul Bias
 # ============================================================================
 
 def fetch_ohlcv_okx(symbol, tf, limit=100):
     """Fetch OHLCV depuis OKX API publique."""
     try:
         inst_id = symbol.replace('/', '-')
-        bar_map = {'1h': '1H', '2h': '2H', '4h': '4H', '1d': '1D'}
+        bar_map = {'1m': '1m', '15m': '15m', '1h': '1H', '2h': '2H', '4h': '4H', '1d': '1D'}
         bar = bar_map.get(tf, '1H')
         url = f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar={bar}&limit={limit}"
         resp = requests.get(url, timeout=10)
@@ -63,6 +63,7 @@ def fetch_ohlcv_okx(symbol, tf, limit=100):
         df['close'] = df['c'].astype(float)
         df = df.iloc[::-1].reset_index(drop=True)
         return df
+
     except Exception as e:
         logger.debug(f"[OKX] {symbol} {tf}: {e}")
         return None
@@ -84,16 +85,16 @@ def calc_bias(df, ema_len=13, sma_len=30):
     except:
         return None
 
-def update_bias_2h():
-    """Met à jour le Bias 2H pour tous les assets toutes les 15min."""
-    logger.info("📊 Scheduler Bias 2H démarré")
+def update_bias_15m():
+    """Met à jour le Bias 15m pour tous les assets toutes les 5min."""
+    logger.info("📊 Scheduler Bias 15m démarré")
     while True:
         try:
             # Calculer tous les bias HORS du lock (les fetches OKX peuvent être longs)
             results = {}
             for symbol in list(CONFIG['SYMBOLS'].keys()):
                 try:
-                    df = fetch_ohlcv_okx(symbol, '2h', limit=50)
+                    df = fetch_ohlcv_okx(symbol, '15m', limit=50)
                     if df is not None:
                         results[symbol] = {
                             'bias': calc_bias(df, ema_len=13, sma_len=30),
@@ -109,23 +110,15 @@ def update_bias_2h():
                 with STATE_LOCK:
                     init_symbol(symbol)
                     m = MOMENTUM_STATE[symbol]
-                    prev_bias = m.get('bias_2h')
-                    bias_ready = bool(m.get('bias_2h_ready') or prev_bias is not None)
-                    m['bias_2h'] = bias
-                    m['bias_2h_ready'] = True
-                    if bias_ready and bias is not None and bias != prev_bias:
-                        m['last_bias_2h_change_ts'] = time.time()
-                        alert = build_ctx2h_bias2h_alert(symbol, price)
-                        if alert:
-                            pending_alerts.append(alert)
+                    m['bias_15m'] = bias
             for msg, log_msg in pending_alerts:
                 send_telegram(msg)
                 logger.info(log_msg)
             persist_state()
-            logger.info("[BIAS] Mise à jour Bias 2H terminée")
+            logger.info("[BIAS] Mise à jour Bias 15m terminée")
         except Exception as e:
             logger.error(f"[BIAS] Erreur: {e}")
-        time.sleep(900)  # toutes les 15min
+        time.sleep(300)  # toutes les 5min
 
 
 # ============================================================================
@@ -138,6 +131,7 @@ SCALP_POSITIONS  = {}   # f"{symbol}_SCALP" -> {direction, entry_count}
 PYRA_ENABLED     = {}   # f"{symbol}_SCALP" -> True
 LAST_SIGNALS     = {}
 LAST_SIGNAL_EVENTS = {}
+SCALP_ENABLED    = True
 REDIS_CLIENT     = None
 
 # ============================================================================
@@ -159,6 +153,7 @@ def init_redis():
         REDIS_CLIENT = None
 
 def persist_state():
+    global SCALP_ENABLED
     if not REDIS_CLIENT:
         return
     try:
@@ -169,6 +164,7 @@ def persist_state():
                 'pyra':       dict(PYRA_ENABLED),
                 'signals':    dict(LAST_SIGNALS),
                 'events':     dict(LAST_SIGNAL_EVENTS),
+                'scalp_enabled': SCALP_ENABLED,
             }
             serialized = json.dumps(payload)
         REDIS_CLIENT.set('scalp_bot_state', serialized)
@@ -176,7 +172,7 @@ def persist_state():
         logger.error(f"Redis save error: {e}")
 
 def load_state():
-    global MOMENTUM_STATE, SCALP_POSITIONS, PYRA_ENABLED, LAST_SIGNALS, LAST_SIGNAL_EVENTS
+    global MOMENTUM_STATE, SCALP_POSITIONS, PYRA_ENABLED, LAST_SIGNALS, LAST_SIGNAL_EVENTS, SCALP_ENABLED
     if not REDIS_CLIENT:
         return
     try:
@@ -189,6 +185,7 @@ def load_state():
         PYRA_ENABLED       = payload.get('pyra', {})
         LAST_SIGNALS       = payload.get('signals', {})
         LAST_SIGNAL_EVENTS = payload.get('events', {})
+        SCALP_ENABLED      = bool(payload.get('scalp_enabled', True))
         # Nettoyer les assets hors watchlist
         stale = [s for s in list(MOMENTUM_STATE) if s not in CONFIG['SYMBOLS']]
         for s in stale:
@@ -209,11 +206,16 @@ def init_symbol(symbol):
             'st_ai_2h':       None,
             'st_ai_4h':       None,
             'bias_1h':        None,
+            'bias_15m':       None,
             'bias_2h':        None,
             'last_st_15m':    None,
             'last_st_1h':     None,
             'last_st_2h':     None,
             'st_4h_flipped':  False,
+            'st_context_1m':    None,
+            'st_context_lt_1m': None,
+            'st_context_1m_ts': None,
+            'st_context_lt_1m_ts': None,
             'st_context_5m':    None,
             'st_context_15m':   None,
             'st_context_lt_5m': None,
@@ -241,6 +243,12 @@ def parse_st_value(val):
     if normalized in ('1', 'buy'):  return 'buy'
     if normalized in ('0', 'sell'): return 'sell'
     return None
+
+def is_fresh(ts, max_age_seconds):
+    try:
+        return ts is not None and (time.time() - float(ts)) <= max_age_seconds
+    except (TypeError, ValueError):
+        return False
 
 def should_send(symbol, key, cooldown=3600, event_id=None):
     now = time.time()
@@ -345,26 +353,59 @@ def send_telegram_with_buttons(msg, callback_key):
     tok  = os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
     chat = os.environ.get('TELEGRAM_CHAT_ID', '')
     if not tok or not chat:
-        logger.warning("⚠️ Token ou chat_id manquant — position créée sans notification")
+        logger.warning("Token ou chat_id manquant - position creee sans notification")
         return False
     try:
-        keyboard = {"inline_keyboard": [[
-            {"text": "📈 Activer pyramiding", "callback_data": f"pyra_on:{callback_key}"},
-            {"text": "❌ Ignorer",             "callback_data": f"pyra_off:{callback_key}"}
-        ]]}
+        keyboard = {"inline_keyboard": [
+            [
+                {"text": "Activer pyramiding", "callback_data": f"pyra_on:{callback_key}"},
+                {"text": "Ignorer", "callback_data": f"pyra_off:{callback_key}"},
+            ],
+            [
+                {"text": "Scalp OFF", "callback_data": "scalp_off"},
+            ],
+        ]}
         resp = requests.post(
             f"https://api.telegram.org/bot{tok}/sendMessage",
             json={"chat_id": chat, "text": msg, "parse_mode": "HTML", "reply_markup": keyboard},
             timeout=10
         )
         if resp.status_code == 200:
-            logger.info("✅ Telegram avec boutons envoyé")
+            logger.info("Telegram avec boutons envoye")
             return True
-        else:
-            logger.error(f"❌ Telegram buttons {resp.status_code}: {resp.text[:100]}")
-            return False
+        logger.error(f"Telegram buttons {resp.status_code}: {resp.text[:100]}")
+        return False
     except Exception as e:
         logger.error(f"Telegram buttons error: {e}")
+        return False
+
+
+def send_scalp_status(chat_id=None, message_id=None):
+    tok = os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
+    default_chat = os.environ.get('TELEGRAM_CHAT_ID', '')
+    target_chat = chat_id or default_chat
+    if not tok or not target_chat:
+        return False
+    status = "ON" if SCALP_ENABLED else "OFF"
+    msg = (
+        f"<b>Scalpbot: {status}</b>\n"
+        f"Positions suivies: {len(SCALP_POSITIONS)}\n"
+        f"Assets: {len(CONFIG['SYMBOLS'])}"
+    )
+    keyboard = {"inline_keyboard": [[
+        {"text": "ON", "callback_data": "scalp_on"},
+        {"text": "OFF", "callback_data": "scalp_off"},
+    ]]}
+    payload = {"chat_id": target_chat, "text": msg, "parse_mode": "HTML", "reply_markup": keyboard}
+    try:
+        if message_id:
+            payload["message_id"] = message_id
+            resp = requests.post(f"https://api.telegram.org/bot{tok}/editMessageText", json=payload, timeout=10)
+        else:
+            resp = requests.post(f"https://api.telegram.org/bot{tok}/sendMessage", json=payload, timeout=10)
+        return resp.status_code == 200
+    except Exception as e:
+        logger.error(f"Telegram status error: {e}")
         return False
 
 # ============================================================================
@@ -386,7 +427,7 @@ def webhook():
     event_id   = data.get('event_id') or data.get('time') or str(time.time())
 
     # Normaliser tf
-    tf_aliases = {'15': '15m', '60': '1h', '120': '2h', '2hr': '2h', '2hour': '2h', '180': '3h', '3hr': '3h', '3hour': '3h', '240': '4h', '4hr': '4h', '4hour': '4h'}
+    tf_aliases = {'1': '1m', '1min': '1m', '1minute': '1m', '15': '15m', '60': '1h', '120': '2h', '2hr': '2h', '2hour': '2h', '180': '3h', '3hr': '3h', '3hour': '3h', '240': '4h', '4hr': '4h', '4hour': '4h'}
     tf = tf_aliases.get(tf, tf)
 
     # Normaliser symbol
@@ -463,15 +504,22 @@ def webhook():
             new_bias_val = bias_val if bias_val != 'neutral' else None
             m['bias_1h'] = new_bias_val
             state_changed = True
+        elif bias_val in ('bull', 'bear', 'neutral') and tf == '15m':
+            m['bias_15m'] = bias_val if bias_val != 'neutral' else None
+            state_changed = True
             
-    elif alert_type == 'st_context_lt' and tf == '5m':
+    elif alert_type == 'st_context_lt' and tf in ('1m', '5m'):
         try:
             lt_val = float(val)
             lt_parsed = 'buy' if lt_val < -1.96 else 'sell' if lt_val > 1.96 else None
         except (TypeError, ValueError):
             logger.warning(f"[WEBHOOK] ST Context LT invalide: {symbol} tf={tf} value={val!r}")
             return jsonify({'status': 'ignored', 'reason': 'invalid_st_context_lt'}), 200
-        m['st_context_lt_5m'] = lt_parsed
+        if tf == '1m':
+            m['st_context_lt_1m'] = lt_parsed
+            m['st_context_lt_1m_ts'] = time.time()
+        else:
+            m['st_context_lt_5m'] = lt_parsed
         state_changed = True
 
     elif alert_type == 'st_context':
@@ -481,7 +529,11 @@ def webhook():
         except (TypeError, ValueError):
             logger.warning(f"[WEBHOOK] ST Context invalide: {symbol} tf={tf} value={val!r}")
             return jsonify({'status': 'ignored', 'reason': 'invalid_st_context'}), 200
-        if tf == '5m':
+        if tf == '1m':
+            m['st_context_1m'] = ctx_parsed
+            m['st_context_1m_ts'] = time.time()
+            state_changed = True
+        elif tf == '5m':
             m['st_context_5m'] = ctx_parsed
             state_changed = True
         elif tf == '15m':
@@ -504,136 +556,106 @@ def webhook():
                 send_telegram(msg)
                 logger.info(log_msg)
 
-    # ── Logique SCALP ─────────────────────────────────────────────────
-    # ENTRÉE PRINCIPALE  : ST Context 5m  + ST AI 4H + Bias 2H
-    #   Anti-chop : ST Context 15m opposé OU ST Context LT 5m même sens
-    # ENTRÉE SECONDAIRE  : flip ST AI 15m + ST AI 4H + Bias 2H
-    #   Anti-chop : ST Context 5m opposé
-    # PYRAMIDING         : flip ST AI 15m + ST AI 4H + Bias 2H (stop si Bias 2H change)
-    #   Cooldown 30min
+    # ?? Logique SCALP ?????????????????????????????????????????????????
+    # ENTREE : Zone ST Context 1m + ST AI 1H + Bias 15m
+    # Anti-chop : ST Context LT 1m dans le meme sens => bloque
 
-    if alert_type in ('st_context', 'supertrend') and tf in ('5m', '15m'):
-        st_4h       = m.get('st_ai_4h')
-        bias_2h     = m.get('bias_2h')
-        ctx_5m      = m.get('st_context_5m')
-        ctx_15m     = m.get('st_context_15m')
-        ctx_lt_5m   = m.get('st_context_lt_5m')
-        st_15m      = m.get('st_ai_15m')
-        # flipped_15m calculé dans le bloc mise à jour état ci-dessus
+    if alert_type in ('st_context', 'st_context_lt', 'supertrend', 'bias') and tf in ('1m', '1h', '15m'):
+        st_1h = m.get('st_ai_1h')
+        bias_15m = m.get('bias_15m')
+        ctx_1m = m.get('st_context_1m')
+        ctx_lt_1m = m.get('st_context_lt_1m')
+        ctx_1m_fresh = is_fresh(m.get('st_context_1m_ts'), 5 * 60)
+        ctx_lt_1m_fresh = is_fresh(m.get('st_context_lt_1m_ts'), 5 * 60)
 
-        # ── Déterminer signal et direction ──────────────────────────
-        should_evaluate = False
-        if alert_type == 'st_context' and tf == '5m':
-            if ctx_5m is not None:
-                signal_direction = "LONG" if ctx_5m == 'buy' else "SHORT"
-                signal_type      = 'ctx5m'
-                should_evaluate  = True
-        elif alert_type == 'supertrend' and tf == '15m' and flipped_15m:
-            signal_direction = "LONG" if st_15m == 'buy' else "SHORT"
-            signal_type      = 'flip15m'
-            should_evaluate  = True
-
+        should_evaluate = ctx_1m is not None and ctx_1m_fresh
         if not should_evaluate:
             if state_changed:
                 persist_state()
             return jsonify({'status': 'ok'}), 200
 
-        exp_st_4h = 'buy'  if signal_direction == 'LONG' else 'sell'
-        exp_bias  = 'bull' if signal_direction == 'LONG' else 'bear'
-        exp_ctx   = 'buy'  if signal_direction == 'LONG' else 'sell'
-        opp_ctx   = 'sell' if signal_direction == 'LONG' else 'buy'
+        if not SCALP_ENABLED:
+            logger.info(f"[SCALP OFF] Signal ignore: {symbol} tf={tf} type={alert_type}")
+            if state_changed:
+                persist_state()
+            return jsonify({'status': 'ok', 'scalp_enabled': False}), 200
 
-        st_4h_ok   = st_4h   == exp_st_4h
-        bias_2h_ok = bias_2h == exp_bias
+        signal_direction = 'LONG' if ctx_1m == 'buy' else 'SHORT'
+        exp_st_1h = 'buy' if signal_direction == 'LONG' else 'sell'
+        exp_bias = 'bull' if signal_direction == 'LONG' else 'bear'
+        exp_ctx = 'buy' if signal_direction == 'LONG' else 'sell'
 
-        # ── Anti-chop selon le signal ────────────────────────────────
-        if signal_type == 'ctx5m':
-            antichop_15m  = (ctx_15m   == opp_ctx) if ctx_15m   is not None else False
-            antichop_lt5m = (ctx_lt_5m == exp_ctx) if ctx_lt_5m is not None else False
-            antichop_blocked = antichop_15m or antichop_lt5m
-        else:  # flip15m
-            antichop_blocked = (ctx_5m == opp_ctx) if ctx_5m is not None else False
+        st_1h_ok = st_1h == exp_st_1h
+        bias_15m_ok = bias_15m == exp_bias
+        ctx_1m_ok = ctx_1m == exp_ctx
+        antichop_blocked = ctx_lt_1m_fresh and ctx_lt_1m == exp_ctx
+        all_ok = st_1h_ok and bias_15m_ok and ctx_1m_ok and not antichop_blocked
 
         pos_key = f"{symbol}_SCALP"
+        is_pyra = False
         with STATE_LOCK:
             pos = SCALP_POSITIONS.get(pos_key)
+            if pos and pos['direction'] != signal_direction:
+                SCALP_POSITIONS.pop(pos_key, None)
+                PYRA_ENABLED.pop(pos_key, None)
+                pos = None
 
-            # Candidat à l'entrée (retournement ou nouvelle position)
-            candidate = (
-                st_4h_ok and bias_2h_ok
-                and not antichop_blocked
-                and (pos is None or pos['direction'] != signal_direction)
-            )
-
-            # Pyramiding — uniquement sur flip15m, Bias 2H doit rester aligné
-            is_pyra = bool(
-                signal_type == 'flip15m'
-                and pos and pos['direction'] == signal_direction
-                and st_4h_ok and bias_2h_ok
-                and not antichop_blocked
-                and PYRA_ENABLED.get(pos_key, False)
-            )
-
-            # Entrée atomique : suppression ancienne + création nouvelle
-            if candidate and should_send(symbol, f"scalp_entry_{exp_ctx}", event_id=event_id, cooldown=3600):
+            candidate = bool(all_ok and pos is None)
+            if candidate and should_send(symbol, f"scalp_entry_{exp_ctx}", event_id=event_id, cooldown=1800):
                 SCALP_POSITIONS[pos_key] = {'direction': signal_direction, 'entry_count': 1}
                 PYRA_ENABLED.pop(pos_key, None)
                 pos = SCALP_POSITIONS[pos_key]
                 is_entry = True
             else:
                 is_entry = False
-                if not candidate:
+                # Pyramiding : position deja ouverte + nouvelle zone ST Context 1m dans le meme sens
+                if (pos and pos['direction'] == signal_direction and st_1h_ok and bias_15m_ok and ctx_1m_ok
+                        and not antichop_blocked and PYRA_ENABLED.get(pos_key, False)
+                        and should_send(symbol, f"scalp_pyra_{exp_ctx}", event_id=event_id, cooldown=CONFIG['PYRA_COOLDOWN'])):
+                    pos['entry_count'] += 1
+                    is_pyra = True
+                if not all_ok and not is_pyra:
                     logger.info(
-                        f"[SCALP BLOCKED] {symbol} signal={signal_type} dir={signal_direction} "
-                        f"st4h={st_4h}/{exp_st_4h} bias2h={bias_2h}/{exp_bias} "
-                        f"antichop={antichop_blocked} pos={pos['direction'] if pos else None}"
+                        f"[SCALP BLOCKED] {symbol} dir={signal_direction} "
+                        f"st1h={st_1h}/{exp_st_1h} bias15m={bias_15m}/{exp_bias} "
+                        f"ctx1m={ctx_1m}/{exp_ctx} ctx1m_fresh={ctx_1m_fresh} "
+                        f"lt1m={ctx_lt_1m} lt1m_fresh={ctx_lt_1m_fresh} antichop={antichop_blocked} "
+                        f"pos={pos['direction'] if pos else None}"
                     )
 
         if is_entry and pos:
             emoji = "\U0001f7e2" if signal_direction == "LONG" else "\U0001f534"
-            if signal_type == 'ctx5m':
-                signal_txt   = f"ST Context 5m: {(ctx_5m or '?').upper()} (SIGNAL PRINCIPAL)"
-                antichop_txt = f"ST Context 15m: {(ctx_15m or 'NEUTRE').upper()} | LT 5m: {(ctx_lt_5m or 'NEUTRE').upper()}"
-            else:
-                signal_txt   = f"Flip ST AI 15m: {(st_15m or '?').upper()} (SIGNAL SECONDAIRE)"
-                antichop_txt = f"ST Context 5m: {(ctx_5m or 'NEUTRE').upper()} (anti-chop)"
             tg_sent = send_telegram_with_buttons(
                 f"{emoji} <b>[SCALP - ENTREE]</b> {symbol}\n"
+                f"????????????????????\n"
+                f"?? Direction: {signal_direction}\n"
+                f"?? Price: ${format_price(price)}\n"
+                f"?? Exchange: OKX\n"
+                f"? {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
+                f"? ST AI 1H: {(st_1h or '?').upper()}\n"
+                f"? Bias 15m: {(bias_15m or '?').upper()}\n"
+                f"? Zone ST Context 1m: {(ctx_1m or '?').upper()}\n"
+                f"??? LT 1m: {(ctx_lt_1m or 'NEUTRE').upper()} (anti-chop)",
+                pos_key
+            )
+            if not tg_sent:
+                logger.warning(f"[SCALP] Entree {symbol} creee mais notification Telegram echouee")
+            logger.info(f"[SCALP] Entree: {symbol} {signal_direction}")
+            state_changed = True
+
+        elif is_pyra and pos:
+            emoji = "\U0001f7e2" if signal_direction == "LONG" else "\U0001f534"
+            send_telegram(
+                f"{emoji} <b>[SCALP - PYRAMIDING #{pos['entry_count']}]</b> {symbol}\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"📈 Direction: {signal_direction}\n"
                 f"💰 Price: ${format_price(price)}\n"
                 f"🏦 Exchange: OKX\n"
                 f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-                f"✅ ST AI 4H: {(st_4h or '?').upper()} (filtre)\n"
-                f"✅ Bias 2H: {(bias_2h or '?').upper()} (EMA13/SMA30)\n"
-                f"✅ {signal_txt}\n"
-                f"ℹ️ {antichop_txt}",
-                pos_key
+                f"✅ Nouvelle zone ST Context 1m: {(ctx_1m or '?').upper()}"
             )
-            if not tg_sent:
-                logger.warning(f"[SCALP] Entrée {symbol} créée mais notification Telegram échouée")
-            logger.info(f"[SCALP] Entrée: {symbol} {signal_direction} | signal={signal_type}")
+            logger.info(f"[SCALP] Pyramiding #{pos['entry_count']}: {symbol} {signal_direction}")
             state_changed = True
-
-        elif is_pyra and should_send(symbol, f"scalp_pyra_{exp_ctx}", event_id=event_id, cooldown=1800):
-            with STATE_LOCK:
-                pos['entry_count'] += 1
-                count = pos['entry_count']
-            emoji = "\U0001f7e2" if signal_direction == "LONG" else "\U0001f534"
-            send_telegram(
-                f"{emoji} <b>[SCALP - PYRAMIDING #{count}]</b> {symbol}\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"📈 Direction: {signal_direction}\n"
-                f"💰 Price: ${format_price(price)}\n"
-                f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-                f"✅ ST AI 4H: {(st_4h or '?').upper()}\n"
-                f"✅ Bias 2H: {(bias_2h or '?').upper()}\n"
-                f"✅ Flip ST AI 15m: {(st_15m or '?').upper()}\n"
-                f"ℹ️ ST Context 5m: {(ctx_5m or 'NEUTRE').upper()} (anti-chop)"
-            )
-            logger.info(f"[SCALP] Pyramiding #{count}: {symbol} {signal_direction}")
-            state_changed = True
-
 
     # Persister si état modifié
     if state_changed:
@@ -647,6 +669,7 @@ def webhook():
 
 @app.route('/telegram_callback', methods=['POST'])
 def telegram_callback():
+    global SCALP_ENABLED
     tg_secret = os.environ.get('SCALP_TELEGRAM_SECRET', '')
     if tg_secret:
         if request.headers.get('X-Telegram-Bot-Api-Secret-Token', '') != tg_secret:
@@ -656,6 +679,29 @@ def telegram_callback():
     if not data:
         return jsonify({'ok': True}), 200
     try:
+        msg = data.get('message') or {}
+        if msg:
+            text = str(msg.get('text', '')).strip().lower()
+            chat_id_msg = msg.get('chat', {}).get('id')
+            if text in ('/scalp_on', '/scalpon'):
+                with STATE_LOCK:
+                    SCALP_ENABLED = True
+                persist_state()
+                send_scalp_status(chat_id=chat_id_msg)
+                logger.info("[SCALP] Active via Telegram command")
+                return jsonify({'ok': True}), 200
+            if text in ('/scalp_off', '/scalpoff'):
+                with STATE_LOCK:
+                    SCALP_ENABLED = False
+                    PYRA_ENABLED.clear()
+                persist_state()
+                send_scalp_status(chat_id=chat_id_msg)
+                logger.info("[SCALP] Desactive via Telegram command")
+                return jsonify({'ok': True}), 200
+            if text in ('/scalp_status', '/scalp'):
+                send_scalp_status(chat_id=chat_id_msg)
+                return jsonify({'ok': True}), 200
+
         cb      = data.get('callback_query', {})
         cb_id   = cb.get('id')
         cb_data = cb.get('data', '')
@@ -694,6 +740,21 @@ def telegram_callback():
                                        {"text": "❌ Pyramiding ignoré", "callback_data": "noop"}
                                    ]]}}, timeout=5)
 
+        elif cb_data == 'scalp_on':
+            with STATE_LOCK:
+                SCALP_ENABLED = True
+            persist_state()
+            logger.info(f"[SCALP] Active par {user}")
+            send_scalp_status(chat_id=chat_id, message_id=msg_id)
+
+        elif cb_data == 'scalp_off':
+            with STATE_LOCK:
+                SCALP_ENABLED = False
+                PYRA_ENABLED.clear()
+            persist_state()
+            logger.info(f"[SCALP] Desactive par {user}")
+            send_scalp_status(chat_id=chat_id, message_id=msg_id)
+
     except Exception as e:
         logger.error(f"[CALLBACK] Erreur: {e}")
     return jsonify({'ok': True}), 200
@@ -707,6 +768,7 @@ def index():
     return jsonify({
         'status': 'ok',
         'bot': 'Scalping Bot',
+        'scalp_enabled': SCALP_ENABLED,
         'assets': len(CONFIG['SYMBOLS']),
         'positions': len(SCALP_POSITIONS),
     })
@@ -782,8 +844,8 @@ def startup():
         except Exception as e:
             logger.warning(f"⚠️ Webhook setup: {e}")
 
-    # Démarrer le scheduler Bias 2H
-    bias_thread = threading.Thread(target=update_bias_2h, daemon=True)
+    # Démarrer le scheduler Bias 15m
+    bias_thread = threading.Thread(target=update_bias_15m, daemon=True)
     bias_thread.start()
 
     # Sync état 4H depuis bot principal au démarrage
@@ -817,7 +879,7 @@ def startup():
         "🚀 <b>Scalping Bot démarré</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 Assets: {len(CONFIG['SYMBOLS'])}\n"
-        f"⚙️ Stratégie: ST AI 4H + Bias 2H + flip ST AI 15m\n"
+        f"⚙️ Stratégie: ST AI 1H + Bias 15m + Zone Context 1m\n"
         f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}"
     )
 
