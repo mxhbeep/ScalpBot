@@ -1,7 +1,7 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot — ST AI 1H + Bias 15m + Zone Context 1m
-# Service Railway séparé
+# Scalping Bot 鈥?ST AI 1H + Bias 15m + Zone Context 1m
+# Service Railway s茅par茅
 
 import json
 import time
@@ -28,7 +28,7 @@ CONFIG = {
     'TELEGRAM_BOT_TOKEN': os.environ.get('TELEGRAM_BOT_TOKEN', ''),
     'TELEGRAM_CHAT_ID':   os.environ.get('TELEGRAM_CHAT_ID', ''),
     'REDIS_URL':          os.environ.get('REDIS_URL', ''),
-    'MIN_COOLDOWN':       3600,   # 1H entrée
+    'MIN_COOLDOWN':       3600,   # 1H entr茅e
     'PYRA_COOLDOWN':      1800,   # 30min pyramiding
 
     'SYMBOLS': {
@@ -44,7 +44,7 @@ CONFIG = {
 }
 
 # ============================================================================
-# OKX — Calcul Bias
+# OKX 鈥?Calcul Bias
 # ============================================================================
 
 def fetch_ohlcv_okx(symbol, tf, limit=100):
@@ -63,7 +63,6 @@ def fetch_ohlcv_okx(symbol, tf, limit=100):
         df['close'] = df['c'].astype(float)
         df = df.iloc[::-1].reset_index(drop=True)
         return df
-
     except Exception as e:
         logger.debug(f"[OKX] {symbol} {tf}: {e}")
         return None
@@ -86,11 +85,11 @@ def calc_bias(df, ema_len=13, sma_len=30):
         return None
 
 def update_bias_15m():
-    """Met à jour le Bias 15m pour tous les assets toutes les 5min."""
-    logger.info("📊 Scheduler Bias 15m démarré")
+    """Met 脿 jour le Bias 15m pour tous les assets toutes les 5min."""
+    logger.info("馃搳 Scheduler Bias 15m d茅marr茅")
     while True:
         try:
-            # Calculer tous les bias HORS du lock (les fetches OKX peuvent être longs)
+            # Calculer tous les bias HORS du lock (les fetches OKX peuvent 锚tre longs)
             results = {}
             for symbol in list(CONFIG['SYMBOLS'].keys()):
                 try:
@@ -102,7 +101,7 @@ def update_bias_15m():
                         }
                 except Exception as e:
                     logger.debug(f"[BIAS] {symbol}: {e}")
-            # Mettre à jour l'état avec des locks courts symbol par symbol
+            # Mettre 脿 jour l'茅tat avec des locks courts symbol par symbol
             pending_alerts = []
             for symbol, result in results.items():
                 bias = result.get('bias')
@@ -115,7 +114,7 @@ def update_bias_15m():
                 send_telegram(msg)
                 logger.info(log_msg)
             persist_state()
-            logger.info("[BIAS] Mise à jour Bias 15m terminée")
+            logger.info("[BIAS] Mise 脿 jour Bias 15m termin茅e")
         except Exception as e:
             logger.error(f"[BIAS] Erreur: {e}")
         time.sleep(300)  # toutes les 5min
@@ -125,7 +124,7 @@ def update_bias_15m():
 # STATE
 # ============================================================================
 
-STATE_LOCK       = threading.RLock()  # RLock pour éviter deadlock (should_send appelé dans le lock)
+STATE_LOCK       = threading.RLock()  # RLock pour 茅viter deadlock (should_send appel茅 dans le lock)
 MOMENTUM_STATE   = {}   # symbol -> {st_ai_15m, st_ai_4h, bias_2h, last_st_15m, ...}
 SCALP_POSITIONS  = {}   # f"{symbol}_SCALP" -> {direction, entry_count}
 PYRA_ENABLED     = {}   # f"{symbol}_SCALP" -> True
@@ -142,18 +141,17 @@ def init_redis():
     global REDIS_CLIENT
     url = CONFIG.get('REDIS_URL', '')
     if not url:
-        logger.warning("⚠️ REDIS_URL non défini — démarrage sans Redis")
+        logger.warning("鈿狅笍 REDIS_URL non d茅fini 鈥?d茅marrage sans Redis")
         return
     try:
         REDIS_CLIENT = redis_lib.from_url(url, decode_responses=True)
         REDIS_CLIENT.ping()
-        logger.info("✅ Redis connecté")
+        logger.info("鉁?Redis connect茅")
     except Exception as e:
-        logger.error(f"❌ Redis connexion: {e}")
+        logger.error(f"鉂?Redis connexion: {e}")
         REDIS_CLIENT = None
 
 def persist_state():
-    global SCALP_ENABLED
     if not REDIS_CLIENT:
         return
     try:
@@ -164,7 +162,7 @@ def persist_state():
                 'pyra':       dict(PYRA_ENABLED),
                 'signals':    dict(LAST_SIGNALS),
                 'events':     dict(LAST_SIGNAL_EVENTS),
-                'scalp_enabled': SCALP_ENABLED,
+                'enabled':    SCALP_ENABLED,
             }
             serialized = json.dumps(payload)
         REDIS_CLIENT.set('scalp_bot_state', serialized)
@@ -185,12 +183,12 @@ def load_state():
         PYRA_ENABLED       = payload.get('pyra', {})
         LAST_SIGNALS       = payload.get('signals', {})
         LAST_SIGNAL_EVENTS = payload.get('events', {})
-        SCALP_ENABLED      = bool(payload.get('scalp_enabled', True))
+        SCALP_ENABLED      = bool(payload.get('enabled', True))
         # Nettoyer les assets hors watchlist
         stale = [s for s in list(MOMENTUM_STATE) if s not in CONFIG['SYMBOLS']]
         for s in stale:
             del MOMENTUM_STATE[s]
-        logger.info(f"✅ State Redis chargé ({len(MOMENTUM_STATE)} assets)")
+        logger.info(f"鉁?State Redis charg茅 ({len(MOMENTUM_STATE)} assets)")
     except Exception as e:
         logger.error(f"Redis load error: {e}")
 
@@ -287,12 +285,12 @@ def build_ctx2h_bias2h_alert(symbol, price=None):
     emoji = '\U0001f7e2' if direction == 'LONG' else '\U0001f534'
     msg = (
         f"{emoji} <b>[INFO - CTX 2H + BIAS 2H]</b> {symbol}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📈 Direction: {direction}\n"
-        f"💰 Price: ${format_price(price)}\n"
-        f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-        f"✅ ST Context 2H: {ctx_2h.upper()}\n"
-        f"✅ Bias 2H: {bias_2h.upper()} (changement)"
+        f"鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣\n"
+        f"馃搱 Direction: {direction}\n"
+        f"馃挵 Price: ${format_price(price)}\n"
+        f"鈴?{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
+        f"鉁?ST Context 2H: {ctx_2h.upper()}\n"
+        f"鉁?Bias 2H: {bias_2h.upper()} (changement)"
     )
     log_msg = f"[INFO] Context 2H + Bias 2H change: {symbol} {direction}"
     return msg, log_msg
@@ -320,12 +318,12 @@ def build_ctx2h_stai2h_alert(symbol, price=None):
     emoji = '\U0001f7e2' if direction == 'LONG' else '\U0001f534'
     msg = (
         f"{emoji} <b>[INFO - CTX 2H + ST AI 2H]</b> {symbol}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📈 Direction: {direction}\n"
-        f"💰 Price: ${format_price(price)}\n"
-        f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-        f"✅ ST Context 2H: {ctx_2h.upper()}\n"
-        f"✅ Flip ST AI 2H: {st_ai_2h.upper()}"
+        f"鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣\n"
+        f"馃搱 Direction: {direction}\n"
+        f"馃挵 Price: ${format_price(price)}\n"
+        f"鈴?{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
+        f"鉁?ST Context 2H: {ctx_2h.upper()}\n"
+        f"鉁?Flip ST AI 2H: {st_ai_2h.upper()}"
     )
     log_msg = f"[INFO] Context 2H + Flip ST AI 2H: {symbol} {direction}"
     return msg, log_msg
@@ -334,7 +332,7 @@ def send_telegram(msg):
     tok  = os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
     chat = os.environ.get('TELEGRAM_CHAT_ID', '')
     if not tok or not chat:
-        logger.warning("⚠️ Token ou chat_id manquant")
+        logger.warning("鈿狅笍 Token ou chat_id manquant")
         return
     try:
         resp = requests.post(
@@ -343,9 +341,9 @@ def send_telegram(msg):
             timeout=10
         )
         if resp.status_code == 200:
-            logger.info("✅ Telegram envoyé")
+            logger.info("鉁?Telegram envoy茅")
         else:
-            logger.error(f"❌ Telegram {resp.status_code}: {resp.text[:100]}")
+            logger.error(f"鉂?Telegram {resp.status_code}: {resp.text[:100]}")
     except Exception as e:
         logger.error(f"Telegram error: {e}")
 
@@ -353,59 +351,28 @@ def send_telegram_with_buttons(msg, callback_key):
     tok  = os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
     chat = os.environ.get('TELEGRAM_CHAT_ID', '')
     if not tok or not chat:
-        logger.warning("Token ou chat_id manquant - position creee sans notification")
+        logger.warning("鈿狅笍 Token ou chat_id manquant 鈥?position cr茅茅e sans notification")
         return False
     try:
-        keyboard = {"inline_keyboard": [
-            [
-                {"text": "Activer pyramiding", "callback_data": f"pyra_on:{callback_key}"},
-                {"text": "Ignorer", "callback_data": f"pyra_off:{callback_key}"},
-            ],
-            [
-                {"text": "Scalp OFF", "callback_data": "scalp_off"},
-            ],
-        ]}
+        keyboard = {"inline_keyboard": [[
+            {"text": "Activer pyramiding", "callback_data": f"pyra_on:{callback_key}"},
+            {"text": "Ignorer",            "callback_data": f"pyra_off:{callback_key}"}
+        ], [
+            {"text": "Scalp OFF",          "callback_data": "scalp_off"}
+        ]]}
         resp = requests.post(
             f"https://api.telegram.org/bot{tok}/sendMessage",
             json={"chat_id": chat, "text": msg, "parse_mode": "HTML", "reply_markup": keyboard},
             timeout=10
         )
         if resp.status_code == 200:
-            logger.info("Telegram avec boutons envoye")
+            logger.info("鉁?Telegram avec boutons envoy茅")
             return True
-        logger.error(f"Telegram buttons {resp.status_code}: {resp.text[:100]}")
-        return False
+        else:
+            logger.error(f"鉂?Telegram buttons {resp.status_code}: {resp.text[:100]}")
+            return False
     except Exception as e:
         logger.error(f"Telegram buttons error: {e}")
-        return False
-
-
-def send_scalp_status(chat_id=None, message_id=None):
-    tok = os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
-    default_chat = os.environ.get('TELEGRAM_CHAT_ID', '')
-    target_chat = chat_id or default_chat
-    if not tok or not target_chat:
-        return False
-    status = "ON" if SCALP_ENABLED else "OFF"
-    msg = (
-        f"<b>Scalpbot: {status}</b>\n"
-        f"Positions suivies: {len(SCALP_POSITIONS)}\n"
-        f"Assets: {len(CONFIG['SYMBOLS'])}"
-    )
-    keyboard = {"inline_keyboard": [[
-        {"text": "ON", "callback_data": "scalp_on"},
-        {"text": "OFF", "callback_data": "scalp_off"},
-    ]]}
-    payload = {"chat_id": target_chat, "text": msg, "parse_mode": "HTML", "reply_markup": keyboard}
-    try:
-        if message_id:
-            payload["message_id"] = message_id
-            resp = requests.post(f"https://api.telegram.org/bot{tok}/editMessageText", json=payload, timeout=10)
-        else:
-            resp = requests.post(f"https://api.telegram.org/bot{tok}/sendMessage", json=payload, timeout=10)
-        return resp.status_code == 200
-    except Exception as e:
-        logger.error(f"Telegram status error: {e}")
         return False
 
 # ============================================================================
@@ -427,7 +394,7 @@ def webhook():
     event_id   = data.get('event_id') or data.get('time') or str(time.time())
 
     # Normaliser tf
-    tf_aliases = {'1': '1m', '1min': '1m', '1minute': '1m', '15': '15m', '60': '1h', '120': '2h', '2hr': '2h', '2hour': '2h', '180': '3h', '3hr': '3h', '3hour': '3h', '240': '4h', '4hr': '4h', '4hour': '4h'}
+    tf_aliases = {'1': '1m', '1min': '1m', '1minute': '1m', '5': '5m', '5min': '5m', '5minute': '5m', '15': '15m', '60': '1h', '120': '2h', '2hr': '2h', '2hour': '2h', '180': '3h', '3hr': '3h', '3hour': '3h', '240': '4h', '4hr': '4h', '4hour': '4h'}
     tf = tf_aliases.get(tf, tf)
 
     # Normaliser symbol
@@ -447,11 +414,11 @@ def webhook():
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
 
-    logger.info(f"📥 Webhook: {symbol} | tf={tf} | type={alert_type} | val={val}")
+    logger.info(f"馃摜 Webhook: {symbol} | tf={tf} | type={alert_type} | val={val}")
 
-    # ── Mise à jour état ──────────────────────────────────────────────
-    flipped_15m  = False  # calculé ci-dessous si supertrend 15m
-    state_changed = False  # True si état modifié → persist à la fin
+    # 鈹€鈹€ Mise 脿 jour 茅tat 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    flipped_15m  = False  # calcul茅 ci-dessous si supertrend 15m
+    state_changed = False  # True si 茅tat modifi茅 鈫?persist 脿 la fin
     if alert_type == 'supertrend':
         parsed = parse_st_value(val)
         if parsed is None:
@@ -459,7 +426,7 @@ def webhook():
             return jsonify({'status': 'ignored', 'reason': 'invalid_supertrend'}), 200
 
         if tf == '15m':
-            # Point 2 : calculer flip avant mise à jour
+            # Point 2 : calculer flip avant mise 脿 jour
             prev_15m    = m.get('st_ai_15m')
             m['st_ai_15m'] = parsed
             state_changed = True
@@ -468,7 +435,7 @@ def webhook():
                 m['last_st_15m'] = prev_15m  # garder pour guard pyramiding
 
         elif tf == '1h':
-            # Point 1 : 1H intégré dans le bloc supertrend
+            # Point 1 : 1H int茅gr茅 dans le bloc supertrend
             prev_1h      = m.get('st_ai_1h')
             m['st_ai_1h']   = parsed
             m['last_st_1h'] = prev_1h
@@ -565,8 +532,8 @@ def webhook():
         bias_15m = m.get('bias_15m')
         ctx_1m = m.get('st_context_1m')
         ctx_lt_1m = m.get('st_context_lt_1m')
-        ctx_1m_fresh = is_fresh(m.get('st_context_1m_ts'), 5 * 60)
-        ctx_lt_1m_fresh = is_fresh(m.get('st_context_lt_1m_ts'), 5 * 60)
+        ctx_1m_fresh = bool(ctx_1m) and is_fresh(m.get('st_context_1m_ts'), 5 * 60)
+        ctx_lt_1m_fresh = bool(ctx_lt_1m) and is_fresh(m.get('st_context_lt_1m_ts'), 5 * 60)
 
         should_evaluate = ctx_1m is not None and ctx_1m_fresh
         if not should_evaluate:
@@ -575,10 +542,10 @@ def webhook():
             return jsonify({'status': 'ok'}), 200
 
         if not SCALP_ENABLED:
-            logger.info(f"[SCALP OFF] Signal ignore: {symbol} tf={tf} type={alert_type}")
+            logger.info(f"[SCALP OFF] Signal ignore: {symbol}")
             if state_changed:
                 persist_state()
-            return jsonify({'status': 'ok', 'scalp_enabled': False}), 200
+            return jsonify({'status': 'ok', 'enabled': False}), 200
 
         signal_direction = 'LONG' if ctx_1m == 'buy' else 'SHORT'
         exp_st_1h = 'buy' if signal_direction == 'LONG' else 'sell'
@@ -627,15 +594,15 @@ def webhook():
             emoji = "\U0001f7e2" if signal_direction == "LONG" else "\U0001f534"
             tg_sent = send_telegram_with_buttons(
                 f"{emoji} <b>[SCALP - ENTREE]</b> {symbol}\n"
-                f"????????????????????\n"
-                f"?? Direction: {signal_direction}\n"
-                f"?? Price: ${format_price(price)}\n"
-                f"?? Exchange: OKX\n"
-                f"? {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-                f"? ST AI 1H: {(st_1h or '?').upper()}\n"
-                f"? Bias 15m: {(bias_15m or '?').upper()}\n"
-                f"? Zone ST Context 1m: {(ctx_1m or '?').upper()}\n"
-                f"??? LT 1m: {(ctx_lt_1m or 'NEUTRE').upper()} (anti-chop)",
+                f"--------------------\n"
+                f"Direction: {signal_direction}\n"
+                f"Price: ${format_price(price)}\n"
+                f"Exchange: OKX\n"
+                f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
+                f"[OK] ST AI 1H: {(st_1h or 'N/A').upper()}\n"
+                f"[OK] Bias 15m: {(bias_15m or 'N/A').upper()}\n"
+                f"[OK] Zone ST Context 1m: {(ctx_1m or 'N/A').upper()}\n"
+                f"[ANTI-CHOP] LT 1m: {(ctx_lt_1m or 'NEUTRE').upper()}",
                 pos_key
             )
             if not tg_sent:
@@ -647,17 +614,17 @@ def webhook():
             emoji = "\U0001f7e2" if signal_direction == "LONG" else "\U0001f534"
             send_telegram(
                 f"{emoji} <b>[SCALP - PYRAMIDING #{pos['entry_count']}]</b> {symbol}\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"📈 Direction: {signal_direction}\n"
-                f"💰 Price: ${format_price(price)}\n"
-                f"🏦 Exchange: OKX\n"
-                f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-                f"✅ Nouvelle zone ST Context 1m: {(ctx_1m or '?').upper()}"
+                f"--------------------\n"
+                f"Direction: {signal_direction}\n"
+                f"Price: ${format_price(price)}\n"
+                f"Exchange: OKX\n"
+                f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
+                f"[OK] Nouvelle zone ST Context 1m: {(ctx_1m or 'N/A').upper()}"
             )
             logger.info(f"[SCALP] Pyramiding #{pos['entry_count']}: {symbol} {signal_direction}")
             state_changed = True
 
-    # Persister si état modifié
+    # Persister si 茅tat modifi茅
     if state_changed:
         persist_state()
 
@@ -669,7 +636,6 @@ def webhook():
 
 @app.route('/telegram_callback', methods=['POST'])
 def telegram_callback():
-    global SCALP_ENABLED
     tg_secret = os.environ.get('SCALP_TELEGRAM_SECRET', '')
     if tg_secret:
         if request.headers.get('X-Telegram-Bot-Api-Secret-Token', '') != tg_secret:
@@ -679,29 +645,6 @@ def telegram_callback():
     if not data:
         return jsonify({'ok': True}), 200
     try:
-        msg = data.get('message') or {}
-        if msg:
-            text = str(msg.get('text', '')).strip().lower()
-            chat_id_msg = msg.get('chat', {}).get('id')
-            if text in ('/scalp_on', '/scalpon'):
-                with STATE_LOCK:
-                    SCALP_ENABLED = True
-                persist_state()
-                send_scalp_status(chat_id=chat_id_msg)
-                logger.info("[SCALP] Active via Telegram command")
-                return jsonify({'ok': True}), 200
-            if text in ('/scalp_off', '/scalpoff'):
-                with STATE_LOCK:
-                    SCALP_ENABLED = False
-                    PYRA_ENABLED.clear()
-                persist_state()
-                send_scalp_status(chat_id=chat_id_msg)
-                logger.info("[SCALP] Desactive via Telegram command")
-                return jsonify({'ok': True}), 200
-            if text in ('/scalp_status', '/scalp'):
-                send_scalp_status(chat_id=chat_id_msg)
-                return jsonify({'ok': True}), 200
-
         cb      = data.get('callback_query', {})
         cb_id   = cb.get('id')
         cb_data = cb.get('data', '')
@@ -714,17 +657,44 @@ def telegram_callback():
             requests.post(f"https://api.telegram.org/bot{tok}/answerCallbackQuery",
                          json={"callback_query_id": cb_id}, timeout=5)
 
-        if cb_data.startswith('pyra_on:'):
-            key = cb_data[len('pyra_on:'):]
+        if cb_data == 'scalp_off':
+            global SCALP_ENABLED
             with STATE_LOCK:
-                PYRA_ENABLED[key] = True
+                SCALP_ENABLED = False
             persist_state()
-            logger.info(f"[PYRA] Activé: {key}")
+            logger.info(f"[SCALP] Desactive par Telegram ({user})")
             if tok and chat_id and msg_id:
                 requests.post(f"https://api.telegram.org/bot{tok}/editMessageReplyMarkup",
                              json={"chat_id": chat_id, "message_id": msg_id,
                                    "reply_markup": {"inline_keyboard": [[
-                                       {"text": "✅ Pyramiding activé", "callback_data": "noop"}
+                                       {"text": "Scalp OFF", "callback_data": "noop"},
+                                       {"text": "Scalp ON", "callback_data": "scalp_on"}
+                                   ]]}}, timeout=5)
+
+        elif cb_data == 'scalp_on':
+            with STATE_LOCK:
+                SCALP_ENABLED = True
+            persist_state()
+            logger.info(f"[SCALP] Active par Telegram ({user})")
+            if tok and chat_id and msg_id:
+                requests.post(f"https://api.telegram.org/bot{tok}/editMessageReplyMarkup",
+                             json={"chat_id": chat_id, "message_id": msg_id,
+                                   "reply_markup": {"inline_keyboard": [[
+                                       {"text": "Scalp ON", "callback_data": "noop"},
+                                       {"text": "Scalp OFF", "callback_data": "scalp_off"}
+                                   ]]}}, timeout=5)
+
+        elif cb_data.startswith('pyra_on:'):
+            key = cb_data[len('pyra_on:'):]
+            with STATE_LOCK:
+                PYRA_ENABLED[key] = True
+            persist_state()
+            logger.info(f"[PYRA] Activ茅: {key}")
+            if tok and chat_id and msg_id:
+                requests.post(f"https://api.telegram.org/bot{tok}/editMessageReplyMarkup",
+                             json={"chat_id": chat_id, "message_id": msg_id,
+                                   "reply_markup": {"inline_keyboard": [[
+                                       {"text": "鉁?Pyramiding activ茅", "callback_data": "noop"}
                                    ]]}}, timeout=5)
 
         elif cb_data.startswith('pyra_off:'):
@@ -732,28 +702,13 @@ def telegram_callback():
             with STATE_LOCK:
                 PYRA_ENABLED.pop(key, None)
             persist_state()
-            logger.info(f"[PYRA] Ignoré: {key}")
+            logger.info(f"[PYRA] Ignor茅: {key}")
             if tok and chat_id and msg_id:
                 requests.post(f"https://api.telegram.org/bot{tok}/editMessageReplyMarkup",
                              json={"chat_id": chat_id, "message_id": msg_id,
                                    "reply_markup": {"inline_keyboard": [[
-                                       {"text": "❌ Pyramiding ignoré", "callback_data": "noop"}
+                                       {"text": "鉂?Pyramiding ignor茅", "callback_data": "noop"}
                                    ]]}}, timeout=5)
-
-        elif cb_data == 'scalp_on':
-            with STATE_LOCK:
-                SCALP_ENABLED = True
-            persist_state()
-            logger.info(f"[SCALP] Active par {user}")
-            send_scalp_status(chat_id=chat_id, message_id=msg_id)
-
-        elif cb_data == 'scalp_off':
-            with STATE_LOCK:
-                SCALP_ENABLED = False
-                PYRA_ENABLED.clear()
-            persist_state()
-            logger.info(f"[SCALP] Desactive par {user}")
-            send_scalp_status(chat_id=chat_id, message_id=msg_id)
 
     except Exception as e:
         logger.error(f"[CALLBACK] Erreur: {e}")
@@ -768,16 +723,47 @@ def index():
     return jsonify({
         'status': 'ok',
         'bot': 'Scalping Bot',
-        'scalp_enabled': SCALP_ENABLED,
+        'enabled': SCALP_ENABLED,
         'assets': len(CONFIG['SYMBOLS']),
         'positions': len(SCALP_POSITIONS),
     })
+
+@app.route('/scalp_status', methods=['GET'])
+def scalp_status():
+    return jsonify({
+        'status': 'ok',
+        'enabled': SCALP_ENABLED,
+        'positions': len(SCALP_POSITIONS),
+        'assets': len(CONFIG['SYMBOLS']),
+    })
+
+@app.route('/scalp_on', methods=['POST'])
+def scalp_on():
+    secret = os.environ.get('ADMIN_SECRET', '')
+    if not secret or request.headers.get('X-Admin-Secret') != secret:
+        return jsonify({'error': 'unauthorized'}), 401
+    global SCALP_ENABLED
+    with STATE_LOCK:
+        SCALP_ENABLED = True
+    persist_state()
+    return jsonify({'status': 'ok', 'enabled': True}), 200
+
+@app.route('/scalp_off', methods=['POST'])
+def scalp_off():
+    secret = os.environ.get('ADMIN_SECRET', '')
+    if not secret or request.headers.get('X-Admin-Secret') != secret:
+        return jsonify({'error': 'unauthorized'}), 401
+    global SCALP_ENABLED
+    with STATE_LOCK:
+        SCALP_ENABLED = False
+    persist_state()
+    return jsonify({'status': 'ok', 'enabled': False}), 200
 
 @app.route('/reset', methods=['POST'])
 def reset():
     secret = os.environ.get('ADMIN_SECRET', '')
     if not secret:
-        logger.error('ADMIN_SECRET non défini — /reset refusé')
+        logger.error('ADMIN_SECRET non d茅fini 鈥?/reset refus茅')
         return jsonify({'error': 'unauthorized'}), 401
     if request.headers.get('X-Admin-Secret') != secret:
         return jsonify({'error': 'unauthorized'}), 401
@@ -811,13 +797,13 @@ def reset():
                 if errors:
                     logger.warning(f"[RESET] sync_scalp erreurs: {errors}")
             except Exception as e:
-                logger.warning(f"[RESET] sync_scalp échoué: {e}")
+                logger.warning(f"[RESET] sync_scalp 茅chou茅: {e}")
         threading.Thread(target=_sync_after_reset, daemon=True).start()
 
     return jsonify({'status': 'reset'}), 200
 
 # ============================================================================
-# DÉMARRAGE
+# D脡MARRAGE
 # ============================================================================
 
 def startup():
@@ -838,17 +824,17 @@ def startup():
             resp_wh = requests.post(f"https://api.telegram.org/bot{tok}/setWebhook",
                          json=wh_payload, timeout=10)
             if resp_wh.status_code == 200 and resp_wh.json().get('ok'):
-                logger.info(f"✅ Telegram webhook configuré: {wh_url}")
+                logger.info(f"鉁?Telegram webhook configur茅: {wh_url}")
             else:
-                logger.warning(f"⚠️ Telegram webhook erreur: {resp_wh.text[:100]}")
+                logger.warning(f"鈿狅笍 Telegram webhook erreur: {resp_wh.text[:100]}")
         except Exception as e:
-            logger.warning(f"⚠️ Webhook setup: {e}")
+            logger.warning(f"鈿狅笍 Webhook setup: {e}")
 
-    # Démarrer le scheduler Bias 15m
+    # D茅marrer le scheduler Bias 15m
     bias_thread = threading.Thread(target=update_bias_15m, daemon=True)
     bias_thread.start()
 
-    # Sync état 4H depuis bot principal au démarrage
+    # Sync 茅tat 4H depuis bot principal au d茅marrage
     main_url     = os.environ.get('MAIN_BOT_URL', '').rstrip('/')
     if main_url and not main_url.startswith(('https://', 'http://')):
         main_url = f'https://{main_url}'
@@ -856,7 +842,7 @@ def startup():
     if main_url and admin_secret:
         def _sync():
             import time as _time
-            _time.sleep(5)  # laisser le bot principal répondre
+            _time.sleep(5)  # laisser le bot principal r茅pondre
             try:
                 resp = requests.post(
                     f'{main_url}/sync_scalp',
@@ -872,15 +858,15 @@ def startup():
                 if errors:
                     logger.warning(f"[STARTUP] sync_scalp erreurs: {errors}")
             except Exception as e:
-                logger.warning(f'[STARTUP] sync_scalp échoué: {e}')
+                logger.warning(f'[STARTUP] sync_scalp 茅chou茅: {e}')
         threading.Thread(target=_sync, daemon=True).start()
 
     send_telegram(
-        "🚀 <b>Scalping Bot démarré</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 Assets: {len(CONFIG['SYMBOLS'])}\n"
-        f"⚙️ Stratégie: ST AI 1H + Bias 15m + Zone Context 1m\n"
-        f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}"
+        "馃殌 <b>Scalping Bot d茅marr茅</b>\n"
+        f"鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣鈹佲攣\n"
+        f"馃搳 Assets: {len(CONFIG['SYMBOLS'])}\n"
+        f"鈿欙笍 Strat茅gie: ST AI 1H + Bias 15m + Zone Context 1m\n"
+        f"鈴?{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}"
     )
 
 if os.environ.get('ENABLE_SCALP_BOT', '1') == '1':
