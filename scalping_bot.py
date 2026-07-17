@@ -96,13 +96,21 @@ def update_bias_15m():
             for symbol in list(CONFIG['SYMBOLS'].keys()):
                 try:
                     df = fetch_ohlcv_okx(symbol, '15m', limit=50)
-                    if df is not None:
-                        results[symbol] = {
-                            'bias': calc_bias(df, ema_len=13, sma_len=30),
-                            'price': float(df['close'].iloc[-1]) if len(df) else None,
-                        }
+                    if df is None:
+                        logger.info(f"[BIAS] {symbol} bias15m=None reason=fetch_failed (df OKX vide)")
+                        results[symbol] = {'bias': None, 'price': None}
+                        continue
+                    bias = calc_bias(df, ema_len=13, sma_len=30)
+                    price = float(df['close'].iloc[-1]) if len(df) else None
+                    results[symbol] = {'bias': bias, 'price': price}
+                    if bias is None:
+                        logger.info(f"[BIAS] {symbol} bias15m=None reason=neutral (pas d'alignement close/EMA/SMA)")
+                    else:
+                        logger.info(f"[BIAS] {symbol} bias15m={bias} price={price}")
                 except Exception as e:
+                    logger.info(f"[BIAS] {symbol} bias15m=None reason=exception:{e}")
                     logger.debug(f"[BIAS] {symbol}: {e}")
+                    results[symbol] = {'bias': None, 'price': None}
             # Mettre à jour l'état avec des locks courts symbol par symbol
             pending_alerts = []
             for symbol, result in results.items():
@@ -116,7 +124,9 @@ def update_bias_15m():
                 send_telegram(msg)
                 logger.info(log_msg)
             persist_state()
-            logger.info("[BIAS] Mise à jour Bias 15m terminée")
+            bias_ok_count  = sum(1 for r in results.values() if r.get('bias') is not None)
+            fetch_ok_count = sum(1 for r in results.values() if r.get('price') is not None)
+            logger.info(f"[BIAS] Mise à jour Bias 15m terminée ({bias_ok_count}/{len(CONFIG['SYMBOLS'])} assets avec bias non-neutre, {fetch_ok_count}/{len(CONFIG['SYMBOLS'])} fetch OK)")
         except Exception as e:
             logger.error(f"[BIAS] Erreur: {e}")
         time.sleep(300)  # toutes les 5min
@@ -460,6 +470,13 @@ def webhook():
         ctx_1h_fresh_c1h = bool(ctx_1h) and is_fresh(m.get('st_context_1h_ts'), 3 * 3600)
         lt_1h_fresh_c1h = bool(ctx_lt_1h) and is_fresh(m.get('st_context_lt_1h_ts'), 3 * 3600)
         ctx_15m_fresh_c1h = bool(ctx_15m_c1h) and is_fresh(m.get('st_context_15m_ts'), 45 * 60)
+
+        if not (ctx_1m_fresh_c1h and ctx_1h_fresh_c1h):
+            logger.info(
+                f"[CONTEXT1H WAITING] {symbol} "
+                f"ctx1m={ctx_1m} fresh={ctx_1m_fresh_c1h} "
+                f"ctx1h={ctx_1h} fresh={ctx_1h_fresh_c1h}"
+            )
 
         if ctx_1m_fresh_c1h and ctx_1h_fresh_c1h:
             signal_direction_c1h = 'LONG' if ctx_1m == 'buy' else 'SHORT'
