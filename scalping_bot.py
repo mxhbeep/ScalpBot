@@ -470,7 +470,7 @@ def webhook():
         lt_1h_fresh_c1h = bool(ctx_lt_1h) and is_fresh(m.get('st_context_lt_1h_ts'), 3 * 3600)
 
         if not (ctx_1m_fresh_c1h and ctx_1h_fresh_c1h):
-            logger.info(
+            logger.debug(
                 f"[CONTEXT1H WAITING] {symbol} "
                 f"ctx1m={ctx_1m} fresh={ctx_1m_fresh_c1h} "
                 f"ctx1h={ctx_1h} fresh={ctx_1h_fresh_c1h}"
