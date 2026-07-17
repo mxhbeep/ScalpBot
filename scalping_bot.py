@@ -463,13 +463,11 @@ def webhook():
         ctx_1m = m.get('st_context_1m')
         ctx_5m = m.get('st_context_5m')
         ctx_lt_1h = m.get('st_context_lt_1h')
-        ctx_15m_c1h = m.get('st_context_15m')
 
         ctx_1m_fresh_c1h = bool(ctx_1m) and is_fresh(m.get('st_context_1m_ts'), 5 * 60)
         ctx_5m_fresh_c1h = bool(ctx_5m) and is_fresh(m.get('st_context_5m_ts'), 15 * 60)
         ctx_1h_fresh_c1h = bool(ctx_1h) and is_fresh(m.get('st_context_1h_ts'), 3 * 3600)
         lt_1h_fresh_c1h = bool(ctx_lt_1h) and is_fresh(m.get('st_context_lt_1h_ts'), 3 * 3600)
-        ctx_15m_fresh_c1h = bool(ctx_15m_c1h) and is_fresh(m.get('st_context_15m_ts'), 45 * 60)
 
         if not (ctx_1m_fresh_c1h and ctx_1h_fresh_c1h):
             logger.info(
@@ -489,8 +487,7 @@ def webhook():
             ctx_1m_ok_c1h = ctx_1m == exp_ctx_c1h
             ctx_5m_opp_block_c1h = ctx_5m_fresh_c1h and ctx_5m == opp_ctx_c1h
             lt_1h_same_block_c1h = lt_1h_fresh_c1h and ctx_lt_1h == exp_ctx_c1h
-            ctx_15m_opp_block_c1h = ctx_15m_fresh_c1h and ctx_15m_c1h == opp_ctx_c1h
-            antichop_c1h = ctx_5m_opp_block_c1h or lt_1h_same_block_c1h or ctx_15m_opp_block_c1h
+            antichop_c1h = ctx_5m_opp_block_c1h or lt_1h_same_block_c1h
             all_ok_c1h = ctx_1h_ok_c1h and bias_1h_ok_c1h and ctx_1m_ok_c1h and not antichop_c1h
 
             logger.info(
@@ -499,7 +496,6 @@ def webhook():
                 f"bias1h={bias_1h}/{exp_bias_c1h} "
                 f"ctx1m={ctx_1m}/{exp_ctx_c1h} fresh={ctx_1m_fresh_c1h} "
                 f"ctx5m={ctx_5m} fresh={ctx_5m_fresh_c1h} opp_block={ctx_5m_opp_block_c1h} "
-                f"ctx15m={ctx_15m_c1h} fresh={ctx_15m_fresh_c1h} opp_block={ctx_15m_opp_block_c1h} "
                 f"lt1h={ctx_lt_1h} fresh={lt_1h_fresh_c1h} same_block={lt_1h_same_block_c1h}"
             )
 
@@ -536,7 +532,6 @@ def webhook():
                     f"[OK] Bias 1H: {(bias_1h or 'N/A').upper()}\n"
                     f"[OK] Zone ST Context 1m: {(ctx_1m or 'N/A').upper()}\n"
                     f"[ANTI-CHOP] Zone ST Context 5m: {(ctx_5m or 'NEUTRE').upper()}\n"
-                    f"[ANTI-CHOP] Zone ST Context 15m: {(ctx_15m_c1h or 'NEUTRE').upper()}\n"
                     f"[ANTI-CHOP] LT 1H: {(ctx_lt_1h or 'NEUTRE').upper()}"
                 )
                 logger.info(f"[CONTEXT1H] Entree: {symbol} {signal_direction_c1h}")
@@ -546,22 +541,24 @@ def webhook():
                     f"[CONTEXT1H BLOCKED] {symbol} dir={signal_direction_c1h} "
                     f"ctx1h_ok={ctx_1h_ok_c1h} bias1h_ok={bias_1h_ok_c1h} "
                     f"ctx1m_ok={ctx_1m_ok_c1h} ctx5m_opp_block={ctx_5m_opp_block_c1h} "
-                    f"ctx15m_opp_block={ctx_15m_opp_block_c1h} lt1h_same_block={lt_1h_same_block_c1h}"
+                    f"lt1h_same_block={lt_1h_same_block_c1h}"
                 )
 
-    # ?? Logique SCALP ?????????????????????????????????????????????????
+    # ==================================================================
+    # Logique SCALP
     # ENTREE : Zone ST Context 1m + ST AI 1H + Bias 15m
-    # Anti-chop : ST Context LT 1m dans le meme sens => bloque
+    # Anti-chop : ST Context LT 1m dans le meme sens => bloque (sauf si ST Context 5m confirme)
+    # ==================================================================
 
-    if alert_type in ('st_context', 'st_context_lt', 'supertrend', 'bias') and tf in ('1m', '1h', '15m'):
+    if alert_type in ('st_context', 'st_context_lt', 'supertrend', 'bias') and tf in ('1m', '5m', '1h', '15m'):
         st_1h = m.get('st_ai_1h')
         bias_15m = m.get('bias_15m')
         ctx_1m = m.get('st_context_1m')
         ctx_lt_1m = m.get('st_context_lt_1m')
-        ctx_15m = m.get('st_context_15m')
+        ctx_5m = m.get('st_context_5m')
         ctx_1m_fresh = bool(ctx_1m) and is_fresh(m.get('st_context_1m_ts'), 5 * 60)
         ctx_lt_1m_fresh = bool(ctx_lt_1m) and is_fresh(m.get('st_context_lt_1m_ts'), 5 * 60)
-        ctx_15m_fresh = bool(ctx_15m) and is_fresh(m.get('st_context_15m_ts'), 45 * 60)
+        ctx_5m_fresh = bool(ctx_5m) and is_fresh(m.get('st_context_5m_ts'), 15 * 60)
 
         should_evaluate = ctx_1m is not None and ctx_1m_fresh
         if not should_evaluate:
@@ -584,9 +581,13 @@ def webhook():
         st_1h_ok = st_1h == exp_st_1h
         bias_15m_ok = bias_15m == exp_bias
         ctx_1m_ok = ctx_1m == exp_ctx
-        lt1m_block = ctx_lt_1m_fresh and ctx_lt_1m == exp_ctx
-        ctx_15m_opp_block = ctx_15m_fresh and ctx_15m == opp_ctx
-        antichop_blocked = lt1m_block or ctx_15m_opp_block
+        # Anti-chop : LT 1m meme sens bloque, SAUF si ST Context 5m est simultanement
+        # dans le meme sens que le signal (le 5m valide alors le signal malgre le LT 1m).
+        ctx5m_override = ctx_5m_fresh and ctx_5m == exp_ctx
+        lt1m_raw_block = ctx_lt_1m_fresh and ctx_lt_1m == exp_ctx
+        lt1m_block = lt1m_raw_block and not ctx5m_override
+        ctx_5m_opp_block = ctx_5m_fresh and ctx_5m == opp_ctx
+        antichop_blocked = lt1m_block or ctx_5m_opp_block
         all_ok = st_1h_ok and bias_15m_ok and ctx_1m_ok and not antichop_blocked
 
         pos_key = f"{symbol}_SCALP"
@@ -617,8 +618,8 @@ def webhook():
                         f"[SCALP BLOCKED] {symbol} dir={signal_direction} "
                         f"st1h={st_1h}/{exp_st_1h} bias15m={bias_15m}/{exp_bias} "
                         f"ctx1m={ctx_1m}/{exp_ctx} ctx1m_fresh={ctx_1m_fresh} "
-                        f"lt1m={ctx_lt_1m} lt1m_fresh={ctx_lt_1m_fresh} lt1m_block={lt1m_block} "
-                        f"ctx15m={ctx_15m} ctx15m_fresh={ctx_15m_fresh} ctx15m_opp_block={ctx_15m_opp_block} "
+                        f"lt1m={ctx_lt_1m} lt1m_fresh={ctx_lt_1m_fresh} lt1m_raw_block={lt1m_raw_block} lt1m_block={lt1m_block} "
+                        f"ctx5m={ctx_5m} ctx5m_fresh={ctx_5m_fresh} ctx5m_override={ctx5m_override} ctx5m_opp_block={ctx_5m_opp_block} "
                         f"antichop={antichop_blocked} pos={pos['direction'] if pos else None}"
                     )
 
@@ -635,7 +636,7 @@ def webhook():
                 f"[OK] Bias 15m: {(bias_15m or 'N/A').upper()}\n"
                 f"[OK] Zone ST Context 1m: {(ctx_1m or 'N/A').upper()}\n"
                 f"[ANTI-CHOP] LT 1m: {(ctx_lt_1m or 'NEUTRE').upper()}\n"
-                f"[ANTI-CHOP] Zone ST Context 15m: {(ctx_15m or 'NEUTRE').upper()}",
+                f"[ANTI-CHOP] Zone ST Context 5m: {(ctx_5m or 'NEUTRE').upper()}",
                 pos_key
             )
             if not tg_sent:
