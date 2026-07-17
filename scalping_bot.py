@@ -89,18 +89,26 @@ def update_bias_15m():
     logger.info("📊 Scheduler Bias 15m démarré")
     while True:
         try:
-            # Calculer tous les bias HORS du lock (les fetches OKX peuvent 锚tre longs)
+            # Calculer tous les bias HORS du lock (les fetches OKX peuvent être longs)
             results = {}
             for symbol in list(CONFIG['SYMBOLS'].keys()):
                 try:
                     df = fetch_ohlcv_okx(symbol, '15m', limit=50)
-                    if df is not None:
-                        results[symbol] = {
-                            'bias': calc_bias(df, ema_len=13, sma_len=30),
-                            'price': float(df['close'].iloc[-1]) if len(df) else None,
-                        }
+                    if df is None:
+                        logger.info(f"[BIAS] {symbol} bias15m=None reason=fetch_failed (df OKX vide)")
+                        results[symbol] = {'bias': None, 'price': None}
+                        continue
+                    bias = calc_bias(df, ema_len=13, sma_len=30)
+                    price = float(df['close'].iloc[-1]) if len(df) else None
+                    results[symbol] = {'bias': bias, 'price': price}
+                    if bias is None:
+                        logger.info(f"[BIAS] {symbol} bias15m=None reason=neutral (pas d'alignement close/EMA/SMA)")
+                    else:
+                        logger.info(f"[BIAS] {symbol} bias15m={bias} price={price}")
                 except Exception as e:
+                    logger.info(f"[BIAS] {symbol} bias15m=None reason=exception:{e}")
                     logger.debug(f"[BIAS] {symbol}: {e}")
+                    results[symbol] = {'bias': None, 'price': None}
             # Mettre à jour l'état avec des locks courts symbol par symbol
             pending_alerts = []
             for symbol, result in results.items():
@@ -114,7 +122,9 @@ def update_bias_15m():
                 send_telegram(msg)
                 logger.info(log_msg)
             persist_state()
-            logger.info("[BIAS] Mise à jour Bias 15m terminée")
+            bias_ok_count  = sum(1 for r in results.values() if r.get('bias') is not None)
+            fetch_ok_count = sum(1 for r in results.values() if r.get('price') is not None)
+            logger.info(f"[BIAS] Mise à jour Bias 15m terminée ({bias_ok_count}/{len(CONFIG['SYMBOLS'])} assets avec bias non-neutre, {fetch_ok_count}/{len(CONFIG['SYMBOLS'])} fetch OK)")
         except Exception as e:
             logger.error(f"[BIAS] Erreur: {e}")
         time.sleep(300)  # toutes les 5min
@@ -803,7 +813,7 @@ def reset():
     return jsonify({'status': 'reset'}), 200
 
 # ============================================================================
-# D脡MARRAGE
+# DÉMARRAGE
 # ============================================================================
 
 def startup():
