@@ -293,6 +293,12 @@ def notification_body_for_ntfy(msg: str, max_chars: int = 700) -> str:
     return body[:max_chars - 3].rstrip() + "..."
 
 
+def ntfy_header_value(value: str, fallback: str = "Scalp Bot", max_chars: int = 120) -> str:
+    clean = strip_html(value).replace('\n', ' ').strip()
+    clean = clean.encode('latin-1', errors='ignore').decode('latin-1').strip()
+    return clean[:max_chars] or fallback
+
+
 def notification_tags_from_text(text: str):
     plain = strip_html(text).lower()
     if 'take profit' in plain or 'tp' in plain:
@@ -352,11 +358,15 @@ class NtfyChannel(NotificationChannel):
             return False
         url = topic if topic.startswith(('http://', 'https://')) else f"https://ntfy.sh/{topic}"
         headers = {
-            'Title': strip_html(title)[:120] or 'Scalp Bot',
+            'Title': ntfy_header_value(title, 'Scalp Bot'),
             'Priority': str(priority),
         }
         if tags:
-            headers['Tags'] = ','.join(tags) if isinstance(tags, (list, tuple)) else str(tags)
+            headers['Tags'] = ntfy_header_value(
+                ','.join(tags) if isinstance(tags, (list, tuple)) else str(tags),
+                '',
+                max_chars=80,
+            )
         try:
             resp = requests.post(
                 url,
