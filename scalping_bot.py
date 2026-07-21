@@ -29,6 +29,7 @@ CONFIG = {
     'TELEGRAM_BOT_TOKEN': os.environ.get('TELEGRAM_BOT_TOKEN', ''),
     'TELEGRAM_CHAT_ID':   os.environ.get('TELEGRAM_CHAT_ID', ''),
     'REDIS_URL':          os.environ.get('REDIS_URL', ''),
+    'NTFY_TOPIC':         os.environ.get('NTFY_TOPIC', 'maxence-trading-3f8a72'),
     'MIN_COOLDOWN':       3600,   # 1H entrée
     'PYRA_COOLDOWN':      1800,   # 30min pyramiding
 
@@ -272,52 +273,176 @@ def should_send(symbol, key, cooldown=3600, event_id=None):
             return True
     return False
 
-def send_telegram(msg):
-    tok  = os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
-    chat = os.environ.get('TELEGRAM_CHAT_ID', '')
-    if not tok or not chat:
-        logger.warning("⚠️ Token ou chat_id manquant")
-        return
-    try:
-        resp = requests.post(
-            f"https://api.telegram.org/bot{tok}/sendMessage",
-            json={"chat_id": chat, "text": msg, "parse_mode": "HTML"},
-            timeout=10
-        )
-        if resp.status_code == 200:
-            logger.info("✅ Telegram envoyé")
-        else:
-            logger.error(f"❌ Telegram {resp.status_code}: {resp.text[:100]}")
-    except Exception as e:
-        logger.error(f"Telegram error: {e}")
+def strip_html(text: str) -> str:
+    import re
+    return re.sub(r'<[^>]+>', '', str(text or '')).strip()
+
+
+def notification_title_from_message(msg: str, fallback: str = "Scalp Bot") -> str:
+    lines = [strip_html(line).strip() for line in str(msg or '').splitlines() if strip_html(line).strip()]
+    if not lines:
+        return fallback
+    title = lines[0].replace('[', '').replace(']', '').replace('*', '').strip()
+    return title[:80] or fallback
+
+
+def notification_body_for_ntfy(msg: str, max_chars: int = 700) -> str:
+    body = strip_html(msg)
+    if len(body) <= max_chars:
+        return body
+    return body[:max_chars - 3].rstrip() + "..."
+
+
+def notification_tags_from_text(text: str):
+    plain = strip_html(text).lower()
+    if 'take profit' in plain or 'tp' in plain:
+        return ['tada']
+    if 'stop loss' in plain or 'sl' in plain:
+        return ['warning']
+    if 'short' in plain or 'sell' in plain:
+        return ['chart_with_downwards_trend']
+    if 'long' in plain or 'buy' in plain:
+        return ['chart_with_upwards_trend']
+    return ['chart_with_upwards_trend']
+
+
+class NotificationChannel:
+    def send(self, title: str, message: str, priority=5, tags=None, **kwargs) -> bool:
+        raise NotImplementedError
+
+
+class TelegramChannel(NotificationChannel):
+    def __init__(self, token_getter, chat_getter, label='Telegram'):
+        self.token_getter = token_getter
+        self.chat_getter = chat_getter
+        self.label = label
+
+    def send(self, title: str, message: str, priority=5, tags=None, reply_markup=None, **kwargs) -> bool:
+        tok = self.token_getter()
+        chat = self.chat_getter()
+        if not tok or not chat:
+            logger.warning("Token ou chat_id manquant")
+            return False
+        payload = {"chat_id": chat, "text": message, "parse_mode": "HTML"}
+        if reply_markup:
+            payload['reply_markup'] = reply_markup
+        try:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{tok}/sendMessage",
+                json=payload,
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                logger.info(f"{self.label} envoye")
+                return True
+            logger.error(f"Telegram {resp.status_code}: {resp.text[:100]}")
+            return False
+        except Exception as e:
+            logger.error(f"Telegram error: {e}")
+            return False
+
+
+class NtfyChannel(NotificationChannel):
+    def __init__(self, topic_getter):
+        self.topic_getter = topic_getter
+
+    def send(self, title: str, message: str, priority=5, tags=None, **kwargs) -> bool:
+        topic = str(self.topic_getter() or '').strip()
+        if not topic:
+            return False
+        url = topic if topic.startswith(('http://', 'https://')) else f"https://ntfy.sh/{topic}"
+        headers = {
+            'Title': strip_html(title)[:120] or 'Scalp Bot',
+            'Priority': str(priority),
+        }
+        if tags:
+            headers['Tags'] = ','.join(tags) if isinstance(tags, (list, tuple)) else str(tags)
+        try:
+            resp = requests.post(
+                url,
+                data=notification_body_for_ntfy(message).encode('utf-8'),
+                headers=headers,
+                timeout=10,
+            )
+            if 200 <= resp.status_code < 300:
+                logger.info("ntfy envoye")
+                return True
+            logger.warning(f"ntfy erreur: {resp.status_code} {resp.text[:100]}")
+            return False
+        except Exception as e:
+            logger.error(f"ntfy error: {e}")
+            return False
+
+
+class NotificationManager:
+    def __init__(self):
+        self.channels = {}
+
+    def register(self, name: str, channel: NotificationChannel):
+        self.channels[name] = channel
+
+    def send(self, title: str, message: str, priority=5, tags=None, channels=None, **kwargs):
+        results = {}
+        for name in (channels or list(self.channels.keys())):
+            channel = self.channels.get(name)
+            if not channel:
+                continue
+            results[name] = channel.send(title, message, priority=priority, tags=tags, **kwargs)
+        return results
+
+
+NOTIFICATIONS = NotificationManager()
+NOTIFICATIONS.register(
+    'telegram_scalp',
+    TelegramChannel(
+        lambda: os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', ''),
+        lambda: os.environ.get('TELEGRAM_CHAT_ID', ''),
+        label='Telegram scalpbot',
+    ),
+)
+NOTIFICATIONS.register('ntfy', NtfyChannel(lambda: CONFIG.get('NTFY_TOPIC', '')))
+
+
+def send_notification(title: str, message: str, priority=5, tags=None, telegram=True, ntfy=True, reply_markup=None):
+    channels = []
+    if telegram:
+        channels.append('telegram_scalp')
+    if ntfy:
+        channels.append('ntfy')
+    if tags is None:
+        tags = notification_tags_from_text(f"{title}\n{message}")
+    return NOTIFICATIONS.send(title, message, priority=priority, tags=tags, channels=channels, reply_markup=reply_markup)
+
+
+def send_telegram(msg, ntfy=True):
+    result = send_notification(
+        notification_title_from_message(msg),
+        msg,
+        priority=5,
+        telegram=True,
+        ntfy=ntfy,
+    )
+    return bool(result.get('telegram_scalp'))
+
 
 def send_telegram_with_buttons(msg, callback_key):
-    tok  = os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
-    chat = os.environ.get('TELEGRAM_CHAT_ID', '')
-    if not tok or not chat:
-        logger.warning("⚠️ Token ou chat_id manquant — position créée sans notification")
-        return False
-    try:
-        keyboard = {"inline_keyboard": [[
-            {"text": "Activer pyramiding", "callback_data": f"pyra_on:{callback_key}"},
-            {"text": "Ignorer",            "callback_data": f"pyra_off:{callback_key}"}
-        ], [
-            {"text": "Scalp OFF",          "callback_data": "scalp_off"}
-        ]]}
-        resp = requests.post(
-            f"https://api.telegram.org/bot{tok}/sendMessage",
-            json={"chat_id": chat, "text": msg, "parse_mode": "HTML", "reply_markup": keyboard},
-            timeout=10
-        )
-        if resp.status_code == 200:
-            logger.info("✅ Telegram avec boutons envoyé")
-            return True
-        else:
-            logger.error(f"❌ Telegram buttons {resp.status_code}: {resp.text[:100]}")
-            return False
-    except Exception as e:
-        logger.error(f"Telegram buttons error: {e}")
-        return False
+    keyboard = {"inline_keyboard": [[
+        {"text": "Activer pyramiding", "callback_data": f"pyra_on:{callback_key}"},
+        {"text": "Ignorer",            "callback_data": f"pyra_off:{callback_key}"}
+    ], [
+        {"text": "Scalp OFF",          "callback_data": "scalp_off"}
+    ]]}
+    result = send_notification(
+        notification_title_from_message(msg),
+        msg,
+        priority=5,
+        telegram=True,
+        ntfy=True,
+        reply_markup=keyboard,
+    )
+    if not result.get('telegram_scalp'):
+        logger.warning("position creee sans notification Telegram")
+    return bool(result.get('telegram_scalp'))
 
 # ============================================================================
 # WEBHOOK
@@ -902,6 +1027,8 @@ def startup():
         f"Strategie 1: ST AI 1H + Bias 15m + Zone Context 1m\n"
         f"Strategie 2: Context 1H + Bias 1H + Zone Context 1m\n"
         f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}"
+        ,
+        ntfy=False,
     )
 
 if os.environ.get('ENABLE_SCALP_BOT', '1') == '1':
