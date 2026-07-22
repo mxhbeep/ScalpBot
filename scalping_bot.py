@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot - ST AI 1H + Bias 15m + Zone Context 1m
+# Scalping Bot - ST AI 1H + Bias 20m + Zone Context 1m
 # Strategie secondaire - Context 1H + Bias 1H + Zone Context 1m
 # Service Railway séparé
 
@@ -10,6 +10,7 @@ import requests
 import logging
 import threading
 import os
+import re
 import redis as redis_lib
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -54,7 +55,7 @@ def fetch_ohlcv_okx(symbol, tf, limit=100):
     """Fetch OHLCV depuis OKX API publique."""
     try:
         inst_id = symbol.replace('/', '-')
-        bar_map = {'1m': '1m', '15m': '15m', '1h': '1H', '2h': '2H', '4h': '4H', '1d': '1D'}
+        bar_map = {'1m': '1m', '5m': '5m', '15m': '15m', '1h': '1H', '2h': '2H', '4h': '4H', '1d': '1D'}
         bar = bar_map.get(tf, '1H')
         url = f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar={bar}&limit={limit}"
         resp = requests.get(url, timeout=10)
@@ -87,29 +88,51 @@ def calc_bias(df, ema_len=13, sma_len=30):
     except:
         return None
 
-def update_bias_15m():
-    """Met à jour le Bias 15m pour tous les assets toutes les 5min."""
-    logger.info("📊 Scheduler Bias 15m démarré")
+def build_confirmed_20m_candles(df_5m):
+    """Agrège quatre bougies 5m confirmées sur les bornes UTC de 20 minutes."""
+    if df_5m is None or df_5m.empty:
+        return None
+    work = df_5m.copy()
+    work['ts'] = pd.to_numeric(work['ts'], errors='coerce')
+    work = work.dropna(subset=['ts', 'close']).sort_values('ts')
+    work['bucket_20m'] = (work['ts'].astype('int64') // 1_200_000) * 1_200_000
+    grouped = work.groupby('bucket_20m', sort=True).agg(
+        close=('close', 'last'),
+        source_count=('close', 'count'),
+    )
+    grouped = grouped[grouped['source_count'] == 4].reset_index(names='ts')
+    return grouped[['ts', 'close']]
+
+
+def update_bias_20m():
+    """Met à jour le Bias 20m pour tous les assets toutes les 5min."""
+    logger.info("Scheduler Bias 20m démarré")
     while True:
         try:
             # Calculer tous les bias HORS du lock (les fetches OKX peuvent être longs)
             results = {}
             for symbol in list(CONFIG['SYMBOLS'].keys()):
                 try:
-                    df = fetch_ohlcv_okx(symbol, '15m', limit=50)
-                    if df is None:
-                        logger.info(f"[BIAS] {symbol} bias15m=None reason=fetch_failed (df OKX vide)")
+                    df_5m = fetch_ohlcv_okx(symbol, '5m', limit=160)
+                    if df_5m is None:
+                        logger.info(f"[BIAS] {symbol} bias20m=None reason=fetch_failed (df OKX 5m vide)")
+                        results[symbol] = {'bias': None, 'price': None}
+                        continue
+                    df = build_confirmed_20m_candles(df_5m)
+                    if df is None or len(df) < 30:
+                        count = 0 if df is None else len(df)
+                        logger.info(f"[BIAS] {symbol} bias20m=None reason=insufficient_confirmed_candles ({count}/30)")
                         results[symbol] = {'bias': None, 'price': None}
                         continue
                     bias = calc_bias(df, ema_len=13, sma_len=30)
                     price = float(df['close'].iloc[-1]) if len(df) else None
                     results[symbol] = {'bias': bias, 'price': price}
                     if bias is None:
-                        logger.info(f"[BIAS] {symbol} bias15m=None reason=neutral (pas d'alignement close/EMA/SMA)")
+                        logger.info(f"[BIAS] {symbol} bias20m=None reason=neutral (pas d'alignement close/EMA/SMA)")
                     else:
-                        logger.info(f"[BIAS] {symbol} bias15m={bias} price={price}")
+                        logger.info(f"[BIAS] {symbol} bias20m={bias} price={price}")
                 except Exception as e:
-                    logger.info(f"[BIAS] {symbol} bias15m=None reason=exception:{e}")
+                    logger.info(f"[BIAS] {symbol} bias20m=None reason=exception:{e}")
                     logger.debug(f"[BIAS] {symbol}: {e}")
                     results[symbol] = {'bias': None, 'price': None}
             # Mettre à jour l'état avec des locks courts symbol par symbol
@@ -120,14 +143,14 @@ def update_bias_15m():
                 with STATE_LOCK:
                     init_symbol(symbol)
                     m = MOMENTUM_STATE[symbol]
-                    m['bias_15m'] = bias
+                    m['bias_20m'] = bias
             for msg, log_msg in pending_alerts:
                 send_telegram(msg)
                 logger.info(log_msg)
             persist_state()
             bias_ok_count  = sum(1 for r in results.values() if r.get('bias') is not None)
             fetch_ok_count = sum(1 for r in results.values() if r.get('price') is not None)
-            logger.info(f"[BIAS] Mise à jour Bias 15m terminée ({bias_ok_count}/{len(CONFIG['SYMBOLS'])} assets avec bias non-neutre, {fetch_ok_count}/{len(CONFIG['SYMBOLS'])} fetch OK)")
+            logger.info(f"[BIAS] Mise à jour Bias 20m terminée ({bias_ok_count}/{len(CONFIG['SYMBOLS'])} assets avec bias non-neutre, {fetch_ok_count}/{len(CONFIG['SYMBOLS'])} fetch OK)")
         except Exception as e:
             logger.error(f"[BIAS] Erreur: {e}")
         time.sleep(300)  # toutes les 5min
@@ -216,7 +239,7 @@ def init_symbol(symbol):
             'st_ai_1h':       None,
             'st_ai_4h':       None,
             'bias_1h':        None,
-            'bias_15m':       None,
+            'bias_20m':       None,
             'last_st_15m':    None,
             'last_st_1h':     None,
             'st_4h_flipped':  False,
@@ -424,11 +447,28 @@ def send_notification(title: str, message: str, priority=5, tags=None, telegram=
     return NOTIFICATIONS.send(title, message, priority=priority, tags=tags, channels=channels, reply_markup=reply_markup)
 
 
+def sanitize_scalp_notification(msg: str) -> str:
+    """Retire les emojis et normalise le titre directionnel des alertes scalp."""
+    cleaned = re.sub(r'[^\x00-\x7F\u00C0-\u024F\n\r\t]', '', str(msg or ''))
+    lines = [re.sub(r'^\?+\s*', '', line.strip()) for line in cleaned.splitlines() if line.strip()]
+    text = '\n'.join(lines)
+    direction_match = re.search(r'\b(LONG|SHORT)\b', text, re.IGNORECASE)
+    symbol_match = re.search(r'\b[A-Z0-9]+/USDT\b', text, re.IGNORECASE)
+    if lines and direction_match and 'SCALP' in text.upper():
+        direction = direction_match.group(1).upper()
+        symbol = f" {symbol_match.group(0).upper()}" if symbol_match else ''
+        suffix = ' - PYRAMIDING' if 'PYRAMIDING' in text.upper() else ''
+        lines[0] = f"<b>SCALP {direction}{suffix}</b>{symbol}"
+    return '\n'.join(lines)
+
+
 def send_telegram(msg, ntfy=True):
+    msg = sanitize_scalp_notification(msg)
     result = send_notification(
         notification_title_from_message(msg),
         msg,
         priority=5,
+        tags=[],
         telegram=True,
         ntfy=ntfy,
     )
@@ -436,6 +476,7 @@ def send_telegram(msg, ntfy=True):
 
 
 def send_telegram_with_buttons(msg, callback_key):
+    msg = sanitize_scalp_notification(msg)
     keyboard = {"inline_keyboard": [[
         {"text": "Activer pyramiding", "callback_data": f"pyra_on:{callback_key}"},
         {"text": "Ignorer",            "callback_data": f"pyra_off:{callback_key}"}
@@ -446,6 +487,7 @@ def send_telegram_with_buttons(msg, callback_key):
         notification_title_from_message(msg),
         msg,
         priority=5,
+        tags=[],
         telegram=True,
         ntfy=True,
         reply_markup=keyboard,
@@ -473,7 +515,7 @@ def webhook():
     event_id   = data.get('event_id') or data.get('time') or str(time.time())
 
     # Normaliser tf
-    tf_aliases = {'1': '1m', '1min': '1m', '1minute': '1m', '5': '5m', '5min': '5m', '5minute': '5m', '15': '15m', '60': '1h', '120': '2h', '2hr': '2h', '2hour': '2h', '180': '3h', '3hr': '3h', '3hour': '3h', '240': '4h', '4hr': '4h', '4hour': '4h'}
+    tf_aliases = {'1': '1m', '1min': '1m', '1minute': '1m', '5': '5m', '5min': '5m', '5minute': '5m', '15': '15m', '20': '20m', '20min': '20m', '20minute': '20m', '60': '1h', '120': '2h', '2hr': '2h', '2hour': '2h', '180': '3h', '3hr': '3h', '3hour': '3h', '240': '4h', '4hr': '4h', '4hour': '4h'}
     tf = tf_aliases.get(tf, tf)
 
     # Normaliser symbol
@@ -537,8 +579,8 @@ def webhook():
             new_bias_val = bias_val if bias_val != 'neutral' else None
             m['bias_1h'] = new_bias_val
             state_changed = True
-        elif bias_val in ('bull', 'bear', 'neutral') and tf == '15m':
-            m['bias_15m'] = bias_val if bias_val != 'neutral' else None
+        elif bias_val in ('bull', 'bear', 'neutral') and tf == '20m':
+            m['bias_20m'] = bias_val if bias_val != 'neutral' else None
             state_changed = True
             
     elif alert_type == 'st_context_lt' and tf in ('1m', '5m', '1h'):
@@ -681,13 +723,13 @@ def webhook():
 
     # ==================================================================
     # Logique SCALP
-    # ENTREE : Zone ST Context 1m + ST AI 1H + Bias 15m
+    # ENTREE : Zone ST Context 1m + ST AI 1H + Bias 20m
     # Anti-chop : ST Context LT 1m dans le meme sens => bloque (sauf si ST Context 5m confirme)
     # ==================================================================
 
-    if alert_type in ('st_context', 'st_context_lt', 'supertrend', 'bias') and tf in ('1m', '5m', '1h', '15m'):
+    if alert_type in ('st_context', 'st_context_lt', 'supertrend', 'bias') and tf in ('1m', '5m', '1h', '20m'):
         st_1h = m.get('st_ai_1h')
-        bias_15m = m.get('bias_15m')
+        bias_20m = m.get('bias_20m')
         ctx_1m = m.get('st_context_1m')
         ctx_lt_1m = m.get('st_context_lt_1m')
         ctx_5m = m.get('st_context_5m')
@@ -714,7 +756,7 @@ def webhook():
         opp_ctx = 'sell' if signal_direction == 'LONG' else 'buy'
 
         st_1h_ok = st_1h == exp_st_1h
-        bias_15m_ok = bias_15m == exp_bias
+        bias_20m_ok = bias_20m == exp_bias
         ctx_1m_ok = ctx_1m == exp_ctx
         # Anti-chop : LT 1m meme sens bloque, SAUF si ST Context 5m est simultanement
         # dans le meme sens que le signal (le 5m valide alors le signal malgre le LT 1m).
@@ -723,7 +765,7 @@ def webhook():
         lt1m_block = lt1m_raw_block and not ctx5m_override
         ctx_5m_opp_block = ctx_5m_fresh and ctx_5m == opp_ctx
         antichop_blocked = lt1m_block or ctx_5m_opp_block
-        all_ok = st_1h_ok and bias_15m_ok and ctx_1m_ok and not antichop_blocked
+        all_ok = st_1h_ok and bias_20m_ok and ctx_1m_ok and not antichop_blocked
 
         pos_key = f"{symbol}_SCALP"
         is_pyra = False
@@ -743,7 +785,7 @@ def webhook():
             else:
                 is_entry = False
                 # Pyramiding : position deja ouverte + nouvelle zone ST Context 1m dans le meme sens
-                if (pos and pos['direction'] == signal_direction and st_1h_ok and bias_15m_ok and ctx_1m_ok
+                if (pos and pos['direction'] == signal_direction and st_1h_ok and bias_20m_ok and ctx_1m_ok
                         and not antichop_blocked and PYRA_ENABLED.get(pos_key, False)
                         and should_send(symbol, f"scalp_pyra_{exp_ctx}", event_id=event_id, cooldown=CONFIG['PYRA_COOLDOWN'])):
                     pos['entry_count'] += 1
@@ -751,7 +793,7 @@ def webhook():
                 if not all_ok and not is_pyra:
                     logger.info(
                         f"[SCALP BLOCKED] {symbol} dir={signal_direction} "
-                        f"st1h={st_1h}/{exp_st_1h} bias15m={bias_15m}/{exp_bias} "
+                        f"st1h={st_1h}/{exp_st_1h} bias20m={bias_20m}/{exp_bias} "
                         f"ctx1m={ctx_1m}/{exp_ctx} ctx1m_fresh={ctx_1m_fresh} "
                         f"lt1m={ctx_lt_1m} lt1m_fresh={ctx_lt_1m_fresh} lt1m_raw_block={lt1m_raw_block} lt1m_block={lt1m_block} "
                         f"ctx5m={ctx_5m} ctx5m_fresh={ctx_5m_fresh} ctx5m_override={ctx5m_override} ctx5m_opp_block={ctx_5m_opp_block} "
@@ -759,16 +801,15 @@ def webhook():
                     )
 
         if is_entry and pos:
-            emoji = "\U0001f7e2" if signal_direction == "LONG" else "\U0001f534"
             tg_sent = send_telegram_with_buttons(
-                f"{emoji} <b>[SCALP - ENTREE]</b> {symbol}\n"
+                f"<b>SCALP {signal_direction}</b> {symbol}\n"
                 f"--------------------\n"
                 f"Direction: {signal_direction}\n"
                 f"Price: ${format_price(price)}\n"
                 f"Exchange: OKX\n"
                 f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
                 f"[OK] ST AI 1H: {(st_1h or 'N/A').upper()}\n"
-                f"[OK] Bias 15m: {(bias_15m or 'N/A').upper()}\n"
+                f"[OK] Bias 20m: {(bias_20m or 'N/A').upper()}\n"
                 f"[OK] Zone ST Context 1m: {(ctx_1m or 'N/A').upper()}\n"
                 f"[ANTI-CHOP] LT 1m: {(ctx_lt_1m or 'NEUTRE').upper()}\n"
                 f"[ANTI-CHOP] Zone ST Context 5m: {(ctx_5m or 'NEUTRE').upper()}",
@@ -780,9 +821,8 @@ def webhook():
             state_changed = True
 
         elif is_pyra and pos:
-            emoji = "\U0001f7e2" if signal_direction == "LONG" else "\U0001f534"
             send_telegram(
-                f"{emoji} <b>[SCALP - PYRAMIDING #{pos['entry_count']}]</b> {symbol}\n"
+                f"<b>SCALP {signal_direction} - PYRAMIDING #{pos['entry_count']}</b> {symbol}\n"
                 f"--------------------\n"
                 f"Direction: {signal_direction}\n"
                 f"Price: ${format_price(price)}\n"
@@ -999,8 +1039,8 @@ def startup():
         except Exception as e:
             logger.warning(f"⚠️ Webhook setup: {e}")
 
-    # Démarrer le scheduler Bias 15m
-    bias_thread = threading.Thread(target=update_bias_15m, daemon=True)
+    # Démarrer le scheduler Bias 20m
+    bias_thread = threading.Thread(target=update_bias_20m, daemon=True)
     bias_thread.start()
 
     # Sync état 4H depuis bot principal au démarrage
@@ -1034,7 +1074,7 @@ def startup():
         "🚀 <b>Scalping Bot démarré</b>\n"
         f"━━━━━━━━━━\n"
         f"📊 Assets: {len(CONFIG['SYMBOLS'])}\n"
-        f"Strategie 1: ST AI 1H + Bias 15m + Zone Context 1m\n"
+        f"Strategie 1: ST AI 1H + Bias 20m + Zone Context 1m\n"
         f"Strategie 2: Context 1H + Bias 1H + Zone Context 1m\n"
         f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}"
         ,
