@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot - Context 3m/2H + filtres 2H
+# Scalping Bot - ST AI 2H + Bias 30m + Context 1m
 # Tag haute qualite - ST Context 1H aligne
 # Service Railway séparé
 
@@ -156,6 +156,46 @@ def update_bias_20m():
         time.sleep(300)  # toutes les 5min
 
 
+def update_bias_30m():
+    """Met a jour le Bias 30m pour tous les assets toutes les 5min."""
+    logger.info("Scheduler Bias 30m demarre")
+    while True:
+        try:
+            results = {}
+            for symbol in list(CONFIG['SYMBOLS'].keys()):
+                try:
+                    df = fetch_ohlcv_okx(symbol, '30m', limit=80)
+                    if df is None or len(df) < 30:
+                        count = 0 if df is None else len(df)
+                        logger.info(f"[BIAS] {symbol} bias30m=None reason=insufficient_confirmed_candles ({count}/30)")
+                        results[symbol] = {'bias': None, 'price': None}
+                        continue
+                    bias = calc_bias(df, ema_len=13, sma_len=30)
+                    price = float(df['close'].iloc[-1]) if len(df) else None
+                    results[symbol] = {'bias': bias, 'price': price}
+                    if bias is None:
+                        logger.info(f"[BIAS] {symbol} bias30m=None reason=neutral")
+                    else:
+                        logger.info(f"[BIAS] {symbol} bias30m={bias} price={price}")
+                except Exception as e:
+                    logger.info(f"[BIAS] {symbol} bias30m=None reason=exception:{e}")
+                    logger.debug(f"[BIAS] {symbol}: {e}")
+                    results[symbol] = {'bias': None, 'price': None}
+
+            for symbol, result in results.items():
+                with STATE_LOCK:
+                    init_symbol(symbol)
+                    MOMENTUM_STATE[symbol]['bias_30m'] = result.get('bias')
+
+            persist_state()
+            bias_ok_count = sum(1 for r in results.values() if r.get('bias') is not None)
+            fetch_ok_count = sum(1 for r in results.values() if r.get('price') is not None)
+            logger.info(f"[BIAS] Mise a jour Bias 30m terminee ({bias_ok_count}/{len(CONFIG['SYMBOLS'])} assets avec bias non-neutre, {fetch_ok_count}/{len(CONFIG['SYMBOLS'])} fetch OK)")
+        except Exception as e:
+            logger.error(f"[BIAS] Erreur Bias 30m: {e}")
+        time.sleep(300)
+
+
 # ============================================================================
 # STATE
 # ============================================================================
@@ -238,10 +278,12 @@ def init_symbol(symbol):
             'st_ai_15m':      None,
             'st_ai_1h':       None,
             'st_ai_2h':       None,
+            'st_ai_2h_ts':    None,
             'st_ai_4h':       None,
             'bias_1h':        None,
             'bias_2h':        None,
             'bias_20m':       None,
+            'bias_30m':       None,
             'last_st_15m':    None,
             'last_st_1h':     None,
             'st_4h_flipped':  False,
@@ -523,7 +565,7 @@ def webhook():
     event_id   = data.get('event_id') or data.get('time') or str(time.time())
 
     # Normaliser tf
-    tf_aliases = {'1': '1m', '1min': '1m', '1minute': '1m', '3': '3m', '3min': '3m', '3minute': '3m', '5': '5m', '5min': '5m', '5minute': '5m', '15': '15m', '20': '20m', '20min': '20m', '20minute': '20m', '60': '1h', '120': '2h', '2hr': '2h', '2hour': '2h', '180': '3h', '3hr': '3h', '3hour': '3h', '240': '4h', '4hr': '4h', '4hour': '4h'}
+    tf_aliases = {'1': '1m', '1min': '1m', '1minute': '1m', '3': '3m', '3min': '3m', '3minute': '3m', '5': '5m', '5min': '5m', '5minute': '5m', '15': '15m', '20': '20m', '20min': '20m', '20minute': '20m', '30': '30m', '30min': '30m', '30minute': '30m', '60': '1h', '120': '2h', '2hr': '2h', '2hour': '2h', '180': '3h', '3hr': '3h', '3hour': '3h', '240': '4h', '4hr': '4h', '4hour': '4h'}
     tf = tf_aliases.get(tf, tf)
 
     # Normaliser symbol
@@ -573,6 +615,7 @@ def webhook():
         elif tf == '2h':
             prev_2h = m.get('st_ai_2h')
             m['st_ai_2h'] = parsed
+            m['st_ai_2h_ts'] = time.time()
             m['last_st_2h'] = prev_2h
             state_changed = True
         elif tf == '4h':
@@ -597,6 +640,9 @@ def webhook():
             state_changed = True
         elif bias_val in ('bull', 'bear', 'neutral') and tf == '20m':
             m['bias_20m'] = bias_val if bias_val != 'neutral' else None
+            state_changed = True
+        elif bias_val in ('bull', 'bear', 'neutral') and tf == '30m':
+            m['bias_30m'] = bias_val if bias_val != 'neutral' else None
             state_changed = True
             
     elif alert_type == 'st_context_lt' and tf in ('1m', '3m', '5m', '1h'):
@@ -749,23 +795,20 @@ def webhook():
 
     # ==================================================================
     # Logique SCALP
-    # Entree principale : Zone ST Context 3m + Bias 2H + ST AI 2H
-    # Entree secondaire : ST Context 2H + (Bias 2H OU ST AI 2H)
-    # Haute qualite : ST Context 2H + Bias 2H + ST AI 2H alignes ensemble
-    # Anti-chop : ST Context LT 3m dans le meme sens => bloque
+    # Entree : ST AI 2H + Bias 30m + Zone ST Context 1m
+    # Anti-chop : Zone ST Context 5m opposee => bloque
     # ==================================================================
 
-    if alert_type in ('st_context', 'st_context_lt', 'supertrend', 'bias') and tf in ('3m', '2h'):
+    if alert_type in ('st_context', 'supertrend', 'bias') and tf in ('1m', '5m', '30m', '2h'):
         st_2h = m.get('st_ai_2h')
-        bias_2h = m.get('bias_2h')
-        ctx_3m = m.get('st_context_3m')
-        ctx_2h = m.get('st_context_2h')
-        ctx_lt_3m = m.get('st_context_lt_3m')
-        ctx_3m_fresh = bool(ctx_3m) and is_fresh(m.get('st_context_3m_ts'), 15 * 60)
-        ctx_2h_fresh = bool(ctx_2h) and is_fresh(m.get('st_context_2h_ts'), 6 * 3600)
-        ctx_lt_3m_fresh = bool(ctx_lt_3m) and is_fresh(m.get('st_context_lt_3m_ts'), 15 * 60)
+        bias_30m = m.get('bias_30m')
+        ctx_1m = m.get('st_context_1m')
+        ctx_5m = m.get('st_context_5m')
+        ctx_1m_fresh = bool(ctx_1m) and is_fresh(m.get('st_context_1m_ts'), 5 * 60)
+        ctx_5m_fresh = bool(ctx_5m) and is_fresh(m.get('st_context_5m_ts'), 15 * 60)
+        st_2h_fresh = bool(st_2h) and is_fresh(m.get('st_ai_2h_ts'), 6 * 3600)
 
-        should_evaluate = ctx_3m_fresh or ctx_2h_fresh
+        should_evaluate = alert_type == 'st_context' and tf == '1m' and ctx_1m_fresh
         if not should_evaluate:
             if state_changed:
                 persist_state()
@@ -777,77 +820,18 @@ def webhook():
                 persist_state()
             return jsonify({'status': 'ok', 'enabled': False}), 200
 
-        selected = None
-        for candidate_direction in ('LONG', 'SHORT'):
-            exp_st_2h = 'buy' if candidate_direction == 'LONG' else 'sell'
-            exp_bias = 'bull' if candidate_direction == 'LONG' else 'bear'
-            exp_ctx = 'buy' if candidate_direction == 'LONG' else 'sell'
+        signal_direction = 'LONG' if ctx_1m == 'buy' else 'SHORT'
+        exp_st_2h = 'buy' if signal_direction == 'LONG' else 'sell'
+        exp_bias = 'bull' if signal_direction == 'LONG' else 'bear'
+        exp_ctx = 'buy' if signal_direction == 'LONG' else 'sell'
+        opp_ctx = 'sell' if signal_direction == 'LONG' else 'buy'
 
-            st_2h_ok = st_2h == exp_st_2h
-            bias_2h_ok = bias_2h == exp_bias
-            ctx_3m_ok = ctx_3m_fresh and ctx_3m == exp_ctx
-            ctx_2h_ok = ctx_2h_fresh and ctx_2h == exp_ctx
-            lt3m_block = ctx_lt_3m_fresh and ctx_lt_3m == exp_ctx
-            antichop_blocked = lt3m_block
-            directional_ok = st_2h_ok or bias_2h_ok
-            primary_ok = ctx_3m_ok and bias_2h_ok and st_2h_ok and not antichop_blocked
-            secondary_ok = ctx_2h_ok and directional_ok and not antichop_blocked
-            high_quality = ctx_2h_ok and bias_2h_ok and st_2h_ok
-
-            if primary_ok or secondary_ok:
-                selected = {
-                    'direction': candidate_direction,
-                    'exp_st_2h': exp_st_2h,
-                    'exp_bias': exp_bias,
-                    'exp_ctx': exp_ctx,
-                    'st_2h_ok': st_2h_ok,
-                    'bias_2h_ok': bias_2h_ok,
-                    'ctx_3m_ok': ctx_3m_ok,
-                    'ctx_2h_ok': ctx_2h_ok,
-                    'lt3m_block': lt3m_block,
-                    'antichop_blocked': antichop_blocked,
-                    'directional_ok': directional_ok,
-                    'primary_ok': primary_ok,
-                    'secondary_ok': secondary_ok,
-                    'high_quality': high_quality,
-                    'signal_type': 'principal' if primary_ok else 'secondaire',
-                }
-                break
-
-        if selected:
-            signal_direction = selected['direction']
-            exp_st_2h = selected['exp_st_2h']
-            exp_bias = selected['exp_bias']
-            exp_ctx = selected['exp_ctx']
-            st_2h_ok = selected['st_2h_ok']
-            bias_2h_ok = selected['bias_2h_ok']
-            ctx_3m_ok = selected['ctx_3m_ok']
-            ctx_2h_ok = selected['ctx_2h_ok']
-            lt3m_block = selected['lt3m_block']
-            antichop_blocked = selected['antichop_blocked']
-            directional_ok = selected['directional_ok']
-            primary_ok = selected['primary_ok']
-            secondary_ok = selected['secondary_ok']
-            high_quality = selected['high_quality']
-            signal_type = selected['signal_type']
-            all_ok = True
-        else:
-            signal_direction = 'LONG' if ctx_3m == 'buy' or ctx_2h == 'buy' else 'SHORT'
-            exp_st_2h = 'buy' if signal_direction == 'LONG' else 'sell'
-            exp_bias = 'bull' if signal_direction == 'LONG' else 'bear'
-            exp_ctx = 'buy' if signal_direction == 'LONG' else 'sell'
-            st_2h_ok = st_2h == exp_st_2h
-            bias_2h_ok = bias_2h == exp_bias
-            ctx_3m_ok = ctx_3m_fresh and ctx_3m == exp_ctx
-            ctx_2h_ok = ctx_2h_fresh and ctx_2h == exp_ctx
-            lt3m_block = ctx_lt_3m_fresh and ctx_lt_3m == exp_ctx
-            antichop_blocked = lt3m_block
-            directional_ok = st_2h_ok or bias_2h_ok
-            primary_ok = False
-            secondary_ok = False
-            high_quality = False
-            signal_type = 'blocked'
-            all_ok = False
+        st_2h_ok = st_2h_fresh and st_2h == exp_st_2h
+        bias_30m_ok = bias_30m == exp_bias
+        ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_ctx
+        ctx5m_opp_block = ctx_5m_fresh and ctx_5m == opp_ctx
+        antichop_blocked = ctx5m_opp_block
+        all_ok = st_2h_ok and bias_30m_ok and ctx_1m_ok and not antichop_blocked
 
         pos_key = f"{symbol}_SCALP"
         is_pyra = False
@@ -859,19 +843,19 @@ def webhook():
                 pos = None
 
             candidate = bool(all_ok and pos is None)
-            if candidate and should_send(symbol, f"scalp_entry_{signal_type}_{exp_ctx}", event_id=event_id, cooldown=1800):
+            if candidate and should_send(symbol, f"scalp_entry_{exp_ctx}", event_id=event_id, cooldown=1800):
                 SCALP_POSITIONS[pos_key] = {
                     'direction': signal_direction,
                     'entry_count': 1,
-                    'signal_type': signal_type,
+                    'signal_type': 'scalp_1m',
                 }
                 PYRA_ENABLED.pop(pos_key, None)
                 pos = SCALP_POSITIONS[pos_key]
                 is_entry = True
             else:
                 is_entry = False
-                # Pyramiding : position deja ouverte + nouvelle zone ST Context 3m dans le meme sens
-                if (pos and pos['direction'] == signal_direction and directional_ok and ctx_3m_ok
+                # Pyramiding : position deja ouverte + nouvelle zone ST Context 1m dans le meme sens
+                if (pos and pos['direction'] == signal_direction and st_2h_ok and bias_30m_ok and ctx_1m_ok
                         and not antichop_blocked and PYRA_ENABLED.get(pos_key, False)
                         and should_send(symbol, f"scalp_pyra_{exp_ctx}", event_id=event_id, cooldown=CONFIG['PYRA_COOLDOWN'])):
                     pos['entry_count'] += 1
@@ -879,18 +863,15 @@ def webhook():
                 if not all_ok and not is_pyra:
                     logger.info(
                         f"[SCALP BLOCKED] {symbol} dir={signal_direction} "
-                        f"st2h={st_2h}/{exp_st_2h} bias2h={bias_2h}/{exp_bias} directional_ok={directional_ok} "
-                        f"ctx3m={ctx_3m}/{exp_ctx} ctx3m_fresh={ctx_3m_fresh} "
-                        f"ctx2h={ctx_2h}/{exp_ctx} ctx2h_fresh={ctx_2h_fresh} "
-                        f"primary={primary_ok} secondary={secondary_ok} high_quality={high_quality} "
-                        f"lt3m={ctx_lt_3m} lt3m_fresh={ctx_lt_3m_fresh} lt3m_block={lt3m_block} "
+                        f"st2h={st_2h}/{exp_st_2h} fresh={st_2h_fresh} ok={st_2h_ok} "
+                        f"bias30m={bias_30m}/{exp_bias} ok={bias_30m_ok} "
+                        f"ctx1m={ctx_1m}/{exp_ctx} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
+                        f"ctx5m={ctx_5m}/{opp_ctx} fresh={ctx_5m_fresh} opp_block={ctx5m_opp_block} "
                         f"antichop={antichop_blocked} pos={pos['direction'] if pos else None}"
                     )
 
         if is_entry and pos:
-            quality_line = "[HIGH QUALITY] Context 2H + Bias 2H + ST AI 2H alignes\n" if high_quality else "[INFO] Qualite: filtre 2H partiel\n"
-            entry_label = "ENTREE" if signal_type == 'principal' else "ENTREE SECONDAIRE"
-            title = f"<b>SCALP {signal_direction}++ - {entry_label}</b> {symbol}" if high_quality else f"<b>SCALP {signal_direction} - {entry_label}</b> {symbol}"
+            title = f"<b>SCALP {signal_direction}</b> {symbol}"
             tg_sent = send_telegram_with_buttons(
                 f"{title}\n"
                 f"--------------------\n"
@@ -899,16 +880,14 @@ def webhook():
                 f"Exchange: OKX\n"
                 f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
                 f"[INFO] ST AI 2H: {(st_2h or 'N/A').upper()}\n"
-                f"[INFO] Bias 2H: {(bias_2h or 'N/A').upper()}\n"
-                f"[OK] Zone ST Context 3m: {(ctx_3m or 'N/A').upper()}\n"
-                f"[INFO] ST Context 2H: {(ctx_2h or 'NEUTRE').upper()}\n"
-                f"{quality_line}"
-                f"[ANTI-CHOP] LT 3m: {(ctx_lt_3m or 'NEUTRE').upper()}",
+                f"[INFO] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
+                f"[OK] Zone ST Context 1m: {(ctx_1m or 'N/A').upper()}\n"
+                f"[ANTI-CHOP] Zone ST Context 5m opposee: {(ctx_5m or 'NEUTRE').upper()}",
                 pos_key
             )
             if not tg_sent:
                 logger.warning(f"[SCALP] Entree {symbol} creee mais notification Telegram echouee")
-            logger.info(f"[SCALP] Entree {signal_type}: {symbol} {signal_direction}")
+            logger.info(f"[SCALP] Entree: {symbol} {signal_direction}")
             state_changed = True
 
         elif is_pyra and pos:
@@ -919,10 +898,10 @@ def webhook():
                 f"Price: ${format_price(price)}\n"
                 f"Exchange: OKX\n"
                 f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-                f"[OK] Nouvelle zone ST Context 3m: {(ctx_3m or 'N/A').upper()}\n"
+                f"[OK] Nouvelle zone ST Context 1m: {(ctx_1m or 'N/A').upper()}\n"
                 f"[INFO] ST AI 2H: {(st_2h or 'N/A').upper()}\n"
-                f"[INFO] Bias 2H: {(bias_2h or 'N/A').upper()}\n"
-                f"[INFO] ST Context 2H: {(ctx_2h or 'NEUTRE').upper()}"
+                f"[INFO] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
+                f"[ANTI-CHOP] Zone ST Context 5m opposee: {(ctx_5m or 'NEUTRE').upper()}"
             )
             logger.info(f"[SCALP] Pyramiding #{pos['entry_count']}: {symbol} {signal_direction}")
             state_changed = True
@@ -1133,7 +1112,7 @@ def startup():
         except Exception as e:
             logger.warning(f"⚠️ Webhook setup: {e}")
 
-    # Bias 20m n'est plus utilise par la strategie SCALP.
+    threading.Thread(target=update_bias_30m, daemon=True).start()
 
     # Sync état 4H depuis bot principal au démarrage
     main_url     = os.environ.get('MAIN_BOT_URL', '').rstrip('/')
@@ -1166,9 +1145,8 @@ def startup():
         "🚀 <b>Scalping Bot démarré</b>\n"
         f"━━━━━━━━━━\n"
         f"📊 Assets: {len(CONFIG['SYMBOLS'])}\n"
-        f"Strategie principale: Context 3m + Bias 2H + ST AI 2H\n"
-        f"Strategie secondaire: Context 2H + (Bias 2H ou ST AI 2H)\n"
-        f"Haute qualite: Context 2H + Bias 2H + ST AI 2H\n"
+        f"Strategie: ST AI 2H + Bias 30m + Context 1m\n"
+        f"Anti-chop: ST Context 5m oppose\n"
         f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}"
         ,
         ntfy=False,
