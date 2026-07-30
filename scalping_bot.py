@@ -43,6 +43,7 @@ CONFIG = {
         'ONDO/USDT':    {'exchange': 'okx'},
         'SOL/USDT':     {'exchange': 'okx'},
         'SUI/USDT':     {'exchange': 'okx'},
+        'UNI/USDT':     {'exchange': 'okx'},
         'XRP/USDT':     {'exchange': 'okx'},
     }
 }
@@ -278,7 +279,6 @@ def init_symbol(symbol):
             'st_ai_15m':      None,
             'st_ai_1h':       None,
             'st_ai_2h':       None,
-            'st_ai_2h_ts':    None,
             'st_ai_4h':       None,
             'bias_1h':        None,
             'bias_2h':        None,
@@ -512,7 +512,7 @@ def sanitize_scalp_notification(msg: str) -> str:
     return '\n'.join(lines)
 
 
-def send_telegram(msg, ntfy=False):
+def send_telegram(msg, ntfy=True):
     msg = sanitize_scalp_notification(msg)
     result = send_notification(
         notification_title_from_message(msg),
@@ -539,35 +539,12 @@ def send_telegram_with_buttons(msg, callback_key):
         priority=5,
         tags=[],
         telegram=True,
-        ntfy=False,
+        ntfy=True,
         reply_markup=keyboard,
     )
     if not result.get('telegram_scalp'):
         logger.warning("position creee sans notification Telegram")
     return bool(result.get('telegram_scalp'))
-
-
-def send_light_alert(direction: str) -> bool:
-    """Envoie uniquement LONG ou SHORT au listener ntfy des ampoules."""
-    command = str(direction or '').strip().upper()
-    if command not in ('LONG', 'SHORT'):
-        logger.warning(f"[LIGHTS] Commande ignoree: {command!r}")
-        return False
-
-    result = send_notification(
-        title=f"SCALP {command}",
-        message=command,
-        priority=5,
-        tags=[],
-        telegram=False,
-        ntfy=True,
-    )
-    sent = bool(result.get('ntfy'))
-    if sent:
-        logger.info(f"[LIGHTS] Alerte {command} envoyee")
-    else:
-        logger.warning(f"[LIGHTS] Echec alerte {command}")
-    return sent
 
 # ============================================================================
 # WEBHOOK
@@ -638,7 +615,6 @@ def webhook():
         elif tf == '2h':
             prev_2h = m.get('st_ai_2h')
             m['st_ai_2h'] = parsed
-            m['st_ai_2h_ts'] = time.time()
             m['last_st_2h'] = prev_2h
             state_changed = True
         elif tf == '4h':
@@ -829,7 +805,6 @@ def webhook():
         ctx_5m = m.get('st_context_5m')
         ctx_1m_fresh = bool(ctx_1m) and is_fresh(m.get('st_context_1m_ts'), 5 * 60)
         ctx_5m_fresh = bool(ctx_5m) and is_fresh(m.get('st_context_5m_ts'), 15 * 60)
-        st_2h_fresh = bool(st_2h) and is_fresh(m.get('st_ai_2h_ts'), 6 * 3600)
 
         should_evaluate = alert_type == 'st_context' and tf == '1m' and ctx_1m_fresh
         if not should_evaluate:
@@ -849,7 +824,7 @@ def webhook():
         exp_ctx = 'buy' if signal_direction == 'LONG' else 'sell'
         opp_ctx = 'sell' if signal_direction == 'LONG' else 'buy'
 
-        st_2h_ok = st_2h_fresh and st_2h == exp_st_2h
+        st_2h_ok = st_2h == exp_st_2h
         bias_30m_ok = bias_30m == exp_bias
         ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_ctx
         ctx5m_opp_block = ctx_5m_fresh and ctx_5m == opp_ctx
@@ -886,7 +861,7 @@ def webhook():
                 if not all_ok and not is_pyra:
                     logger.info(
                         f"[SCALP BLOCKED] {symbol} dir={signal_direction} "
-                        f"st2h={st_2h}/{exp_st_2h} fresh={st_2h_fresh} ok={st_2h_ok} "
+                        f"st2h={st_2h}/{exp_st_2h} ok={st_2h_ok} "
                         f"bias30m={bias_30m}/{exp_bias} ok={bias_30m_ok} "
                         f"ctx1m={ctx_1m}/{exp_ctx} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
                         f"ctx5m={ctx_5m}/{opp_ctx} fresh={ctx_5m_fresh} opp_block={ctx5m_opp_block} "
@@ -910,7 +885,6 @@ def webhook():
             )
             if not tg_sent:
                 logger.warning(f"[SCALP] Entree {symbol} creee mais notification Telegram echouee")
-            send_light_alert(signal_direction)
             logger.info(f"[SCALP] Entree: {symbol} {signal_direction}")
             state_changed = True
 
