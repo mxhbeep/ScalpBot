@@ -512,7 +512,7 @@ def sanitize_scalp_notification(msg: str) -> str:
     return '\n'.join(lines)
 
 
-def send_telegram(msg, ntfy=True):
+def send_telegram(msg, ntfy=False):
     msg = sanitize_scalp_notification(msg)
     result = send_notification(
         notification_title_from_message(msg),
@@ -539,12 +539,35 @@ def send_telegram_with_buttons(msg, callback_key):
         priority=5,
         tags=[],
         telegram=True,
-        ntfy=True,
+        ntfy=False,
         reply_markup=keyboard,
     )
     if not result.get('telegram_scalp'):
         logger.warning("position creee sans notification Telegram")
     return bool(result.get('telegram_scalp'))
+
+
+def send_light_alert(direction: str) -> bool:
+    """Envoie uniquement LONG ou SHORT au listener ntfy des ampoules."""
+    command = str(direction or '').strip().upper()
+    if command not in ('LONG', 'SHORT'):
+        logger.warning(f"[LIGHTS] Commande ignoree: {command!r}")
+        return False
+
+    result = send_notification(
+        title=f"SCALP {command}",
+        message=command,
+        priority=5,
+        tags=[],
+        telegram=False,
+        ntfy=True,
+    )
+    sent = bool(result.get('ntfy'))
+    if sent:
+        logger.info(f"[LIGHTS] Alerte {command} envoyee")
+    else:
+        logger.warning(f"[LIGHTS] Echec alerte {command}")
+    return sent
 
 # ============================================================================
 # WEBHOOK
@@ -887,6 +910,7 @@ def webhook():
             )
             if not tg_sent:
                 logger.warning(f"[SCALP] Entree {symbol} creee mais notification Telegram echouee")
+            send_light_alert(signal_direction)
             logger.info(f"[SCALP] Entree: {symbol} {signal_direction}")
             state_changed = True
 
