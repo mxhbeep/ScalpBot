@@ -279,6 +279,7 @@ def init_symbol(symbol):
             'st_ai_15m':      None,
             'st_ai_1h':       None,
             'st_ai_2h':       None,
+            'st_ai_2h_ts':    None,
             'st_ai_4h':       None,
             'bias_1h':        None,
             'bias_2h':        None,
@@ -498,21 +499,23 @@ def send_notification(title: str, message: str, priority=5, tags=None, telegram=
 
 
 def sanitize_scalp_notification(msg: str) -> str:
-    """Retire les emojis et normalise le titre directionnel des alertes scalp."""
-    cleaned = re.sub(r'[^\x00-\x7F\u00C0-\u024F\n\r\t]', '', str(msg or ''))
-    lines = [re.sub(r'^\?+\s*', '', line.strip()) for line in cleaned.splitlines() if line.strip()]
-    text = '\n'.join(lines)
-    direction_match = re.search(r'\b(LONG|SHORT)\b', text, re.IGNORECASE)
-    symbol_match = re.search(r'\b[A-Z0-9]+/USDT\b', text, re.IGNORECASE)
-    if lines and direction_match and 'SCALP' in text.upper():
+    """Normalise le titre directionnel des alertes scalp et ajoute la pastille couleur.
+    N'alimente plus ntfy (voir send_light_alert) donc les emojis sont conserves."""
+    text = str(msg or '')
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    text_joined = '\n'.join(lines)
+    direction_match = re.search(r'\b(LONG|SHORT)\b', text_joined, re.IGNORECASE)
+    symbol_match = re.search(r'\b[A-Z0-9]+/USDT\b', text_joined, re.IGNORECASE)
+    if lines and direction_match and 'SCALP' in text_joined.upper():
         direction = direction_match.group(1).upper()
+        pastille = '\U0001f7e2' if direction == 'LONG' else '\U0001f534'
         symbol = f" {symbol_match.group(0).upper()}" if symbol_match else ''
-        suffix = ' - PYRAMIDING' if 'PYRAMIDING' in text.upper() else ''
-        lines[0] = f"<b>SCALP {direction}{suffix}</b>{symbol}"
+        suffix = ' - PYRAMIDING' if 'PYRAMIDING' in text_joined.upper() else ''
+        lines[0] = f"{pastille} <b>SCALP {direction}{suffix}</b>{symbol}"
     return '\n'.join(lines)
 
 
-def send_telegram(msg, ntfy=True):
+def send_telegram(msg, ntfy=False):
     msg = sanitize_scalp_notification(msg)
     result = send_notification(
         notification_title_from_message(msg),
@@ -539,12 +542,35 @@ def send_telegram_with_buttons(msg, callback_key):
         priority=5,
         tags=[],
         telegram=True,
-        ntfy=True,
+        ntfy=False,
         reply_markup=keyboard,
     )
     if not result.get('telegram_scalp'):
         logger.warning("position creee sans notification Telegram")
     return bool(result.get('telegram_scalp'))
+
+
+def send_light_alert(direction: str) -> bool:
+    """Envoie uniquement LONG ou SHORT au listener ntfy des ampoules."""
+    command = str(direction or '').strip().upper()
+    if command not in ('LONG', 'SHORT'):
+        logger.warning(f"[LIGHTS] Commande ignoree: {command!r}")
+        return False
+
+    result = send_notification(
+        title=f"SCALP {command}",
+        message=command,
+        priority=5,
+        tags=[],
+        telegram=False,
+        ntfy=True,
+    )
+    sent = bool(result.get('ntfy'))
+    if sent:
+        logger.info(f"[LIGHTS] Alerte {command} envoyee")
+    else:
+        logger.warning(f"[LIGHTS] Echec alerte {command}")
+    return sent
 
 # ============================================================================
 # WEBHOOK
@@ -615,6 +641,7 @@ def webhook():
         elif tf == '2h':
             prev_2h = m.get('st_ai_2h')
             m['st_ai_2h'] = parsed
+            m['st_ai_2h_ts'] = time.time()
             m['last_st_2h'] = prev_2h
             state_changed = True
         elif tf == '4h':
@@ -805,6 +832,7 @@ def webhook():
         ctx_5m = m.get('st_context_5m')
         ctx_1m_fresh = bool(ctx_1m) and is_fresh(m.get('st_context_1m_ts'), 5 * 60)
         ctx_5m_fresh = bool(ctx_5m) and is_fresh(m.get('st_context_5m_ts'), 15 * 60)
+        st_2h_fresh = bool(st_2h) and is_fresh(m.get('st_ai_2h_ts'), 6 * 3600)
 
         should_evaluate = alert_type == 'st_context' and tf == '1m' and ctx_1m_fresh
         if not should_evaluate:
@@ -824,7 +852,7 @@ def webhook():
         exp_ctx = 'buy' if signal_direction == 'LONG' else 'sell'
         opp_ctx = 'sell' if signal_direction == 'LONG' else 'buy'
 
-        st_2h_ok = st_2h == exp_st_2h
+        st_2h_ok = st_2h_fresh and st_2h == exp_st_2h
         bias_30m_ok = bias_30m == exp_bias
         ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_ctx
         ctx5m_opp_block = ctx_5m_fresh and ctx_5m == opp_ctx
@@ -861,7 +889,7 @@ def webhook():
                 if not all_ok and not is_pyra:
                     logger.info(
                         f"[SCALP BLOCKED] {symbol} dir={signal_direction} "
-                        f"st2h={st_2h}/{exp_st_2h} ok={st_2h_ok} "
+                        f"st2h={st_2h}/{exp_st_2h} fresh={st_2h_fresh} ok={st_2h_ok} "
                         f"bias30m={bias_30m}/{exp_bias} ok={bias_30m_ok} "
                         f"ctx1m={ctx_1m}/{exp_ctx} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
                         f"ctx5m={ctx_5m}/{opp_ctx} fresh={ctx_5m_fresh} opp_block={ctx5m_opp_block} "
@@ -885,6 +913,7 @@ def webhook():
             )
             if not tg_sent:
                 logger.warning(f"[SCALP] Entree {symbol} creee mais notification Telegram echouee")
+            send_light_alert(signal_direction)
             logger.info(f"[SCALP] Entree: {symbol} {signal_direction}")
             state_changed = True
 
