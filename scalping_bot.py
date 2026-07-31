@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot - ST AI 2H + ST AI 30m + Bias 30m + Context 1m
+# Scalping Bot - ST AI 2H + Bias 30m + Context 1m
 # Tag haute qualite - ST Context 1H aligne
 # Service Railway séparé
 
@@ -829,8 +829,9 @@ def webhook():
 
     # ==================================================================
     # Logique SCALP
-    # Entree : ST AI 2H + ST AI 30m + Bias 30m + Zone ST Context 1m
-    # Anti-chop : Zone ST Context 5m opposee => bloque
+    # Entree : ST AI 2H + Bias 30m + Zone ST Context 1m
+    # Qualite : ST AI 30m aligne
+    # Warning non bloquant : Zone ST Context 5m opposee
     # ==================================================================
 
     if alert_type in ('st_context', 'supertrend', 'bias') and tf in ('1m', '5m', '30m', '2h'):
@@ -868,8 +869,8 @@ def webhook():
         bias_30m_ok = bias_30m == exp_bias
         ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_ctx
         ctx5m_opp_block = ctx_5m_fresh and ctx_5m == opp_ctx
-        antichop_blocked = ctx5m_opp_block
-        all_ok = st_2h_ok and st_30m_ok and bias_30m_ok and ctx_1m_ok and not antichop_blocked
+        quality_30m = st_30m_ok
+        all_ok = st_2h_ok and bias_30m_ok and ctx_1m_ok
 
         pos_key = f"{symbol}_SCALP"
         is_pyra = False
@@ -893,8 +894,8 @@ def webhook():
             else:
                 is_entry = False
                 # Pyramiding : position deja ouverte + nouvelle zone ST Context 1m dans le meme sens
-                if (pos and pos['direction'] == signal_direction and st_2h_ok and st_30m_ok and bias_30m_ok and ctx_1m_ok
-                        and not antichop_blocked and PYRA_ENABLED.get(pos_key, False)
+                if (pos and pos['direction'] == signal_direction and st_2h_ok and bias_30m_ok and ctx_1m_ok
+                        and PYRA_ENABLED.get(pos_key, False)
                         and should_send(symbol, f"scalp_pyra_{exp_ctx}", event_id=event_id, cooldown=CONFIG['PYRA_COOLDOWN'])):
                     pos['entry_count'] += 1
                     is_pyra = True
@@ -906,23 +907,33 @@ def webhook():
                         f"bias30m={bias_30m}/{exp_bias} ok={bias_30m_ok} "
                         f"ctx1m={ctx_1m}/{exp_ctx} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
                         f"ctx5m={ctx_5m}/{opp_ctx} fresh={ctx_5m_fresh} opp_block={ctx5m_opp_block} "
-                        f"antichop={antichop_blocked} pos={pos['direction'] if pos else None}"
+                        f"quality30m={quality_30m} pos={pos['direction'] if pos else None}"
                     )
 
         if is_entry and pos:
             title = f"<b>SCALP {signal_direction}</b> {symbol}"
+            quality_txt = (
+                "<b>⭐ SCALP HAUTE QUALITE</b> (ST AI 30m aligne)\n\n"
+                if quality_30m else ""
+            )
+            warning_5m_txt = (
+                "[WARNING NON BLOQUANT] Zone ST Context 5m opposee\n"
+                if ctx5m_opp_block else ""
+            )
             tg_sent = send_telegram_with_buttons(
                 f"{title}\n"
                 f"--------------------\n"
+                f"{quality_txt}"
                 f"Direction: {signal_direction}\n"
                 f"Price: ${format_price(price)}\n"
                 f"Exchange: OKX\n"
                 f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
                 f"[INFO] ST AI 2H: {(st_2h or 'N/A').upper()}\n"
-                f"[INFO] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
+                f"[QUALITE] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
                 f"[INFO] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
                 f"[OK] Zone ST Context 1m: {(ctx_1m or 'N/A').upper()}\n"
-                f"[ANTI-CHOP] Zone ST Context 5m opposee: {(ctx_5m or 'NEUTRE').upper()}",
+                f"{warning_5m_txt}"
+                f"[INFO] Zone ST Context 5m: {(ctx_5m or 'NEUTRE').upper()}",
                 pos_key
             )
             if not tg_sent:
@@ -941,9 +952,9 @@ def webhook():
                 f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
                 f"[OK] Nouvelle zone ST Context 1m: {(ctx_1m or 'N/A').upper()}\n"
                 f"[INFO] ST AI 2H: {(st_2h or 'N/A').upper()}\n"
-                f"[INFO] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
+                f"[QUALITE] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
                 f"[INFO] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
-                f"[ANTI-CHOP] Zone ST Context 5m opposee: {(ctx_5m or 'NEUTRE').upper()}"
+                f"[INFO] Zone ST Context 5m: {(ctx_5m or 'NEUTRE').upper()}"
             )
             logger.info(f"[SCALP] Pyramiding #{pos['entry_count']}: {symbol} {signal_direction}")
             state_changed = True
@@ -1187,8 +1198,9 @@ def startup():
         "🚀 <b>Scalping Bot démarré</b>\n"
         f"━━━━━━━━━━\n"
         f"📊 Assets: {len(CONFIG['SYMBOLS'])}\n"
-        f"Strategie: ST AI 2H + ST AI 30m + Bias 30m + Context 1m\n"
-        f"Anti-chop: ST Context 5m oppose\n"
+        f"Strategie: ST AI 2H + Bias 30m + Context 1m\n"
+        f"Qualite: ST AI 30m aligne\n"
+        f"Warning non bloquant: ST Context 5m oppose\n"
         f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}"
         ,
         ntfy=False,
