@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot - ST AI 2H + Bias 30m + Context 1m
+# Scalping Bot - ST AI 2H + ST AI 30m + Bias 30m + Context 1m
 # Tag haute qualite - ST Context 1H aligne
 # Service Railway séparé
 
@@ -166,12 +166,12 @@ def update_bias_30m():
             for symbol in list(CONFIG['SYMBOLS'].keys()):
                 try:
                     df = fetch_ohlcv_okx(symbol, '30m', limit=80)
-                    if df is None or len(df) < 30:
+                    if df is None or len(df) < 40:
                         count = 0 if df is None else len(df)
-                        logger.info(f"[BIAS] {symbol} bias30m=None reason=insufficient_confirmed_candles ({count}/30)")
+                        logger.info(f"[BIAS] {symbol} bias30m=None reason=insufficient_confirmed_candles ({count}/40)")
                         results[symbol] = {'bias': None, 'price': None}
                         continue
-                    bias = calc_bias(df, ema_len=13, sma_len=30)
+                    bias = calc_bias(df, ema_len=17, sma_len=40)
                     price = float(df['close'].iloc[-1]) if len(df) else None
                     results[symbol] = {'bias': bias, 'price': price}
                     if bias is None:
@@ -278,6 +278,8 @@ def init_symbol(symbol):
         MOMENTUM_STATE[symbol] = {
             'st_ai_15m':      None,
             'st_ai_1h':       None,
+            'st_ai_30m':      None,
+            'st_ai_30m_ts':   None,
             'st_ai_2h':       None,
             'st_ai_2h_ts':    None,
             'st_ai_4h':       None,
@@ -644,6 +646,12 @@ def webhook():
             m['st_ai_2h_ts'] = time.time()
             m['last_st_2h'] = prev_2h
             state_changed = True
+        elif tf == '30m':
+            prev_30m = m.get('st_ai_30m')
+            m['st_ai_30m'] = parsed
+            m['st_ai_30m_ts'] = time.time()
+            m['last_st_30m'] = prev_30m
+            state_changed = True
         elif tf == '4h':
             prev_4h = m.get('st_ai_4h')
             m['st_ai_4h'] = parsed
@@ -821,18 +829,20 @@ def webhook():
 
     # ==================================================================
     # Logique SCALP
-    # Entree : ST AI 2H + Bias 30m + Zone ST Context 1m
+    # Entree : ST AI 2H + ST AI 30m + Bias 30m + Zone ST Context 1m
     # Anti-chop : Zone ST Context 5m opposee => bloque
     # ==================================================================
 
     if alert_type in ('st_context', 'supertrend', 'bias') and tf in ('1m', '5m', '30m', '2h'):
         st_2h = m.get('st_ai_2h')
+        st_30m = m.get('st_ai_30m')
         bias_30m = m.get('bias_30m')
         ctx_1m = m.get('st_context_1m')
         ctx_5m = m.get('st_context_5m')
         ctx_1m_fresh = bool(ctx_1m) and is_fresh(m.get('st_context_1m_ts'), 5 * 60)
         ctx_5m_fresh = bool(ctx_5m) and is_fresh(m.get('st_context_5m_ts'), 15 * 60)
         st_2h_fresh = bool(st_2h) and is_fresh(m.get('st_ai_2h_ts'), 6 * 3600)
+        st_30m_fresh = bool(st_30m) and is_fresh(m.get('st_ai_30m_ts'), 90 * 60)
 
         should_evaluate = alert_type == 'st_context' and tf == '1m' and ctx_1m_fresh
         if not should_evaluate:
@@ -848,16 +858,18 @@ def webhook():
 
         signal_direction = 'LONG' if ctx_1m == 'buy' else 'SHORT'
         exp_st_2h = 'buy' if signal_direction == 'LONG' else 'sell'
+        exp_st_30m = exp_st_2h
         exp_bias = 'bull' if signal_direction == 'LONG' else 'bear'
         exp_ctx = 'buy' if signal_direction == 'LONG' else 'sell'
         opp_ctx = 'sell' if signal_direction == 'LONG' else 'buy'
 
         st_2h_ok = st_2h_fresh and st_2h == exp_st_2h
+        st_30m_ok = st_30m_fresh and st_30m == exp_st_30m
         bias_30m_ok = bias_30m == exp_bias
         ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_ctx
         ctx5m_opp_block = ctx_5m_fresh and ctx_5m == opp_ctx
         antichop_blocked = ctx5m_opp_block
-        all_ok = st_2h_ok and bias_30m_ok and ctx_1m_ok and not antichop_blocked
+        all_ok = st_2h_ok and st_30m_ok and bias_30m_ok and ctx_1m_ok and not antichop_blocked
 
         pos_key = f"{symbol}_SCALP"
         is_pyra = False
@@ -881,7 +893,7 @@ def webhook():
             else:
                 is_entry = False
                 # Pyramiding : position deja ouverte + nouvelle zone ST Context 1m dans le meme sens
-                if (pos and pos['direction'] == signal_direction and st_2h_ok and bias_30m_ok and ctx_1m_ok
+                if (pos and pos['direction'] == signal_direction and st_2h_ok and st_30m_ok and bias_30m_ok and ctx_1m_ok
                         and not antichop_blocked and PYRA_ENABLED.get(pos_key, False)
                         and should_send(symbol, f"scalp_pyra_{exp_ctx}", event_id=event_id, cooldown=CONFIG['PYRA_COOLDOWN'])):
                     pos['entry_count'] += 1
@@ -890,6 +902,7 @@ def webhook():
                     logger.info(
                         f"[SCALP BLOCKED] {symbol} dir={signal_direction} "
                         f"st2h={st_2h}/{exp_st_2h} fresh={st_2h_fresh} ok={st_2h_ok} "
+                        f"st30m={st_30m}/{exp_st_30m} fresh={st_30m_fresh} ok={st_30m_ok} "
                         f"bias30m={bias_30m}/{exp_bias} ok={bias_30m_ok} "
                         f"ctx1m={ctx_1m}/{exp_ctx} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
                         f"ctx5m={ctx_5m}/{opp_ctx} fresh={ctx_5m_fresh} opp_block={ctx5m_opp_block} "
@@ -906,6 +919,7 @@ def webhook():
                 f"Exchange: OKX\n"
                 f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
                 f"[INFO] ST AI 2H: {(st_2h or 'N/A').upper()}\n"
+                f"[INFO] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
                 f"[INFO] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
                 f"[OK] Zone ST Context 1m: {(ctx_1m or 'N/A').upper()}\n"
                 f"[ANTI-CHOP] Zone ST Context 5m opposee: {(ctx_5m or 'NEUTRE').upper()}",
@@ -927,6 +941,7 @@ def webhook():
                 f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
                 f"[OK] Nouvelle zone ST Context 1m: {(ctx_1m or 'N/A').upper()}\n"
                 f"[INFO] ST AI 2H: {(st_2h or 'N/A').upper()}\n"
+                f"[INFO] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
                 f"[INFO] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
                 f"[ANTI-CHOP] Zone ST Context 5m opposee: {(ctx_5m or 'NEUTRE').upper()}"
             )
@@ -1172,7 +1187,7 @@ def startup():
         "🚀 <b>Scalping Bot démarré</b>\n"
         f"━━━━━━━━━━\n"
         f"📊 Assets: {len(CONFIG['SYMBOLS'])}\n"
-        f"Strategie: ST AI 2H + Bias 30m + Context 1m\n"
+        f"Strategie: ST AI 2H + ST AI 30m + Bias 30m + Context 1m\n"
         f"Anti-chop: ST Context 5m oppose\n"
         f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}"
         ,
