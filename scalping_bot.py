@@ -265,47 +265,6 @@ def update_bias_30m():
             logger.error(f"[BIAS] Erreur Bias 30m: {e}")
         time.sleep(300)
 
-def update_bias_1h():
-    """Met a jour le Bias 1H pour tous les assets toutes les 5min."""
-    logger.info("Scheduler Bias 1H demarre")
-    while True:
-        try:
-            results = {}
-            for symbol in list(CONFIG['SYMBOLS'].keys()):
-                try:
-                    df = fetch_ohlcv_okx(symbol, '1h', limit=80)
-                    if df is None or len(df) < 30:
-                        count = 0 if df is None else len(df)
-                        logger.info(f"[BIAS] {symbol} bias1h=None reason=insufficient_confirmed_candles ({count}/30)")
-                        results[symbol] = {'bias': None, 'price': None}
-                        continue
-                    bias = calc_bias(df, ema_len=13, sma_len=30)
-                    price = float(df['close'].iloc[-1]) if len(df) else None
-                    results[symbol] = {'bias': bias, 'price': price}
-                    if bias is None:
-                        logger.info(f"[BIAS] {symbol} bias1h=None reason=neutral")
-                    else:
-                        logger.info(f"[BIAS] {symbol} bias1h={bias} price={price}")
-                except Exception as e:
-                    logger.info(f"[BIAS] {symbol} bias1h=None reason=exception:{e}")
-                    logger.debug(f"[BIAS] {symbol}: {e}")
-                    results[symbol] = {'bias': None, 'price': None}
-
-            now_ts = time.time()
-            for symbol, result in results.items():
-                with STATE_LOCK:
-                    init_symbol(symbol)
-                    MOMENTUM_STATE[symbol]['bias_1h'] = result.get('bias')
-                    MOMENTUM_STATE[symbol]['bias_1h_ts'] = now_ts
-
-            persist_state()
-            bias_ok_count = sum(1 for r in results.values() if r.get('bias') is not None)
-            fetch_ok_count = sum(1 for r in results.values() if r.get('price') is not None)
-            logger.info(f"[BIAS] Mise a jour Bias 1H terminee ({bias_ok_count}/{len(CONFIG['SYMBOLS'])} assets avec bias non-neutre, {fetch_ok_count}/{len(CONFIG['SYMBOLS'])} fetch OK)")
-        except Exception as e:
-            logger.error(f"[BIAS] Erreur Bias 1H: {e}")
-        time.sleep(300)
-
 def update_range_filter_5m():
     """Calcule le Range Filter 5m depuis OKX et declenche les strategies scalp."""
     logger.info("Scheduler Range Filter 5m demarre")
@@ -741,7 +700,7 @@ def send_light_alert(direction: str) -> bool:
     return sent
 
 def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
-    """Evalue SCALP et RANGE_SCALP sur un signal Range Filter 5m confirme."""
+    """Evalue SCALP sur un signal Range Filter 5m confirme."""
     with STATE_LOCK:
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
@@ -757,31 +716,25 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
         exp_st = 'buy' if signal_direction == 'LONG' else 'sell'
         exp_bias = 'bull' if signal_direction == 'LONG' else 'bear'
         exp_ctx = exp_st
-        opp_ctx = 'sell' if signal_direction == 'LONG' else 'buy'
 
         st_2h = m.get('st_ai_2h')
         st_30m = m.get('st_ai_30m')
         bias_30m = m.get('bias_30m')
-        bias_1h = m.get('bias_1h')
         ctx_5m = m.get('st_context_5m')
         ctx_lt_5m = m.get('st_context_lt_5m')
 
         st_2h_fresh = bool(st_2h) and is_fresh(m.get('st_ai_2h_ts'), 6 * 3600)
         st_30m_fresh = bool(st_30m) and is_fresh(m.get('st_ai_30m_ts'), 90 * 60)
         bias_30m_fresh = bool(bias_30m) and is_fresh(m.get('bias_30m_ts'), 2 * 3600)
-        bias_1h_fresh = bool(bias_1h) and is_fresh(m.get('bias_1h_ts'), 3 * 3600)
         ctx_5m_fresh = bool(ctx_5m) and is_fresh(m.get('st_context_5m_ts'), 15 * 60)
         ctx_lt_5m_fresh = bool(ctx_lt_5m) and is_fresh(m.get('st_context_lt_5m_ts'), 15 * 60)
 
         st_2h_ok = st_2h_fresh and st_2h == exp_st
         st_30m_ok = st_30m_fresh and st_30m == exp_st
         bias_30m_ok = bias_30m_fresh and bias_30m == exp_bias
-        bias_1h_ok = bias_1h_fresh and bias_1h == exp_bias
         ctx_5m_ok = ctx_5m_fresh and ctx_5m == exp_ctx
-        ctx5m_opp_block = ctx_5m_fresh and ctx_5m == opp_ctx
         lt5m_same_block = ctx_lt_5m_fresh and ctx_lt_5m == exp_ctx
         scalp_all_ok = st_2h_ok and bias_30m_ok and ctx_5m_ok and not lt5m_same_block
-        range_all_ok = bias_1h_ok and not ctx5m_opp_block
 
         logger.info(
             f"[SCALP RANGE CHECK] {symbol} dir={signal_direction} "
@@ -792,19 +745,10 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
             f"lt5m={ctx_lt_5m}/{exp_ctx} fresh={ctx_lt_5m_fresh} same_block={lt5m_same_block} "
             f"st30m_quality={st_30m_ok}"
         )
-        logger.info(
-            f"[RANGE_SCALP CHECK] {symbol} dir={signal_direction} "
-            f"range5m={range_5m}/{exp_st} "
-            f"bias1h={bias_1h}/{exp_bias} fresh={bias_1h_fresh} ok={bias_1h_ok} "
-            f"ctx5m={ctx_5m}/{opp_ctx} fresh={ctx_5m_fresh} opp_block={ctx5m_opp_block}"
-        )
 
         scalp_entry = False
         scalp_pyra = False
-        range_entry = False
-        range_pyra = False
         pos_key = f"{symbol}_SCALP"
-        range_pos_key = f"{symbol}_RANGE_SCALP"
 
         pos = SCALP_POSITIONS.get(pos_key)
         if pos and pos.get('direction') != signal_direction:
@@ -831,33 +775,6 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
                 f"[SCALP BLOCKED] {symbol} dir={signal_direction} "
                 f"st2h_ok={st_2h_ok} bias30m_ok={bias_30m_ok} ctx5m_ok={ctx_5m_ok} "
                 f"lt5m_same_block={lt5m_same_block} pos={pos['direction'] if pos else None}"
-            )
-
-        range_pos = SCALP_POSITIONS.get(range_pos_key)
-        if range_pos and range_pos.get('direction') != signal_direction:
-            SCALP_POSITIONS.pop(range_pos_key, None)
-            PYRA_ENABLED.pop(range_pos_key, None)
-            range_pos = None
-
-        if range_all_ok and range_pos is None and should_send(symbol, f"range_scalp_entry_{exp_ctx}", event_id=event_id, cooldown=1800):
-            SCALP_POSITIONS[range_pos_key] = {
-                'direction': signal_direction,
-                'entry_count': 1,
-                'signal_type': 'range_scalp_5m',
-            }
-            PYRA_ENABLED.pop(range_pos_key, None)
-            range_pos = SCALP_POSITIONS[range_pos_key]
-            range_entry = True
-        elif (range_pos and range_pos.get('direction') == signal_direction and range_all_ok
-                and PYRA_ENABLED.get(range_pos_key, False)
-                and should_send(symbol, f"range_scalp_pyra_{exp_ctx}", event_id=event_id, cooldown=CONFIG['PYRA_COOLDOWN'])):
-            range_pos['entry_count'] += 1
-            range_pyra = True
-        elif not range_all_ok:
-            logger.info(
-                f"[RANGE_SCALP BLOCKED] {symbol} dir={signal_direction} "
-                f"bias1h_ok={bias_1h_ok} ctx5m_opp_block={ctx5m_opp_block} "
-                f"pos={range_pos['direction'] if range_pos else None}"
             )
 
         persist_state()
@@ -888,25 +805,6 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
             logger.warning(f"[SCALP] Entree {symbol} creee mais notification Telegram echouee")
         send_light_alert(signal_direction)
         logger.info(f"[SCALP] {'Pyramiding' if scalp_pyra else 'Entree'}: {symbol} {signal_direction}")
-
-    if range_entry or range_pyra:
-        count_txt = f" - PYRAMIDING #{range_pos['entry_count']}" if range_pyra else ""
-        tg_sent = send_telegram_with_buttons(
-            f"<b>RANGE SCALP {signal_direction}{count_txt}</b> {symbol}\n"
-            f"--------------------\n"
-            f"Direction: {signal_direction}\n"
-            f"Price: ${format_price(price)}\n"
-            f"Exchange: OKX\n"
-            f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-            f"[OK] Range Filter 5m: {(range_5m or 'N/A').upper()}\n"
-            f"[OK] Bias 1H: {(bias_1h or 'N/A').upper()}\n"
-            f"[ANTI-CHOP] Zone ST Context 5m opposee: {(ctx_5m or 'NEUTRE').upper()}",
-            range_pos_key
-        )
-        if not tg_sent:
-            logger.warning(f"[RANGE_SCALP] Entree {symbol} creee mais notification Telegram echouee")
-        send_light_alert(signal_direction)
-        logger.info(f"[RANGE_SCALP] {'Pyramiding' if range_pyra else 'Entree'}: {symbol} {signal_direction}")
 
 # ============================================================================
 # WEBHOOK
@@ -1511,7 +1409,6 @@ def startup():
             logger.warning(f"⚠️ Webhook setup: {e}")
 
     threading.Thread(target=update_bias_30m, daemon=True).start()
-    threading.Thread(target=update_bias_1h, daemon=True).start()
     threading.Thread(target=update_range_filter_5m, daemon=True).start()
 
     # Sync état 4H depuis bot principal au démarrage
@@ -1546,7 +1443,6 @@ def startup():
         f"━━━━━━━━━━\n"
         f"📊 Assets: {len(CONFIG['SYMBOLS'])}\n"
         f"SCALP: Range Filter 5m + ST AI 2H + Bias 30m + ST Context 5m\n"
-        f"RANGE_SCALP: Range Filter 5m + Bias 1H\n"
         f"Range Filter 5m: calcule par le bot via OKX\n"
         f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}"
         ,
