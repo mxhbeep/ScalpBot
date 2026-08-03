@@ -400,6 +400,7 @@ def init_symbol(symbol):
             'bias_1h':        None,
             'bias_1h_ts':     None,
             'bias_2h':        None,
+            'bias_2h_ts':     None,
             'bias_20m':       None,
             'bias_30m':       None,
             'bias_30m_ts':    None,
@@ -716,33 +717,49 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
         exp_st = 'buy' if signal_direction == 'LONG' else 'sell'
         exp_bias = 'bull' if signal_direction == 'LONG' else 'bear'
         exp_ctx = exp_st
+        opp_ctx = 'sell' if signal_direction == 'LONG' else 'buy'
 
         st_2h = m.get('st_ai_2h')
         st_30m = m.get('st_ai_30m')
+        bias_2h = m.get('bias_2h')
         bias_30m = m.get('bias_30m')
+        ctx_2h = m.get('st_context_2h')
         ctx_5m = m.get('st_context_5m')
         ctx_lt_5m = m.get('st_context_lt_5m')
 
         st_2h_fresh = bool(st_2h) and is_fresh(m.get('st_ai_2h_ts'), 6 * 3600)
         st_30m_fresh = bool(st_30m) and is_fresh(m.get('st_ai_30m_ts'), 90 * 60)
+        bias_2h_fresh = bool(bias_2h) and is_fresh(m.get('bias_2h_ts'), 6 * 3600)
         bias_30m_fresh = bool(bias_30m) and is_fresh(m.get('bias_30m_ts'), 2 * 3600)
+        ctx_2h_fresh = bool(ctx_2h) and is_fresh(m.get('st_context_2h_ts'), 6 * 3600)
         ctx_5m_fresh = bool(ctx_5m) and is_fresh(m.get('st_context_5m_ts'), 15 * 60)
         ctx_lt_5m_fresh = bool(ctx_lt_5m) and is_fresh(m.get('st_context_lt_5m_ts'), 15 * 60)
 
         st_2h_ok = st_2h_fresh and st_2h == exp_st
         st_30m_ok = st_30m_fresh and st_30m == exp_st
+        bias_2h_ok = bias_2h_fresh and bias_2h == exp_bias
         bias_30m_ok = bias_30m_fresh and bias_30m == exp_bias
+        ctx_2h_ok = ctx_2h_fresh and ctx_2h == exp_ctx
         ctx_5m_ok = ctx_5m_fresh and ctx_5m == exp_ctx
+        ctx5m_opp_block = ctx_5m_fresh and ctx_5m == opp_ctx
         lt5m_same_block = ctx_lt_5m_fresh and ctx_lt_5m == exp_ctx
-        scalp_all_ok = st_2h_ok and bias_30m_ok and ctx_5m_ok and not lt5m_same_block
+        antichop_block = ctx5m_opp_block or lt5m_same_block
+        primary_ok = st_2h_ok and bias_30m_ok and not antichop_block
+        secondary_ok = bias_2h_ok and ctx_5m_ok and not lt5m_same_block
+        third_ok = ctx_2h_ok and st_2h_ok and ctx_5m_ok and not lt5m_same_block
+        scalp_all_ok = primary_ok or secondary_ok or third_ok
+        signal_type = 'troisieme' if third_ok else 'secondaire' if secondary_ok else 'principal' if primary_ok else 'blocked'
 
         logger.info(
             f"[SCALP RANGE CHECK] {symbol} dir={signal_direction} "
             f"range5m={range_5m}/{exp_st} "
             f"st2h={st_2h}/{exp_st} fresh={st_2h_fresh} ok={st_2h_ok} "
+            f"bias2h={bias_2h}/{exp_bias} fresh={bias_2h_fresh} ok={bias_2h_ok} "
             f"bias30m={bias_30m}/{exp_bias} fresh={bias_30m_fresh} ok={bias_30m_ok} "
-            f"ctx5m={ctx_5m}/{exp_ctx} fresh={ctx_5m_fresh} ok={ctx_5m_ok} "
+            f"ctx2h={ctx_2h}/{exp_ctx} fresh={ctx_2h_fresh} ok={ctx_2h_ok} "
+            f"ctx5m={ctx_5m}/{exp_ctx} fresh={ctx_5m_fresh} ok={ctx_5m_ok} opp_block={ctx5m_opp_block} "
             f"lt5m={ctx_lt_5m}/{exp_ctx} fresh={ctx_lt_5m_fresh} same_block={lt5m_same_block} "
+            f"primary={primary_ok} secondary={secondary_ok} third={third_ok} signal_type={signal_type} "
             f"st30m_quality={st_30m_ok}"
         )
 
@@ -756,11 +773,11 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
             PYRA_ENABLED.pop(pos_key, None)
             pos = None
 
-        if scalp_all_ok and pos is None and should_send(symbol, f"scalp_range_entry_{exp_ctx}", event_id=event_id, cooldown=1800):
+        if scalp_all_ok and pos is None and should_send(symbol, f"scalp_range_entry_{signal_type}_{exp_ctx}", event_id=event_id, cooldown=1800):
             SCALP_POSITIONS[pos_key] = {
                 'direction': signal_direction,
                 'entry_count': 1,
-                'signal_type': 'scalp_range_5m',
+                'signal_type': signal_type,
             }
             PYRA_ENABLED.pop(pos_key, None)
             pos = SCALP_POSITIONS[pos_key]
@@ -771,22 +788,30 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
             pos['entry_count'] += 1
             scalp_pyra = True
         elif not scalp_all_ok:
-            logger.info(
-                f"[SCALP BLOCKED] {symbol} dir={signal_direction} "
-                f"st2h_ok={st_2h_ok} bias30m_ok={bias_30m_ok} ctx5m_ok={ctx_5m_ok} "
-                f"lt5m_same_block={lt5m_same_block} pos={pos['direction'] if pos else None}"
-            )
+                logger.info(
+                    f"[SCALP BLOCKED] {symbol} dir={signal_direction} "
+                    f"primary={primary_ok} secondary={secondary_ok} third={third_ok} "
+                    f"ctx5m_opp_block={ctx5m_opp_block} lt5m_same_block={lt5m_same_block} "
+                    f"pos={pos['direction'] if pos else None}"
+                )
 
         persist_state()
 
     if scalp_entry or scalp_pyra:
         count_txt = f" - PYRAMIDING #{pos['entry_count']}" if scalp_pyra else ""
+        entry_label = {
+            'principal': 'ENTREE PRINCIPALE',
+            'secondaire': 'ENTREE SECONDAIRE',
+            'troisieme': 'ENTREE TROISIEME',
+        }.get(pos.get('signal_type'), 'ENTREE')
         quality_txt = (
-            "<b>[QUALITE] SCALP HAUTE QUALITE</b> (ST AI 30m aligne)\n\n"
-            if st_30m_ok else ""
+            ("<b>[QUALITE] ST Context 5m aligne</b>\n" if ctx_5m_ok else "")
+            + ("<b>[QUALITE] ST AI 30m aligne</b>\n" if st_30m_ok else "")
         )
+        if quality_txt:
+            quality_txt += "\n"
         tg_sent = send_telegram_with_buttons(
-            f"<b>SCALP {signal_direction}{count_txt}</b> {symbol}\n"
+            f"<b>SCALP {signal_direction} - {entry_label}{count_txt}</b> {symbol}\n"
             f"--------------------\n"
             f"{quality_txt}"
             f"Direction: {signal_direction}\n"
@@ -794,10 +819,13 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
             f"Exchange: OKX\n"
             f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
             f"[OK] Range Filter 5m: {(range_5m or 'N/A').upper()}\n"
-            f"[OK] ST AI 2H: {(st_2h or 'N/A').upper()}\n"
-            f"[OK] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
-            f"[OK] Zone ST Context 5m: {(ctx_5m or 'N/A').upper()}\n"
+            f"[INFO] ST AI 2H: {(st_2h or 'N/A').upper()}\n"
+            f"[INFO] Bias 2H: {(bias_2h or 'N/A').upper()}\n"
+            f"[INFO] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
+            f"[INFO] ST Context 2H: {(ctx_2h or 'NEUTRE').upper()}\n"
+            f"[INFO] Zone ST Context 5m: {(ctx_5m or 'NEUTRE').upper()}\n"
             f"[QUALITE] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
+            f"[ANTI-CHOP] ST Context 5m oppose: {ctx5m_opp_block}\n"
             f"[ANTI-CHOP] LT 5m: {(ctx_lt_5m or 'NEUTRE').upper()}",
             pos_key
         )
@@ -904,6 +932,7 @@ def webhook():
             state_changed = True
         elif bias_val in ('bull', 'bear', 'neutral') and tf == '2h':
             m['bias_2h'] = bias_val if bias_val != 'neutral' else None
+            m['bias_2h_ts'] = time.time()
             state_changed = True
         elif bias_val in ('bull', 'bear', 'neutral') and tf == '20m':
             m['bias_20m'] = bias_val if bias_val != 'neutral' else None
@@ -1442,7 +1471,7 @@ def startup():
         "🚀 <b>Scalping Bot démarré</b>\n"
         f"━━━━━━━━━━\n"
         f"📊 Assets: {len(CONFIG['SYMBOLS'])}\n"
-        f"SCALP: Range Filter 5m + ST AI 2H + Bias 30m + ST Context 5m\n"
+        f"SCALP: Range Filter 5m + entrees principale/secondaire/troisieme\n"
         f"Range Filter 5m: calcule par le bot via OKX\n"
         f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}"
         ,
