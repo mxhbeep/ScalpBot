@@ -35,15 +35,8 @@ CONFIG = {
     'PYRA_COOLDOWN':      1800,   # 30min pyramiding
 
     'SYMBOLS': {
-        'AVAX/USDT':    {'exchange': 'okx'},
         'BTC/USDT':     {'exchange': 'okx'},
         'ETH/USDT':     {'exchange': 'okx'},
-        'INJ/USDT':     {'exchange': 'okx'},
-        'LTC/USDT':     {'exchange': 'okx'},
-        'ONDO/USDT':    {'exchange': 'okx'},
-        'SOL/USDT':     {'exchange': 'okx'},
-        'SUI/USDT':     {'exchange': 'okx'},
-        'UNI/USDT':     {'exchange': 'okx'},
         'XRP/USDT':     {'exchange': 'okx'},
     }
 }
