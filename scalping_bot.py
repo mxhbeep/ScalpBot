@@ -737,7 +737,9 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
         ctx5m_opp_block = ctx_5m_fresh and ctx_5m == opp_ctx
         lt5m_same_block = ctx_lt_5m_fresh and ctx_lt_5m == exp_ctx
         antichop_block = ctx5m_opp_block or lt5m_same_block
-        primary_ok = st_2h_ok and bias_30m_ok and not antichop_block
+        # Entree principale : ST AI 30m est obligatoire pour reduire
+        # les faux signaux. Il ne s'agit plus d'un simple tag qualite.
+        primary_ok = st_2h_ok and st_30m_ok and bias_30m_ok and not antichop_block
         secondary_ok = bias_2h_ok and ctx_5m_ok and not lt5m_same_block
         third_ok = ctx_2h_ok and st_2h_ok and ctx_5m_ok and not lt5m_same_block
         scalp_all_ok = primary_ok or secondary_ok or third_ok
@@ -753,7 +755,7 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
             f"ctx5m={ctx_5m}/{exp_ctx} fresh={ctx_5m_fresh} ok={ctx_5m_ok} opp_block={ctx5m_opp_block} "
             f"lt5m={ctx_lt_5m}/{exp_ctx} fresh={ctx_lt_5m_fresh} same_block={lt5m_same_block} "
             f"primary={primary_ok} secondary={secondary_ok} third={third_ok} signal_type={signal_type} "
-            f"st30m_quality={st_30m_ok}"
+            f"st30m_required_primary={st_30m_ok}"
         )
 
         scalp_entry = False
@@ -799,7 +801,7 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
         }.get(pos.get('signal_type'), 'ENTREE')
         quality_txt = (
             ("<b>[QUALITE] ST Context 5m aligne</b>\n" if ctx_5m_ok else "")
-            + ("<b>[QUALITE] ST AI 30m aligne</b>\n" if st_30m_ok else "")
+            + ("<b>[OK] ST AI 30m aligne</b>\n" if st_30m_ok else "")
         )
         if quality_txt:
             quality_txt += "\n"
@@ -817,7 +819,7 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
             f"[INFO] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
             f"[INFO] ST Context 2H: {(ctx_2h or 'NEUTRE').upper()}\n"
             f"[INFO] Zone ST Context 5m: {(ctx_5m or 'NEUTRE').upper()}\n"
-            f"[QUALITE] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
+            f"[INFO] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
             f"[ANTI-CHOP] ST Context 5m oppose: {ctx5m_opp_block}\n"
             f"[ANTI-CHOP] LT 5m: {(ctx_lt_5m or 'NEUTRE').upper()}",
             pos_key
