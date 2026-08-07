@@ -65,7 +65,7 @@ def fetch_ohlcv_okx(symbol, tf, limit=100):
         logger.debug(f"[OKX] {symbol} {tf}: {e}")
         return None
 
-def calc_bias(df, ema_len=13, sma_len=30):
+def calc_bias(df, ema_len=17, sma_len=40):
     """Calcule le bias EMA/SMA."""
     try:
         if df is None or len(df) < sma_len:
@@ -181,12 +181,12 @@ def update_bias_20m():
                         results[symbol] = {'bias': None, 'price': None}
                         continue
                     df = build_confirmed_20m_candles(df_5m)
-                    if df is None or len(df) < 30:
+                    if df is None or len(df) < 40:
                         count = 0 if df is None else len(df)
-                        logger.info(f"[BIAS] {symbol} bias20m=None reason=insufficient_confirmed_candles ({count}/30)")
+                        logger.info(f"[BIAS] {symbol} bias20m=None reason=insufficient_confirmed_candles ({count}/40)")
                         results[symbol] = {'bias': None, 'price': None}
                         continue
-                    bias = calc_bias(df, ema_len=13, sma_len=30)
+                    bias = calc_bias(df, ema_len=17, sma_len=40)
                     price = float(df['close'].iloc[-1]) if len(df) else None
                     results[symbol] = {'bias': bias, 'price': price}
                     if bias is None:
@@ -416,6 +416,8 @@ def init_symbol(symbol):
             'st_context_5m':    None,
             'st_context_15m':   None,
             'st_context_15m_ts': None,
+            'st_context_30m':   None,
+            'st_context_30m_ts': None,
             'st_context_lt_5m': None,
             'st_context_lt_1h': None,
             'st_context_1h':    None,
@@ -713,49 +715,38 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
         opp_ctx = 'sell' if signal_direction == 'LONG' else 'buy'
 
         st_2h = m.get('st_ai_2h')
-        st_30m = m.get('st_ai_30m')
         bias_2h = m.get('bias_2h')
-        bias_30m = m.get('bias_30m')
         ctx_2h = m.get('st_context_2h')
         ctx_5m = m.get('st_context_5m')
-        ctx_lt_5m = m.get('st_context_lt_5m')
+        ctx_30m = m.get('st_context_30m')
 
         st_2h_fresh = bool(st_2h) and is_fresh(m.get('st_ai_2h_ts'), 6 * 3600)
-        st_30m_fresh = bool(st_30m) and is_fresh(m.get('st_ai_30m_ts'), 90 * 60)
         bias_2h_fresh = bool(bias_2h) and is_fresh(m.get('bias_2h_ts'), 6 * 3600)
-        bias_30m_fresh = bool(bias_30m) and is_fresh(m.get('bias_30m_ts'), 2 * 3600)
         ctx_2h_fresh = bool(ctx_2h) and is_fresh(m.get('st_context_2h_ts'), 6 * 3600)
         ctx_5m_fresh = bool(ctx_5m) and is_fresh(m.get('st_context_5m_ts'), 15 * 60)
-        ctx_lt_5m_fresh = bool(ctx_lt_5m) and is_fresh(m.get('st_context_lt_5m_ts'), 15 * 60)
+        ctx_30m_fresh = bool(ctx_30m) and is_fresh(m.get('st_context_30m_ts'), 90 * 60)
 
         st_2h_ok = st_2h_fresh and st_2h == exp_st
-        st_30m_ok = st_30m_fresh and st_30m == exp_st
         bias_2h_ok = bias_2h_fresh and bias_2h == exp_bias
-        bias_30m_ok = bias_30m_fresh and bias_30m == exp_bias
         ctx_2h_ok = ctx_2h_fresh and ctx_2h == exp_ctx
         ctx_5m_ok = ctx_5m_fresh and ctx_5m == exp_ctx
-        ctx5m_opp_block = ctx_5m_fresh and ctx_5m == opp_ctx
-        lt5m_same_block = ctx_lt_5m_fresh and ctx_lt_5m == exp_ctx
-        antichop_block = ctx5m_opp_block or lt5m_same_block
-        # Entree principale : ST AI 30m est obligatoire pour reduire
-        # les faux signaux. Il ne s'agit plus d'un simple tag qualite.
-        primary_ok = st_2h_ok and st_30m_ok and bias_30m_ok and not antichop_block
-        secondary_ok = bias_2h_ok and ctx_5m_ok and not lt5m_same_block
-        third_ok = ctx_2h_ok and st_2h_ok and ctx_5m_ok and not lt5m_same_block
-        scalp_all_ok = primary_ok or secondary_ok or third_ok
-        signal_type = 'troisieme' if third_ok else 'secondaire' if secondary_ok else 'principal' if primary_ok else 'blocked'
+        ctx30m_opp_block = ctx_30m_fresh and ctx_30m == opp_ctx
+        # Nouvelle structure : ancienne secondaire -> principale;
+        # ancienne troisieme -> secondaire. Le contexte 30m oppose bloque les deux.
+        primary_ok = bias_2h_ok and ctx_5m_ok and not ctx30m_opp_block
+        secondary_ok = st_2h_ok and ctx_2h_ok and ctx_5m_ok and not ctx30m_opp_block
+        scalp_all_ok = primary_ok or secondary_ok
+        signal_type = 'secondaire' if secondary_ok else 'principal' if primary_ok else 'blocked'
 
         logger.info(
             f"[SCALP RANGE CHECK] {symbol} dir={signal_direction} "
             f"range5m={range_5m}/{exp_st} "
             f"st2h={st_2h}/{exp_st} fresh={st_2h_fresh} ok={st_2h_ok} "
             f"bias2h={bias_2h}/{exp_bias} fresh={bias_2h_fresh} ok={bias_2h_ok} "
-            f"bias30m={bias_30m}/{exp_bias} fresh={bias_30m_fresh} ok={bias_30m_ok} "
             f"ctx2h={ctx_2h}/{exp_ctx} fresh={ctx_2h_fresh} ok={ctx_2h_ok} "
-            f"ctx5m={ctx_5m}/{exp_ctx} fresh={ctx_5m_fresh} ok={ctx_5m_ok} opp_block={ctx5m_opp_block} "
-            f"lt5m={ctx_lt_5m}/{exp_ctx} fresh={ctx_lt_5m_fresh} same_block={lt5m_same_block} "
-            f"primary={primary_ok} secondary={secondary_ok} third={third_ok} signal_type={signal_type} "
-            f"st30m_required_primary={st_30m_ok}"
+            f"ctx5m={ctx_5m}/{exp_ctx} fresh={ctx_5m_fresh} ok={ctx_5m_ok} "
+            f"ctx30m={ctx_30m}/{opp_ctx} fresh={ctx_30m_fresh} opp_block={ctx30m_opp_block} "
+            f"primary={primary_ok} secondary={secondary_ok} signal_type={signal_type}"
         )
 
         scalp_entry = False
@@ -785,8 +776,8 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
         elif not scalp_all_ok:
                 logger.info(
                     f"[SCALP BLOCKED] {symbol} dir={signal_direction} "
-                    f"primary={primary_ok} secondary={secondary_ok} third={third_ok} "
-                    f"ctx5m_opp_block={ctx5m_opp_block} lt5m_same_block={lt5m_same_block} "
+                    f"primary={primary_ok} secondary={secondary_ok} "
+                    f"ctx30m_opp_block={ctx30m_opp_block} "
                     f"pos={pos['direction'] if pos else None}"
                 )
 
@@ -797,11 +788,9 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
         entry_label = {
             'principal': 'ENTREE PRINCIPALE',
             'secondaire': 'ENTREE SECONDAIRE',
-            'troisieme': 'ENTREE TROISIEME',
         }.get(pos.get('signal_type'), 'ENTREE')
         quality_txt = (
             ("<b>[QUALITE] ST Context 5m aligne</b>\n" if ctx_5m_ok else "")
-            + ("<b>[OK] ST AI 30m aligne</b>\n" if st_30m_ok else "")
         )
         if quality_txt:
             quality_txt += "\n"
@@ -816,12 +805,9 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
             f"[OK] Range Filter 5m: {(range_5m or 'N/A').upper()}\n"
             f"[INFO] ST AI 2H: {(st_2h or 'N/A').upper()}\n"
             f"[INFO] Bias 2H: {(bias_2h or 'N/A').upper()}\n"
-            f"[INFO] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
             f"[INFO] ST Context 2H: {(ctx_2h or 'NEUTRE').upper()}\n"
             f"[INFO] Zone ST Context 5m: {(ctx_5m or 'NEUTRE').upper()}\n"
-            f"[INFO] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
-            f"[ANTI-CHOP] ST Context 5m oppose: {ctx5m_opp_block}\n"
-            f"[ANTI-CHOP] LT 5m: {(ctx_lt_5m or 'NEUTRE').upper()}",
+            f"[ANTI-CHOP] ST Context 30m oppose: {ctx30m_opp_block}",
             pos_key
         )
         if not tg_sent:
@@ -989,6 +975,10 @@ def webhook():
         elif tf == '15m':
             m['st_context_15m'] = ctx_parsed
             m['st_context_15m_ts'] = time.time()
+            state_changed = True
+        elif tf == '30m':
+            m['st_context_30m'] = ctx_parsed
+            m['st_context_30m_ts'] = time.time()
             state_changed = True
         elif tf == '2h':
             m['st_context_2h'] = ctx_parsed
