@@ -65,7 +65,7 @@ def fetch_ohlcv_okx(symbol, tf, limit=100):
         logger.debug(f"[OKX] {symbol} {tf}: {e}")
         return None
 
-def calc_bias(df, ema_len=17, sma_len=40):
+def calc_bias(df, ema_len=13, sma_len=30):
     """Calcule le bias EMA/SMA."""
     try:
         if df is None or len(df) < sma_len:
@@ -181,12 +181,12 @@ def update_bias_20m():
                         results[symbol] = {'bias': None, 'price': None}
                         continue
                     df = build_confirmed_20m_candles(df_5m)
-                    if df is None or len(df) < 40:
+                    if df is None or len(df) < 30:
                         count = 0 if df is None else len(df)
-                        logger.info(f"[BIAS] {symbol} bias20m=None reason=insufficient_confirmed_candles ({count}/40)")
+                        logger.info(f"[BIAS] {symbol} bias20m=None reason=insufficient_confirmed_candles ({count}/30)")
                         results[symbol] = {'bias': None, 'price': None}
                         continue
-                    bias = calc_bias(df, ema_len=17, sma_len=40)
+                    bias = calc_bias(df, ema_len=13, sma_len=30)
                     price = float(df['close'].iloc[-1]) if len(df) else None
                     results[symbol] = {'bias': bias, 'price': price}
                     if bias is None:
@@ -227,12 +227,12 @@ def update_bias_30m():
             for symbol in list(CONFIG['SYMBOLS'].keys()):
                 try:
                     df = fetch_ohlcv_okx(symbol, '30m', limit=80)
-                    if df is None or len(df) < 40:
+                    if df is None or len(df) < 30:
                         count = 0 if df is None else len(df)
-                        logger.info(f"[BIAS] {symbol} bias30m=None reason=insufficient_confirmed_candles ({count}/40)")
+                        logger.info(f"[BIAS] {symbol} bias30m=None reason=insufficient_confirmed_candles ({count}/30)")
                         results[symbol] = {'bias': None, 'price': None}
                         continue
-                    bias = calc_bias(df, ema_len=17, sma_len=40)
+                    bias = calc_bias(df, ema_len=13, sma_len=30)
                     price = float(df['close'].iloc[-1]) if len(df) else None
                     results[symbol] = {'bias': bias, 'price': price}
                     if bias is None:
@@ -416,8 +416,6 @@ def init_symbol(symbol):
             'st_context_5m':    None,
             'st_context_15m':   None,
             'st_context_15m_ts': None,
-            'st_context_30m':   None,
-            'st_context_30m_ts': None,
             'st_context_lt_5m': None,
             'st_context_lt_1h': None,
             'st_context_1h':    None,
@@ -715,38 +713,35 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
         opp_ctx = 'sell' if signal_direction == 'LONG' else 'buy'
 
         st_2h = m.get('st_ai_2h')
-        bias_2h = m.get('bias_2h')
-        ctx_2h = m.get('st_context_2h')
+        st_30m = m.get('st_ai_30m')
+        bias_30m = m.get('bias_30m')
         ctx_5m = m.get('st_context_5m')
-        ctx_30m = m.get('st_context_30m')
 
         st_2h_fresh = bool(st_2h) and is_fresh(m.get('st_ai_2h_ts'), 6 * 3600)
-        bias_2h_fresh = bool(bias_2h) and is_fresh(m.get('bias_2h_ts'), 6 * 3600)
-        ctx_2h_fresh = bool(ctx_2h) and is_fresh(m.get('st_context_2h_ts'), 6 * 3600)
+        st_30m_fresh = bool(st_30m) and is_fresh(m.get('st_ai_30m_ts'), 90 * 60)
+        bias_30m_fresh = bool(bias_30m) and is_fresh(m.get('bias_30m_ts'), 2 * 3600)
         ctx_5m_fresh = bool(ctx_5m) and is_fresh(m.get('st_context_5m_ts'), 15 * 60)
-        ctx_30m_fresh = bool(ctx_30m) and is_fresh(m.get('st_context_30m_ts'), 90 * 60)
 
         st_2h_ok = st_2h_fresh and st_2h == exp_st
-        bias_2h_ok = bias_2h_fresh and bias_2h == exp_bias
-        ctx_2h_ok = ctx_2h_fresh and ctx_2h == exp_ctx
+        st_30m_ok = st_30m_fresh and st_30m == exp_st
+        bias_30m_ok = bias_30m_fresh and bias_30m == exp_bias
         ctx_5m_ok = ctx_5m_fresh and ctx_5m == exp_ctx
-        ctx30m_opp_block = ctx_30m_fresh and ctx_30m == opp_ctx
-        # Nouvelle structure : ancienne secondaire -> principale;
-        # ancienne troisieme -> secondaire. Le contexte 30m oppose bloque les deux.
-        primary_ok = bias_2h_ok and ctx_5m_ok and not ctx30m_opp_block
-        secondary_ok = st_2h_ok and ctx_2h_ok and ctx_5m_ok and not ctx30m_opp_block
-        scalp_all_ok = primary_ok or secondary_ok
-        signal_type = 'secondaire' if secondary_ok else 'principal' if primary_ok else 'blocked'
+        ctx5m_opp_block = ctx_5m_fresh and ctx_5m == opp_ctx
+        antichop_block = ctx5m_opp_block
+        primary_ok = st_2h_ok and bias_30m_ok and not antichop_block
+        secondary_ok = False
+        third_ok = False
+        scalp_all_ok = primary_ok or secondary_ok or third_ok
+        signal_type = 'troisieme' if third_ok else 'secondaire' if secondary_ok else 'principal' if primary_ok else 'blocked'
 
         logger.info(
             f"[SCALP RANGE CHECK] {symbol} dir={signal_direction} "
             f"range5m={range_5m}/{exp_st} "
             f"st2h={st_2h}/{exp_st} fresh={st_2h_fresh} ok={st_2h_ok} "
-            f"bias2h={bias_2h}/{exp_bias} fresh={bias_2h_fresh} ok={bias_2h_ok} "
-            f"ctx2h={ctx_2h}/{exp_ctx} fresh={ctx_2h_fresh} ok={ctx_2h_ok} "
-            f"ctx5m={ctx_5m}/{exp_ctx} fresh={ctx_5m_fresh} ok={ctx_5m_ok} "
-            f"ctx30m={ctx_30m}/{opp_ctx} fresh={ctx_30m_fresh} opp_block={ctx30m_opp_block} "
-            f"primary={primary_ok} secondary={secondary_ok} signal_type={signal_type}"
+            f"bias30m={bias_30m}/{exp_bias} fresh={bias_30m_fresh} ok={bias_30m_ok} "
+            f"ctx5m={ctx_5m}/{exp_ctx} fresh={ctx_5m_fresh} ok={ctx_5m_ok} opp_block={ctx5m_opp_block} "
+            f"primary={primary_ok} secondary={secondary_ok} third={third_ok} signal_type={signal_type} "
+            f"st30m_quality={st_30m_ok}"
         )
 
         scalp_entry = False
@@ -776,8 +771,8 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
         elif not scalp_all_ok:
                 logger.info(
                     f"[SCALP BLOCKED] {symbol} dir={signal_direction} "
-                    f"primary={primary_ok} secondary={secondary_ok} "
-                    f"ctx30m_opp_block={ctx30m_opp_block} "
+                    f"primary={primary_ok} secondary={secondary_ok} third={third_ok} "
+                    f"ctx5m_opp_block={ctx5m_opp_block} "
                     f"pos={pos['direction'] if pos else None}"
                 )
 
@@ -788,9 +783,11 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
         entry_label = {
             'principal': 'ENTREE PRINCIPALE',
             'secondaire': 'ENTREE SECONDAIRE',
+            'troisieme': 'ENTREE TROISIEME',
         }.get(pos.get('signal_type'), 'ENTREE')
         quality_txt = (
             ("<b>[QUALITE] ST Context 5m aligne</b>\n" if ctx_5m_ok else "")
+            + ("<b>[QUALITE] ST AI 30m aligne</b>\n" if st_30m_ok else "")
         )
         if quality_txt:
             quality_txt += "\n"
@@ -804,10 +801,10 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
             f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
             f"[OK] Range Filter 5m: {(range_5m or 'N/A').upper()}\n"
             f"[INFO] ST AI 2H: {(st_2h or 'N/A').upper()}\n"
-            f"[INFO] Bias 2H: {(bias_2h or 'N/A').upper()}\n"
-            f"[INFO] ST Context 2H: {(ctx_2h or 'NEUTRE').upper()}\n"
+            f"[INFO] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
             f"[INFO] Zone ST Context 5m: {(ctx_5m or 'NEUTRE').upper()}\n"
-            f"[ANTI-CHOP] ST Context 30m oppose: {ctx30m_opp_block}",
+            f"[QUALITE] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
+            f"[ANTI-CHOP] ST Context 5m oppose: {ctx5m_opp_block}",
             pos_key
         )
         if not tg_sent:
@@ -976,10 +973,6 @@ def webhook():
             m['st_context_15m'] = ctx_parsed
             m['st_context_15m_ts'] = time.time()
             state_changed = True
-        elif tf == '30m':
-            m['st_context_30m'] = ctx_parsed
-            m['st_context_30m_ts'] = time.time()
-            state_changed = True
         elif tf == '2h':
             m['st_context_2h'] = ctx_parsed
             m['st_context_2h_ts'] = time.time()
@@ -1085,13 +1078,13 @@ def webhook():
                 )
 
     # ==================================================================
-    # Logique SCALP
-    # Entree : ST AI 2H + Bias 30m + Zone ST Context 1m
+    # Logique SCALP secondaire
+    # Entree secondaire : ST AI 2H + Bias 30m + Zone ST Context 1m
     # Qualite : ST AI 30m aligne
-    # Warning non bloquant : Zone ST Context 5m opposee
+    # Anti-chop : Zone ST Context 5m opposee
     # ==================================================================
 
-    if False and alert_type in ('st_context', 'supertrend', 'bias') and tf in ('1m', '5m', '30m', '2h'):
+    if alert_type == 'st_context' and tf == '1m':
         st_2h = m.get('st_ai_2h')
         st_30m = m.get('st_ai_30m')
         bias_30m = m.get('bias_30m')
@@ -1102,7 +1095,7 @@ def webhook():
         st_2h_fresh = bool(st_2h) and is_fresh(m.get('st_ai_2h_ts'), 6 * 3600)
         st_30m_fresh = bool(st_30m) and is_fresh(m.get('st_ai_30m_ts'), 90 * 60)
 
-        should_evaluate = alert_type == 'st_context' and tf == '1m' and ctx_1m_fresh
+        should_evaluate = ctx_1m_fresh
         if not should_evaluate:
             if state_changed:
                 persist_state()
@@ -1123,11 +1116,11 @@ def webhook():
 
         st_2h_ok = st_2h_fresh and st_2h == exp_st_2h
         st_30m_ok = st_30m_fresh and st_30m == exp_st_30m
-        bias_30m_ok = bias_30m == exp_bias
+        bias_30m_ok = bias_30m_fresh and bias_30m == exp_bias
         ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_ctx
         ctx5m_opp_block = ctx_5m_fresh and ctx_5m == opp_ctx
         quality_30m = st_30m_ok
-        all_ok = st_2h_ok and bias_30m_ok and ctx_1m_ok
+        all_ok = st_2h_ok and bias_30m_ok and ctx_1m_ok and not ctx5m_opp_block
 
         pos_key = f"{symbol}_SCALP"
         is_pyra = False
@@ -1139,11 +1132,11 @@ def webhook():
                 pos = None
 
             candidate = bool(all_ok and pos is None)
-            if candidate and should_send(symbol, f"scalp_entry_{exp_ctx}", event_id=event_id, cooldown=1800):
+            if candidate and should_send(symbol, f"scalp_entry_secondaire_{exp_ctx}", event_id=event_id, cooldown=1800):
                 SCALP_POSITIONS[pos_key] = {
                     'direction': signal_direction,
                     'entry_count': 1,
-                    'signal_type': 'scalp_1m',
+                    'signal_type': 'secondaire',
                 }
                 PYRA_ENABLED.pop(pos_key, None)
                 pos = SCALP_POSITIONS[pos_key]
@@ -1151,7 +1144,7 @@ def webhook():
             else:
                 is_entry = False
                 # Pyramiding : position deja ouverte + nouvelle zone ST Context 1m dans le meme sens
-                if (pos and pos['direction'] == signal_direction and st_2h_ok and bias_30m_ok and ctx_1m_ok
+                if (pos and pos['direction'] == signal_direction and st_2h_ok and bias_30m_ok and ctx_1m_ok and not ctx5m_opp_block
                         and PYRA_ENABLED.get(pos_key, False)
                         and should_send(symbol, f"scalp_pyra_{exp_ctx}", event_id=event_id, cooldown=CONFIG['PYRA_COOLDOWN'])):
                     pos['entry_count'] += 1
@@ -1161,21 +1154,17 @@ def webhook():
                         f"[SCALP BLOCKED] {symbol} dir={signal_direction} "
                         f"st2h={st_2h}/{exp_st_2h} fresh={st_2h_fresh} ok={st_2h_ok} "
                         f"st30m={st_30m}/{exp_st_30m} fresh={st_30m_fresh} ok={st_30m_ok} "
-                        f"bias30m={bias_30m}/{exp_bias} ok={bias_30m_ok} "
+                        f"bias30m={bias_30m}/{exp_bias} fresh={bias_30m_fresh} ok={bias_30m_ok} "
                         f"ctx1m={ctx_1m}/{exp_ctx} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
                         f"ctx5m={ctx_5m}/{opp_ctx} fresh={ctx_5m_fresh} opp_block={ctx5m_opp_block} "
                         f"quality30m={quality_30m} pos={pos['direction'] if pos else None}"
                     )
 
         if is_entry and pos:
-            title = f"<b>SCALP {signal_direction}</b> {symbol}"
+            title = f"<b>SCALP {signal_direction} - ENTREE SECONDAIRE</b> {symbol}"
             quality_txt = (
                 "<b>⭐ SCALP HAUTE QUALITE</b> (ST AI 30m aligne)\n\n"
                 if quality_30m else ""
-            )
-            warning_5m_txt = (
-                "[WARNING NON BLOQUANT] Zone ST Context 5m opposee\n"
-                if ctx5m_opp_block else ""
             )
             tg_sent = send_telegram_with_buttons(
                 f"{title}\n"
@@ -1189,7 +1178,7 @@ def webhook():
                 f"[QUALITE] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
                 f"[INFO] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
                 f"[OK] Zone ST Context 1m: {(ctx_1m or 'N/A').upper()}\n"
-                f"{warning_5m_txt}"
+                f"[ANTI-CHOP] Zone ST Context 5m opposee: {ctx5m_opp_block}\n"
                 f"[INFO] Zone ST Context 5m: {(ctx_5m or 'NEUTRE').upper()}",
                 pos_key
             )
