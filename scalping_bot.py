@@ -150,6 +150,17 @@ def calc_range_filter_signal(df, per=100, mult=3.0):
         logger.debug(f"[RANGE] calc exception", exc_info=True)
         return None
 
+def keep_confirmed_candles(df, timeframe_minutes):
+    """Retourne uniquement les bougies dont la cloture est deja passee."""
+    if df is None or df.empty:
+        return None
+    duration_ms = int(timeframe_minutes * 60 * 1000)
+    now_ms = int(time.time() * 1000)
+    confirmed = df[df['ts'].astype('int64') + duration_ms <= now_ms].copy()
+    if confirmed.empty:
+        return None
+    return confirmed.reset_index(drop=True)
+
 def build_confirmed_20m_candles(df_5m):
     """Agrège quatre bougies 5m confirmées sur les bornes UTC de 20 minutes."""
     if df_5m is None or df_5m.empty:
@@ -266,7 +277,8 @@ def update_range_filter_5m():
             for symbol in list(CONFIG['SYMBOLS'].keys()):
                 try:
                     df = fetch_ohlcv_okx(symbol, '5m', limit=260)
-                    signal = calc_range_filter_signal(df, per=100, mult=3.0)
+                    df_confirmed = keep_confirmed_candles(df, 5)
+                    signal = calc_range_filter_signal(df_confirmed, per=100, mult=3.0)
                     if signal is None:
                         continue
 
