@@ -1079,23 +1079,24 @@ def webhook():
 
     # ==================================================================
     # Logique SCALP secondaire
-    # Entree secondaire : ST AI 2H + Bias 30m + Zone ST Context 1m
+    # Entree secondaire : ST AI 2H + ST Context 2H + ST Context 5m
     # Qualite : ST AI 30m aligne
-    # Anti-chop : Zone ST Context 5m opposee
     # ==================================================================
 
-    if alert_type == 'st_context' and tf == '1m':
+    if (
+        (alert_type == 'st_context' and tf in ('2h', '5m'))
+        or (alert_type == 'supertrend' and tf == '2h')
+    ):
         st_2h = m.get('st_ai_2h')
         st_30m = m.get('st_ai_30m')
-        bias_30m = m.get('bias_30m')
-        ctx_1m = m.get('st_context_1m')
+        ctx_2h = m.get('st_context_2h')
         ctx_5m = m.get('st_context_5m')
-        ctx_1m_fresh = bool(ctx_1m) and is_fresh(m.get('st_context_1m_ts'), 5 * 60)
+        ctx_2h_fresh = bool(ctx_2h) and is_fresh(m.get('st_context_2h_ts'), 6 * 3600)
         ctx_5m_fresh = bool(ctx_5m) and is_fresh(m.get('st_context_5m_ts'), 15 * 60)
         st_2h_fresh = bool(st_2h) and is_fresh(m.get('st_ai_2h_ts'), 6 * 3600)
         st_30m_fresh = bool(st_30m) and is_fresh(m.get('st_ai_30m_ts'), 90 * 60)
 
-        should_evaluate = ctx_1m_fresh
+        should_evaluate = bool(st_2h_fresh and ctx_2h_fresh and ctx_5m_fresh)
         if not should_evaluate:
             if state_changed:
                 persist_state()
@@ -1107,20 +1108,17 @@ def webhook():
                 persist_state()
             return jsonify({'status': 'ok', 'enabled': False}), 200
 
-        signal_direction = 'LONG' if ctx_1m == 'buy' else 'SHORT'
+        signal_direction = 'LONG' if ctx_5m == 'buy' else 'SHORT'
         exp_st_2h = 'buy' if signal_direction == 'LONG' else 'sell'
         exp_st_30m = exp_st_2h
-        exp_bias = 'bull' if signal_direction == 'LONG' else 'bear'
         exp_ctx = 'buy' if signal_direction == 'LONG' else 'sell'
-        opp_ctx = 'sell' if signal_direction == 'LONG' else 'buy'
 
         st_2h_ok = st_2h_fresh and st_2h == exp_st_2h
         st_30m_ok = st_30m_fresh and st_30m == exp_st_30m
-        bias_30m_ok = bias_30m_fresh and bias_30m == exp_bias
-        ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_ctx
-        ctx5m_opp_block = ctx_5m_fresh and ctx_5m == opp_ctx
+        ctx_2h_ok = ctx_2h_fresh and ctx_2h == exp_ctx
+        ctx_5m_ok = ctx_5m_fresh and ctx_5m == exp_ctx
         quality_30m = st_30m_ok
-        all_ok = st_2h_ok and bias_30m_ok and ctx_1m_ok and not ctx5m_opp_block
+        all_ok = st_2h_ok and ctx_2h_ok and ctx_5m_ok
 
         pos_key = f"{symbol}_SCALP"
         is_pyra = False
@@ -1143,8 +1141,8 @@ def webhook():
                 is_entry = True
             else:
                 is_entry = False
-                # Pyramiding : position deja ouverte + nouvelle zone ST Context 1m dans le meme sens
-                if (pos and pos['direction'] == signal_direction and st_2h_ok and bias_30m_ok and ctx_1m_ok and not ctx5m_opp_block
+                # Pyramiding : position deja ouverte + nouvelle zone ST Context 5m dans le meme sens
+                if (pos and pos['direction'] == signal_direction and st_2h_ok and ctx_2h_ok and ctx_5m_ok
                         and PYRA_ENABLED.get(pos_key, False)
                         and should_send(symbol, f"scalp_pyra_{exp_ctx}", event_id=event_id, cooldown=CONFIG['PYRA_COOLDOWN'])):
                     pos['entry_count'] += 1
@@ -1154,9 +1152,8 @@ def webhook():
                         f"[SCALP BLOCKED] {symbol} dir={signal_direction} "
                         f"st2h={st_2h}/{exp_st_2h} fresh={st_2h_fresh} ok={st_2h_ok} "
                         f"st30m={st_30m}/{exp_st_30m} fresh={st_30m_fresh} ok={st_30m_ok} "
-                        f"bias30m={bias_30m}/{exp_bias} fresh={bias_30m_fresh} ok={bias_30m_ok} "
-                        f"ctx1m={ctx_1m}/{exp_ctx} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
-                        f"ctx5m={ctx_5m}/{opp_ctx} fresh={ctx_5m_fresh} opp_block={ctx5m_opp_block} "
+                        f"ctx2h={ctx_2h}/{exp_ctx} fresh={ctx_2h_fresh} ok={ctx_2h_ok} "
+                        f"ctx5m={ctx_5m}/{exp_ctx} fresh={ctx_5m_fresh} ok={ctx_5m_ok} "
                         f"quality30m={quality_30m} pos={pos['direction'] if pos else None}"
                     )
 
@@ -1176,10 +1173,8 @@ def webhook():
                 f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
                 f"[INFO] ST AI 2H: {(st_2h or 'N/A').upper()}\n"
                 f"[QUALITE] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
-                f"[INFO] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
-                f"[OK] Zone ST Context 1m: {(ctx_1m or 'N/A').upper()}\n"
-                f"[ANTI-CHOP] Zone ST Context 5m opposee: {ctx5m_opp_block}\n"
-                f"[INFO] Zone ST Context 5m: {(ctx_5m or 'NEUTRE').upper()}",
+                f"[OK] Zone ST Context 2H: {(ctx_2h or 'N/A').upper()}\n"
+                f"[OK] Zone ST Context 5m: {(ctx_5m or 'N/A').upper()}",
                 pos_key
             )
             if not tg_sent:
@@ -1196,11 +1191,10 @@ def webhook():
                 f"Price: ${format_price(price)}\n"
                 f"Exchange: OKX\n"
                 f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-                f"[OK] Nouvelle zone ST Context 1m: {(ctx_1m or 'N/A').upper()}\n"
+                f"[OK] Nouvelle zone ST Context 5m: {(ctx_5m or 'N/A').upper()}\n"
                 f"[INFO] ST AI 2H: {(st_2h or 'N/A').upper()}\n"
                 f"[QUALITE] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
-                f"[INFO] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
-                f"[INFO] Zone ST Context 5m: {(ctx_5m or 'NEUTRE').upper()}"
+                f"[INFO] Zone ST Context 2H: {(ctx_2h or 'NEUTRE').upper()}"
             )
             logger.info(f"[SCALP] Pyramiding #{pos['entry_count']}: {symbol} {signal_direction}")
             state_changed = True
