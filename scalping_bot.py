@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot - ST AI 2H + Bias 30m + Context 1m
+# Scalping Bot - ST AI 2H + Bias 30m + Williams 30m + Context 1m + RF1m
 # Tag haute qualite - ST Context 1H aligne
 # Service Railway séparé
 
@@ -58,6 +58,8 @@ def fetch_ohlcv_okx(symbol, tf, limit=100):
             return None
         df = pd.DataFrame(data, columns=['ts','o','h','l','c','vol','volCcy','volCcyQuote','confirm'])
         df = df[df['confirm'] == '1'].copy()
+        df['high'] = df['h'].astype(float)
+        df['low'] = df['l'].astype(float)
         df['close'] = df['c'].astype(float)
         df = df.iloc[::-1].reset_index(drop=True)
         return df
@@ -81,6 +83,58 @@ def calc_bias(df, ema_len=13, sma_len=30):
         return None
     except:
         return None
+
+def calc_williams_ema(df, length=14, ema_length=14):
+    """Calcule Williams %R et son EMA."""
+    try:
+        if df is None or len(df) < length + ema_length:
+            return None
+        high = df['high'].astype(float)
+        low = df['low'].astype(float)
+        close = df['close'].astype(float)
+        upper = high.rolling(length).max()
+        lower = low.rolling(length).min()
+        spread = upper - lower
+        williams = 100.0 * (close - upper) / spread.where(spread != 0)
+        williams_ema = williams.ewm(span=ema_length, adjust=False).mean()
+        value = float(williams.iloc[-1])
+        ema_value = float(williams_ema.iloc[-1])
+        if pd.isna(value) or pd.isna(ema_value):
+            return None
+        return {
+            'value': value,
+            'ema': ema_value,
+            'trend': 'bull' if value > ema_value else 'bear' if value < ema_value else 'neutral',
+        }
+    except Exception as e:
+        logger.debug(f"[WILLIAMS] Calcul impossible: {e}")
+        return None
+
+def get_williams_filter(symbol, timeframe, direction, max_age_seconds):
+    expected_trend = 'bull' if str(direction or '').upper() == 'LONG' else 'bear'
+    key = f'williams_{timeframe}'
+    ts_key = f'{key}_ts'
+    data = dict(MOMENTUM_STATE.get(symbol, {}).get(key) or {})
+    ts = MOMENTUM_STATE.get(symbol, {}).get(ts_key)
+    fresh = bool(data) and is_fresh(ts, max_age_seconds)
+    trend = data.get('trend')
+    return {
+        'data': data,
+        'fresh': fresh,
+        'ok': fresh and trend == expected_trend,
+        'trend': trend,
+        'value': data.get('value'),
+        'ema': data.get('ema'),
+    }
+
+def format_williams_filter_line(label, williams_filter):
+    value = williams_filter.get('value')
+    ema_value = williams_filter.get('ema')
+    trend = williams_filter.get('trend')
+    if value is None or ema_value is None:
+        return f"[OK] Williams {label}: N/A"
+    relation = ">" if trend == 'bull' else "<" if trend == 'bear' else "="
+    return f"[OK] Williams {label}: W%R {value:.2f} {relation} EMA14 {ema_value:.2f}"
 
 def calc_range_filter_signal(df, per=100, mult=3.0):
     """Reproduit le Range Filter Pine et retourne le dernier signal confirme."""
@@ -198,8 +252,9 @@ def update_bias_20m():
                         results[symbol] = {'bias': None, 'price': None}
                         continue
                     bias = calc_bias(df, ema_len=13, sma_len=30)
+                    williams_30m = calc_williams_ema(df, length=14, ema_length=14)
                     price = float(df['close'].iloc[-1]) if len(df) else None
-                    results[symbol] = {'bias': bias, 'price': price}
+                    results[symbol] = {'bias': bias, 'price': price, 'williams_30m': williams_30m}
                     if bias is None:
                         logger.info(f"[BIAS] {symbol} bias20m=None reason=neutral (pas d'alignement close/EMA/SMA)")
                     else:
@@ -244,8 +299,9 @@ def update_bias_30m():
                         results[symbol] = {'bias': None, 'price': None}
                         continue
                     bias = calc_bias(df, ema_len=13, sma_len=30)
+                    williams_30m = calc_williams_ema(df, length=14, ema_length=14)
                     price = float(df['close'].iloc[-1]) if len(df) else None
-                    results[symbol] = {'bias': bias, 'price': price}
+                    results[symbol] = {'bias': bias, 'price': price, 'williams_30m': williams_30m}
                     if bias is None:
                         logger.info(f"[BIAS] {symbol} bias30m=None reason=neutral")
                     else:
@@ -260,6 +316,9 @@ def update_bias_30m():
                     init_symbol(symbol)
                     MOMENTUM_STATE[symbol]['bias_30m'] = result.get('bias')
                     MOMENTUM_STATE[symbol]['bias_30m_ts'] = time.time()
+                    if result.get('williams_30m') is not None:
+                        MOMENTUM_STATE[symbol]['williams_30m'] = result.get('williams_30m')
+                        MOMENTUM_STATE[symbol]['williams_30m_ts'] = time.time()
 
             persist_state()
             bias_ok_count = sum(1 for r in results.values() if r.get('bias') is not None)
@@ -269,15 +328,15 @@ def update_bias_30m():
             logger.error(f"[BIAS] Erreur Bias 30m: {e}")
         time.sleep(300)
 
-def update_range_filter_5m():
-    """Calcule le Range Filter 5m depuis OKX et declenche les strategies scalp."""
-    logger.info("Scheduler Range Filter 5m demarre")
+def update_range_filter_1m():
+    """Calcule le Range Filter 1m depuis OKX et declenche les strategies scalp."""
+    logger.info("Scheduler Range Filter 1m demarre")
     while True:
         try:
             for symbol in list(CONFIG['SYMBOLS'].keys()):
                 try:
-                    df = fetch_ohlcv_okx(symbol, '5m', limit=260)
-                    df_confirmed = keep_confirmed_candles(df, 5)
+                    df = fetch_ohlcv_okx(symbol, '1m', limit=260)
+                    df_confirmed = keep_confirmed_candles(df, 1)
                     signal = calc_range_filter_signal(df_confirmed, per=100, mult=3.0)
                     if signal is None:
                         continue
@@ -290,22 +349,22 @@ def update_range_filter_5m():
                     with STATE_LOCK:
                         init_symbol(symbol)
                         m = MOMENTUM_STATE[symbol]
-                        if m.get('last_range_filter_5m_signal_ts') != signal_ts:
-                            m['last_range_filter_5m_signal_ts'] = signal_ts
+                        if m.get('last_range_filter_1m_signal_ts') != signal_ts:
+                            m['last_range_filter_1m_signal_ts'] = signal_ts
                             should_process = True
 
                     if not should_process:
                         continue
 
                     logger.info(
-                        f"[RANGE] Nouveau signal 5m {symbol} "
+                        f"[RANGE] Nouveau signal 1m {symbol} "
                         f"dir={direction} ts={signal_ts} price={signal_price}"
                     )
                     evaluate_range_scalp_signal(
                         symbol=symbol,
-                        range_5m=direction,
+                        range_1m=direction,
                         price=signal_price,
-                        event_id=f"okx_range_5m_{signal_ts}",
+                        event_id=f"okx_range_1m_{signal_ts}",
                     )
                 except Exception as e:
                     logger.info(f"[RANGE] {symbol} reason=exception:{e}")
@@ -409,9 +468,14 @@ def init_symbol(symbol):
             'bias_20m':       None,
             'bias_30m':       None,
             'bias_30m_ts':    None,
+            'williams_30m':    None,
+            'williams_30m_ts': None,
             'range_filter_5m': None,
             'range_filter_5m_ts': None,
             'last_range_filter_5m_signal_ts': None,
+            'range_filter_1m': None,
+            'range_filter_1m_ts': None,
+            'last_range_filter_1m_signal_ts': None,
             'last_st_15m':    None,
             'last_st_1h':     None,
             'st_4h_flipped':  False,
@@ -705,20 +769,20 @@ def send_light_alert(direction: str) -> bool:
         logger.warning(f"[LIGHTS] Echec alerte {command}")
     return sent
 
-def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
-    """Evalue SCALP sur un signal Range Filter 5m confirme."""
+def evaluate_range_scalp_signal(symbol, range_1m, price, event_id):
+    """Evalue SCALP sur un signal Range Filter 1m confirme."""
     with STATE_LOCK:
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
-        m['range_filter_5m'] = range_5m
-        m['range_filter_5m_ts'] = time.time()
+        m['range_filter_1m'] = range_1m
+        m['range_filter_1m_ts'] = time.time()
 
         if not SCALP_ENABLED:
             logger.info(f"[SCALP OFF] Signal ignore: {symbol}")
             persist_state()
             return
 
-        signal_direction = 'LONG' if range_5m == 'buy' else 'SHORT'
+        signal_direction = 'LONG' if range_1m == 'buy' else 'SHORT'
         exp_st = 'buy' if signal_direction == 'LONG' else 'sell'
         exp_bias = 'bull' if signal_direction == 'LONG' else 'bear'
         exp_ctx = exp_st
@@ -727,20 +791,23 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
         st_2h = m.get('st_ai_2h')
         st_30m = m.get('st_ai_30m')
         bias_30m = m.get('bias_30m')
-        ctx_5m = m.get('st_context_5m')
+        ctx_1m = m.get('st_context_1m')
+        ctx_lt_1m = m.get('st_context_lt_1m')
+        williams_30m = get_williams_filter(symbol, '30m', signal_direction, 2 * 3600)
 
         st_2h_fresh = bool(st_2h) and is_fresh(m.get('st_ai_2h_ts'), 6 * 3600)
         st_30m_fresh = bool(st_30m) and is_fresh(m.get('st_ai_30m_ts'), 90 * 60)
         bias_30m_fresh = bool(bias_30m) and is_fresh(m.get('bias_30m_ts'), 2 * 3600)
-        ctx_5m_fresh = bool(ctx_5m) and is_fresh(m.get('st_context_5m_ts'), 15 * 60)
+        ctx_1m_fresh = bool(ctx_1m) and is_fresh(m.get('st_context_1m_ts'), 5 * 60)
+        ctx_lt_1m_fresh = bool(ctx_lt_1m) and is_fresh(m.get('st_context_lt_1m_ts'), 5 * 60)
 
         st_2h_ok = st_2h_fresh and st_2h == exp_st
         st_30m_ok = st_30m_fresh and st_30m == exp_st
         bias_30m_ok = bias_30m_fresh and bias_30m == exp_bias
-        ctx_5m_ok = ctx_5m_fresh and ctx_5m == exp_ctx
-        ctx5m_opp_block = ctx_5m_fresh and ctx_5m == opp_ctx
-        antichop_block = ctx5m_opp_block
-        primary_ok = st_2h_ok and bias_30m_ok and not antichop_block
+        ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_ctx
+        lt1m_same_block = ctx_lt_1m_fresh and ctx_lt_1m == exp_ctx
+        antichop_block = lt1m_same_block
+        primary_ok = st_2h_ok and bias_30m_ok and williams_30m['ok'] and ctx_1m_ok and not antichop_block
         secondary_ok = False
         third_ok = False
         scalp_all_ok = primary_ok or secondary_ok or third_ok
@@ -748,10 +815,12 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
 
         logger.info(
             f"[SCALP RANGE CHECK] {symbol} dir={signal_direction} "
-            f"range5m={range_5m}/{exp_st} "
+            f"range1m={range_1m}/{exp_st} "
             f"st2h={st_2h}/{exp_st} fresh={st_2h_fresh} ok={st_2h_ok} "
             f"bias30m={bias_30m}/{exp_bias} fresh={bias_30m_fresh} ok={bias_30m_ok} "
-            f"ctx5m={ctx_5m}/{exp_ctx} fresh={ctx_5m_fresh} ok={ctx_5m_ok} opp_block={ctx5m_opp_block} "
+            f"will30m={williams_30m['trend']} fresh={williams_30m['fresh']} ok={williams_30m['ok']} "
+            f"ctx1m={ctx_1m}/{exp_ctx} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
+            f"lt1m={ctx_lt_1m}/{exp_ctx} fresh={ctx_lt_1m_fresh} same_block={lt1m_same_block} "
             f"primary={primary_ok} secondary={secondary_ok} third={third_ok} signal_type={signal_type} "
             f"st30m_quality={st_30m_ok}"
         )
@@ -784,7 +853,7 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
                 logger.info(
                     f"[SCALP BLOCKED] {symbol} dir={signal_direction} "
                     f"primary={primary_ok} secondary={secondary_ok} third={third_ok} "
-                    f"ctx5m_opp_block={ctx5m_opp_block} "
+                    f"lt1m_same_block={lt1m_same_block} "
                     f"pos={pos['direction'] if pos else None}"
                 )
 
@@ -798,8 +867,7 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
             'troisieme': 'ENTREE TROISIEME',
         }.get(pos.get('signal_type'), 'ENTREE')
         quality_txt = (
-            ("<b>[QUALITE] ST Context 5m aligne</b>\n" if ctx_5m_ok else "")
-            + ("<b>[QUALITE] ST AI 30m aligne</b>\n" if st_30m_ok else "")
+            ("<b>[QUALITE] ST AI 30m aligne</b>\n" if st_30m_ok else "")
         )
         if quality_txt:
             quality_txt += "\n"
@@ -811,12 +879,13 @@ def evaluate_range_scalp_signal(symbol, range_5m, price, event_id):
             f"Price: ${format_price(price)}\n"
             f"Exchange: OKX\n"
             f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-            f"[OK] Range Filter 5m: {(range_5m or 'N/A').upper()}\n"
+            f"[OK] Flip Range Filter 1m: {(range_1m or 'N/A').upper()}\n"
             f"[INFO] ST AI 2H: {(st_2h or 'N/A').upper()}\n"
             f"[INFO] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
-            f"[INFO] Zone ST Context 5m: {(ctx_5m or 'NEUTRE').upper()}\n"
+            f"{format_williams_filter_line('30m', williams_30m)}\n"
+            f"[INFO] Zone ST Context 1m: {(ctx_1m or 'NEUTRE').upper()}\n"
             f"[QUALITE] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
-            f"[ANTI-CHOP] ST Context 5m oppose: {ctx5m_opp_block}",
+            f"[ANTI-CHOP] LT 1m meme sens: {lt1m_same_block}",
             pos_key
         )
         if not tg_sent:
@@ -937,7 +1006,7 @@ def webhook():
         if parsed is None:
             logger.warning(f"[WEBHOOK] Range Filter invalide: {symbol} tf={tf} value={val!r}")
             return jsonify({'status': 'ignored', 'reason': 'invalid_range_filter'}), 200
-        if tf == '5m':
+        if tf == '1m':
             evaluate_range_scalp_signal(symbol, parsed, price, event_id)
             return jsonify({'status': 'ok'}), 200
             
@@ -1418,7 +1487,7 @@ def startup():
             logger.warning(f"⚠️ Webhook setup: {e}")
 
     threading.Thread(target=update_bias_30m, daemon=True).start()
-    threading.Thread(target=update_range_filter_5m, daemon=True).start()
+    threading.Thread(target=update_range_filter_1m, daemon=True).start()
 
     # Sync état 4H depuis bot principal au démarrage
     main_url     = os.environ.get('MAIN_BOT_URL', '').rstrip('/')
@@ -1451,8 +1520,8 @@ def startup():
         "🚀 <b>Scalping Bot démarré</b>\n"
         f"━━━━━━━━━━\n"
         f"📊 Assets: {len(CONFIG['SYMBOLS'])}\n"
-        f"SCALP: Range Filter 5m + entrees principale/secondaire/troisieme\n"
-        f"Range Filter 5m: calcule par le bot via OKX\n"
+        f"SCALP: Range Filter 1m + ST AI 2H + Bias 30m + Williams 30m + Context 1m\n"
+        f"Range Filter 1m: calcule par le bot via OKX\n"
         f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}"
         ,
         ntfy=False,
