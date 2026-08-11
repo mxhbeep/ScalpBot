@@ -1462,6 +1462,75 @@ def reset():
 # DÉMARRAGE
 # ============================================================================
 
+def scalp_required_tv_signals():
+    return [
+        {
+            'label': 'ST AI 2H',
+            'field': 'st_ai_2h_ts',
+            'max_age': 6 * 3600,
+            'warmup': 7 * 3600,
+        },
+        {
+            'label': 'ST Context 1m',
+            'field': 'st_context_1m_ts',
+            'max_age': 5 * 60,
+            'warmup': 10 * 60,
+        },
+        {
+            'label': 'ST Context LT 1m',
+            'field': 'st_context_lt_1m_ts',
+            'max_age': 5 * 60,
+            'warmup': 10 * 60,
+        },
+    ]
+
+
+def scalp_tv_signal_watchdog():
+    """Surveille les webhooks TradingView critiques du scalpbot, asset par asset."""
+    bot_start_time = time.time()
+    time.sleep(10 * 60)
+    logger.info("[TV SIGNAL WATCHDOG] Scalp demarre")
+    while True:
+        time.sleep(10 * 60)
+        if not SCALP_ENABLED:
+            continue
+        now = time.time()
+        uptime = now - bot_start_time
+        issues = []
+        with STATE_LOCK:
+            symbols = list(CONFIG['SYMBOLS'].keys())
+            state_copy = {s: dict(MOMENTUM_STATE.get(s, {})) for s in symbols}
+
+        for req in scalp_required_tv_signals():
+            if uptime < req['warmup']:
+                continue
+            missing = []
+            stale = []
+            for symbol in symbols:
+                ts = state_copy.get(symbol, {}).get(req['field'])
+                if ts is None:
+                    missing.append(symbol.replace('/USDT', ''))
+                elif now - float(ts) > req['max_age']:
+                    stale.append((symbol.replace('/USDT', ''), (now - float(ts)) / 60))
+            if missing or stale:
+                details = []
+                if missing:
+                    details.append("jamais recu: " + ", ".join(missing))
+                if stale:
+                    details.append("perime: " + ", ".join(f"{sym} {age:.0f}m" for sym, age in stale))
+                issues.append(f"- {req['label']}: " + " | ".join(details))
+
+        if issues and should_send('GLOBAL', 'scalp_tv_signal_watchdog', cooldown=1800):
+            send_telegram(
+                "<b>[ALERTE] Signaux TradingView scalp manquants</b>\n"
+                "--------------------\n"
+                + "\n".join(issues)
+                + "\n\nVerifier les alertes TradingView / relay bot principal.",
+                ntfy=True,
+            )
+            logger.warning(f"[TV SIGNAL WATCHDOG] Scalp issues: {issues}")
+
+
 def startup():
     init_redis()
     load_state()
@@ -1488,6 +1557,7 @@ def startup():
 
     threading.Thread(target=update_bias_30m, daemon=True).start()
     threading.Thread(target=update_range_filter_1m, daemon=True).start()
+    threading.Thread(target=scalp_tv_signal_watchdog, daemon=True).start()
 
     # Sync état 4H depuis bot principal au démarrage
     main_url     = os.environ.get('MAIN_BOT_URL', '').rstrip('/')
