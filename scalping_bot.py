@@ -324,6 +324,12 @@ def update_bias_30m():
                     if result.get('williams_2h') is not None:
                         MOMENTUM_STATE[symbol]['williams_2h'] = result.get('williams_2h')
                         MOMENTUM_STATE[symbol]['williams_2h_ts'] = time.time()
+                evaluate_context30_strategy(
+                    symbol,
+                    price=result.get('price') or 0,
+                    event_id=f"okx_context30_w2h_{symbol}_{int(time.time())}",
+                    source='okx_williams_2h',
+                )
 
             persist_state()
             bias_ok_count = sum(1 for r in results.values() if r.get('bias') is not None)
@@ -496,6 +502,8 @@ def init_symbol(symbol):
             'st_context_lt_3m_ts': None,
             'st_context_2h':    None,
             'st_context_2h_ts': None,
+            'st_context_30m':   None,
+            'st_context_30m_ts': None,
             'st_context_5m':    None,
             'st_context_15m':   None,
             'st_context_15m_ts': None,
@@ -868,6 +876,83 @@ def evaluate_context_scalp_secondary(symbol, ctx_1m, price, event_id):
     return False
 
 
+def evaluate_context30_strategy(symbol, price=0, event_id=None, source='webhook'):
+    """Strategie CONTEXT30: ST Context 30m + Williams 2H + ST Context 1m."""
+    with STATE_LOCK:
+        init_symbol(symbol)
+        m = MOMENTUM_STATE[symbol]
+
+        if not SCALP_ENABLED:
+            logger.info(f"[CONTEXT30 OFF] Signal ignore: {symbol}")
+            persist_state()
+            return False
+
+        ctx_30m = m.get('st_context_30m')
+        ctx_1m = m.get('st_context_1m')
+        if ctx_30m not in ('buy', 'sell') or ctx_1m not in ('buy', 'sell'):
+            return False
+
+        signal_direction = 'LONG' if ctx_1m == 'buy' else 'SHORT'
+        exp_ctx = 'buy' if signal_direction == 'LONG' else 'sell'
+        ctx_30m_fresh = is_fresh(m.get('st_context_30m_ts'), 90 * 60)
+        ctx_1m_fresh = is_fresh(m.get('st_context_1m_ts'), 5 * 60)
+        williams_2h = get_williams_filter(symbol, '2h', signal_direction, 6 * 3600)
+
+        ctx_30m_ok = ctx_30m_fresh and ctx_30m == exp_ctx
+        ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_ctx
+        entry_ok = ctx_30m_ok and ctx_1m_ok and williams_2h['ok']
+
+        logger.info(
+            f"[CONTEXT30 CHECK] {symbol} dir={signal_direction} source={source} "
+            f"ctx30m={ctx_30m}/{exp_ctx} fresh={ctx_30m_fresh} ok={ctx_30m_ok} "
+            f"ctx1m={ctx_1m}/{exp_ctx} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
+            f"will2h={williams_2h['trend']} fresh={williams_2h['fresh']} ok={williams_2h['ok']} "
+            f"entry={entry_ok}"
+        )
+        if not entry_ok:
+            return False
+
+        pos_key = f"{symbol}_CONTEXT30"
+        pos = SCALP_POSITIONS.get(pos_key)
+        if pos and pos.get('direction') != signal_direction:
+            SCALP_POSITIONS.pop(pos_key, None)
+            PYRA_ENABLED.pop(pos_key, None)
+            pos = None
+
+        is_entry = False
+        event_key = event_id or f"context30_{symbol}_{int(time.time())}_{exp_ctx}"
+        if pos is None and should_send(symbol, f"context30_entry_{exp_ctx}", event_id=event_key, cooldown=1800):
+            SCALP_POSITIONS[pos_key] = {
+                'direction': signal_direction,
+                'entry_count': 1,
+                'signal_type': 'context30',
+            }
+            PYRA_ENABLED.pop(pos_key, None)
+            is_entry = True
+
+        persist_state()
+
+    if is_entry:
+        tg_sent = send_telegram_with_buttons(
+            f"<b>CONTEXT30 {signal_direction} - ENTREE</b> {symbol}\n"
+            f"--------------------\n"
+            f"Direction: {signal_direction}\n"
+            f"Price: ${format_price(price)}\n"
+            f"Exchange: OKX\n"
+            f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
+            f"[OK] Zone ST Context 30m: {(ctx_30m or 'N/A').upper()}\n"
+            f"{format_williams_filter_line('2H', williams_2h)}\n"
+            f"[OK] Zone ST Context 1m: {(ctx_1m or 'N/A').upper()}",
+            f"{symbol}_CONTEXT30",
+        )
+        if not tg_sent:
+            logger.warning(f"[CONTEXT30] Entree {symbol} creee mais notification Telegram echouee")
+        send_light_alert(signal_direction)
+        logger.info(f"[CONTEXT30] Entree: {symbol} {signal_direction}")
+        return True
+    return False
+
+
 def evaluate_range_scalp_signal(symbol, range_1m, price, event_id):
     """Evalue SCALP sur un signal Range Filter 1m confirme."""
     with STATE_LOCK:
@@ -1143,6 +1228,7 @@ def webhook():
             m['st_context_1m_ts'] = time.time()
             state_changed = True
             evaluate_context_scalp_secondary(symbol, ctx_parsed, price, event_id)
+            evaluate_context30_strategy(symbol, price=price, event_id=event_id, source='ctx1m_webhook')
         elif tf == '3m':
             m['st_context_3m'] = ctx_parsed
             m['st_context_3m_ts'] = time.time()
@@ -1155,6 +1241,11 @@ def webhook():
             m['st_context_15m'] = ctx_parsed
             m['st_context_15m_ts'] = time.time()
             state_changed = True
+        elif tf == '30m':
+            m['st_context_30m'] = ctx_parsed
+            m['st_context_30m_ts'] = time.time()
+            state_changed = True
+            evaluate_context30_strategy(symbol, price=price, event_id=event_id, source='ctx30m_webhook')
         elif tf == '2h':
             m['st_context_2h'] = ctx_parsed
             m['st_context_2h_ts'] = time.time()
@@ -1582,6 +1673,12 @@ def scalp_required_tv_signals():
             'field': 'st_context_1m_ts',
             'max_age': 5 * 60,
             'warmup': 10 * 60,
+        },
+        {
+            'label': 'ST Context 30m',
+            'field': 'st_context_30m_ts',
+            'max_age': 90 * 60,
+            'warmup': 2 * 3600,
         },
         {
             'label': 'ST Context LT 1m',
