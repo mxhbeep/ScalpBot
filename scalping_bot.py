@@ -293,6 +293,7 @@ def update_bias_30m():
             for symbol in list(CONFIG['SYMBOLS'].keys()):
                 try:
                     df = fetch_ohlcv_okx(symbol, '30m', limit=80)
+                    df_2h = fetch_ohlcv_okx(symbol, '2h', limit=80)
                     if df is None or len(df) < 30:
                         count = 0 if df is None else len(df)
                         logger.info(f"[BIAS] {symbol} bias30m=None reason=insufficient_confirmed_candles ({count}/30)")
@@ -300,8 +301,9 @@ def update_bias_30m():
                         continue
                     bias = calc_bias(df, ema_len=13, sma_len=30)
                     williams_30m = calc_williams_ema(df, length=14, ema_length=14)
+                    williams_2h = calc_williams_ema(df_2h, length=14, ema_length=14) if df_2h is not None else None
                     price = float(df['close'].iloc[-1]) if len(df) else None
-                    results[symbol] = {'bias': bias, 'price': price, 'williams_30m': williams_30m}
+                    results[symbol] = {'bias': bias, 'price': price, 'williams_30m': williams_30m, 'williams_2h': williams_2h}
                     if bias is None:
                         logger.info(f"[BIAS] {symbol} bias30m=None reason=neutral")
                     else:
@@ -319,6 +321,9 @@ def update_bias_30m():
                     if result.get('williams_30m') is not None:
                         MOMENTUM_STATE[symbol]['williams_30m'] = result.get('williams_30m')
                         MOMENTUM_STATE[symbol]['williams_30m_ts'] = time.time()
+                    if result.get('williams_2h') is not None:
+                        MOMENTUM_STATE[symbol]['williams_2h'] = result.get('williams_2h')
+                        MOMENTUM_STATE[symbol]['williams_2h_ts'] = time.time()
 
             persist_state()
             bias_ok_count = sum(1 for r in results.values() if r.get('bias') is not None)
@@ -470,6 +475,8 @@ def init_symbol(symbol):
             'bias_30m_ts':    None,
             'williams_30m':    None,
             'williams_30m_ts': None,
+            'williams_2h':     None,
+            'williams_2h_ts':  None,
             'range_filter_5m': None,
             'range_filter_5m_ts': None,
             'last_range_filter_5m_signal_ts': None,
@@ -769,6 +776,98 @@ def send_light_alert(direction: str) -> bool:
         logger.warning(f"[LIGHTS] Echec alerte {command}")
     return sent
 
+
+def evaluate_context_scalp_secondary(symbol, ctx_1m, price, event_id):
+    """Entree SCALP secondaire sur zone ST Context 1m."""
+    if ctx_1m not in ('buy', 'sell'):
+        return False
+
+    with STATE_LOCK:
+        init_symbol(symbol)
+        m = MOMENTUM_STATE[symbol]
+
+        if not SCALP_ENABLED:
+            logger.info(f"[SCALP OFF] Signal context ignore: {symbol}")
+            persist_state()
+            return False
+
+        signal_direction = 'LONG' if ctx_1m == 'buy' else 'SHORT'
+        exp_st = 'buy' if signal_direction == 'LONG' else 'sell'
+        exp_bias = 'bull' if signal_direction == 'LONG' else 'bear'
+
+        st_30m = m.get('st_ai_30m')
+        bias_30m = m.get('bias_30m')
+        ctx_lt_1m = m.get('st_context_lt_1m')
+        williams_2h = get_williams_filter(symbol, '2h', signal_direction, 6 * 3600)
+
+        st_30m_fresh = bool(st_30m) and is_fresh(m.get('st_ai_30m_ts'), 90 * 60)
+        bias_30m_fresh = bool(bias_30m) and is_fresh(m.get('bias_30m_ts'), 2 * 3600)
+        ctx_1m_fresh = bool(ctx_1m) and is_fresh(m.get('st_context_1m_ts'), 5 * 60)
+        ctx_lt_1m_fresh = bool(ctx_lt_1m) and is_fresh(m.get('st_context_lt_1m_ts'), 5 * 60)
+
+        st_30m_ok = st_30m_fresh and st_30m == exp_st
+        bias_30m_ok = bias_30m_fresh and bias_30m == exp_bias
+        ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_st
+        lt1m_same_block = ctx_lt_1m_fresh and ctx_lt_1m == exp_st
+        secondary_ok = st_30m_ok and bias_30m_ok and williams_2h['ok'] and ctx_1m_ok and not lt1m_same_block
+
+        logger.info(
+            f"[SCALP CONTEXT SECONDARY CHECK] {symbol} dir={signal_direction} "
+            f"ctx1m={ctx_1m}/{exp_st} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
+            f"st30m={st_30m}/{exp_st} fresh={st_30m_fresh} ok={st_30m_ok} "
+            f"bias30m={bias_30m}/{exp_bias} fresh={bias_30m_fresh} ok={bias_30m_ok} "
+            f"will2h={williams_2h['trend']} fresh={williams_2h['fresh']} ok={williams_2h['ok']} "
+            f"lt1m={ctx_lt_1m}/{exp_st} fresh={ctx_lt_1m_fresh} same_block={lt1m_same_block} "
+            f"secondary={secondary_ok}"
+        )
+
+        pos_key = f"{symbol}_SCALP"
+        pos = SCALP_POSITIONS.get(pos_key)
+        if pos and pos.get('direction') != signal_direction:
+            SCALP_POSITIONS.pop(pos_key, None)
+            PYRA_ENABLED.pop(pos_key, None)
+            pos = None
+
+        scalp_entry = False
+        if secondary_ok and pos is None and should_send(
+            symbol,
+            f"scalp_context_secondary_{exp_st}",
+            event_id=event_id,
+            cooldown=1800,
+        ):
+            SCALP_POSITIONS[pos_key] = {
+                'direction': signal_direction,
+                'entry_count': 1,
+                'signal_type': 'secondaire',
+            }
+            PYRA_ENABLED.pop(pos_key, None)
+            scalp_entry = True
+
+        persist_state()
+
+    if scalp_entry:
+        tg_sent = send_telegram_with_buttons(
+            f"<b>SCALP {signal_direction} - ENTREE SECONDAIRE</b> {symbol}\n"
+            f"--------------------\n"
+            f"Direction: {signal_direction}\n"
+            f"Price: ${format_price(price)}\n"
+            f"Exchange: OKX\n"
+            f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
+            f"[OK] Zone ST Context 1m: {(ctx_1m or 'NEUTRE').upper()}\n"
+            f"[OK] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
+            f"[OK] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
+            f"{format_williams_filter_line('2H', williams_2h)}\n"
+            f"[ANTI-CHOP] LT 1m meme sens: {lt1m_same_block}",
+            f"{symbol}_SCALP",
+        )
+        if not tg_sent:
+            logger.warning(f"[SCALP] Entree secondaire {symbol} creee mais notification Telegram echouee")
+        send_light_alert(signal_direction)
+        logger.info(f"[SCALP] Entree secondaire: {symbol} {signal_direction}")
+        return True
+    return False
+
+
 def evaluate_range_scalp_signal(symbol, range_1m, price, event_id):
     """Evalue SCALP sur un signal Range Filter 1m confirme."""
     with STATE_LOCK:
@@ -807,7 +906,7 @@ def evaluate_range_scalp_signal(symbol, range_1m, price, event_id):
         ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_ctx
         lt1m_same_block = ctx_lt_1m_fresh and ctx_lt_1m == exp_ctx
         antichop_block = lt1m_same_block
-        primary_ok = st_2h_ok and bias_30m_ok and williams_30m['ok'] and ctx_1m_ok and not antichop_block
+        primary_ok = st_2h_ok and bias_30m_ok and ctx_1m_ok and not antichop_block
         secondary_ok = False
         third_ok = False
         scalp_all_ok = primary_ok or secondary_ok or third_ok
@@ -822,7 +921,7 @@ def evaluate_range_scalp_signal(symbol, range_1m, price, event_id):
             f"ctx1m={ctx_1m}/{exp_ctx} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
             f"lt1m={ctx_lt_1m}/{exp_ctx} fresh={ctx_lt_1m_fresh} same_block={lt1m_same_block} "
             f"primary={primary_ok} secondary={secondary_ok} third={third_ok} signal_type={signal_type} "
-            f"st30m_quality={st_30m_ok}"
+            f"st30m_quality={st_30m_ok} will30m_quality={williams_30m['ok']}"
         )
 
         scalp_entry = False
@@ -868,6 +967,7 @@ def evaluate_range_scalp_signal(symbol, range_1m, price, event_id):
         }.get(pos.get('signal_type'), 'ENTREE')
         quality_txt = (
             ("<b>[QUALITE] ST AI 30m aligne</b>\n" if st_30m_ok else "")
+            + ("<b>[QUALITE] Williams 30m aligne</b>\n" if williams_30m['ok'] else "")
         )
         if quality_txt:
             quality_txt += "\n"
@@ -1042,6 +1142,7 @@ def webhook():
             m['st_context_1m'] = ctx_parsed
             m['st_context_1m_ts'] = time.time()
             state_changed = True
+            evaluate_context_scalp_secondary(symbol, ctx_parsed, price, event_id)
         elif tf == '3m':
             m['st_context_3m'] = ctx_parsed
             m['st_context_3m_ts'] = time.time()
@@ -1164,7 +1265,7 @@ def webhook():
     # Qualite : ST AI 30m aligne
     # ==================================================================
 
-    if (
+    if False and (
         (alert_type == 'st_context' and tf in ('2h', '5m'))
         or (alert_type == 'supertrend' and tf == '2h')
     ):
@@ -1469,6 +1570,12 @@ def scalp_required_tv_signals():
             'field': 'st_ai_2h_ts',
             'max_age': 6 * 3600,
             'warmup': 7 * 3600,
+        },
+        {
+            'label': 'ST AI 30m',
+            'field': 'st_ai_30m_ts',
+            'max_age': 90 * 60,
+            'warmup': 2 * 3600,
         },
         {
             'label': 'ST Context 1m',
