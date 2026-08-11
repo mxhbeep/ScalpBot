@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot - ST AI 2H + Bias 30m + Williams 30m + Context 1m + RF1m
+# Scalping Bot - ST AI 1H + Bias 30m + Williams 30m + Context 1m + RF1m
 # Tag haute qualite - ST Context 1H aligne
 # Service Railway séparé
 
@@ -293,7 +293,7 @@ def update_bias_30m():
             for symbol in list(CONFIG['SYMBOLS'].keys()):
                 try:
                     df = fetch_ohlcv_okx(symbol, '30m', limit=80)
-                    df_2h = fetch_ohlcv_okx(symbol, '2h', limit=80)
+                    df_1h = fetch_ohlcv_okx(symbol, '1h', limit=80)
                     if df is None or len(df) < 30:
                         count = 0 if df is None else len(df)
                         logger.info(f"[BIAS] {symbol} bias30m=None reason=insufficient_confirmed_candles ({count}/30)")
@@ -301,9 +301,9 @@ def update_bias_30m():
                         continue
                     bias = calc_bias(df, ema_len=13, sma_len=30)
                     williams_30m = calc_williams_ema(df, length=14, ema_length=14)
-                    williams_2h = calc_williams_ema(df_2h, length=14, ema_length=14) if df_2h is not None else None
+                    williams_1h = calc_williams_ema(df_1h, length=14, ema_length=14) if df_1h is not None else None
                     price = float(df['close'].iloc[-1]) if len(df) else None
-                    results[symbol] = {'bias': bias, 'price': price, 'williams_30m': williams_30m, 'williams_2h': williams_2h}
+                    results[symbol] = {'bias': bias, 'price': price, 'williams_30m': williams_30m, 'williams_1h': williams_1h}
                     if bias is None:
                         logger.info(f"[BIAS] {symbol} bias30m=None reason=neutral")
                     else:
@@ -321,14 +321,14 @@ def update_bias_30m():
                     if result.get('williams_30m') is not None:
                         MOMENTUM_STATE[symbol]['williams_30m'] = result.get('williams_30m')
                         MOMENTUM_STATE[symbol]['williams_30m_ts'] = time.time()
-                    if result.get('williams_2h') is not None:
-                        MOMENTUM_STATE[symbol]['williams_2h'] = result.get('williams_2h')
-                        MOMENTUM_STATE[symbol]['williams_2h_ts'] = time.time()
+                    if result.get('williams_1h') is not None:
+                        MOMENTUM_STATE[symbol]['williams_1h'] = result.get('williams_1h')
+                        MOMENTUM_STATE[symbol]['williams_1h_ts'] = time.time()
                 evaluate_context30_strategy(
                     symbol,
                     price=result.get('price') or 0,
-                    event_id=f"okx_context30_w2h_{symbol}_{int(time.time())}",
-                    source='okx_williams_2h',
+                    event_id=f"okx_context30_w1h_{symbol}_{int(time.time())}",
+                    source='okx_williams_1h',
                 )
 
             persist_state()
@@ -467,6 +467,7 @@ def init_symbol(symbol):
         MOMENTUM_STATE[symbol] = {
             'st_ai_15m':      None,
             'st_ai_1h':       None,
+            'st_ai_1h_ts':    None,
             'st_ai_30m':      None,
             'st_ai_30m_ts':   None,
             'st_ai_2h':       None,
@@ -481,6 +482,8 @@ def init_symbol(symbol):
             'bias_30m_ts':    None,
             'williams_30m':    None,
             'williams_30m_ts': None,
+            'williams_1h':     None,
+            'williams_1h_ts':  None,
             'williams_2h':     None,
             'williams_2h_ts':  None,
             'range_filter_5m': None,
@@ -806,7 +809,7 @@ def evaluate_context_scalp_secondary(symbol, ctx_1m, price, event_id):
         st_30m = m.get('st_ai_30m')
         bias_30m = m.get('bias_30m')
         ctx_lt_1m = m.get('st_context_lt_1m')
-        williams_2h = get_williams_filter(symbol, '2h', signal_direction, 6 * 3600)
+        williams_1h = get_williams_filter(symbol, '1h', signal_direction, 3 * 3600)
 
         st_30m_fresh = bool(st_30m) and is_fresh(m.get('st_ai_30m_ts'), 90 * 60)
         bias_30m_fresh = bool(bias_30m) and is_fresh(m.get('bias_30m_ts'), 2 * 3600)
@@ -817,14 +820,14 @@ def evaluate_context_scalp_secondary(symbol, ctx_1m, price, event_id):
         bias_30m_ok = bias_30m_fresh and bias_30m == exp_bias
         ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_st
         lt1m_same_block = ctx_lt_1m_fresh and ctx_lt_1m == exp_st
-        secondary_ok = st_30m_ok and bias_30m_ok and williams_2h['ok'] and ctx_1m_ok and not lt1m_same_block
+        secondary_ok = st_30m_ok and bias_30m_ok and williams_1h['ok'] and ctx_1m_ok and not lt1m_same_block
 
         logger.info(
             f"[SCALP CONTEXT SECONDARY CHECK] {symbol} dir={signal_direction} "
             f"ctx1m={ctx_1m}/{exp_st} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
             f"st30m={st_30m}/{exp_st} fresh={st_30m_fresh} ok={st_30m_ok} "
             f"bias30m={bias_30m}/{exp_bias} fresh={bias_30m_fresh} ok={bias_30m_ok} "
-            f"will2h={williams_2h['trend']} fresh={williams_2h['fresh']} ok={williams_2h['ok']} "
+            f"will1h={williams_1h['trend']} fresh={williams_1h['fresh']} ok={williams_1h['ok']} "
             f"lt1m={ctx_lt_1m}/{exp_st} fresh={ctx_lt_1m_fresh} same_block={lt1m_same_block} "
             f"secondary={secondary_ok}"
         )
@@ -864,7 +867,7 @@ def evaluate_context_scalp_secondary(symbol, ctx_1m, price, event_id):
             f"[OK] Zone ST Context 1m: {(ctx_1m or 'NEUTRE').upper()}\n"
             f"[OK] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
             f"[OK] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
-            f"{format_williams_filter_line('2H', williams_2h)}\n"
+            f"{format_williams_filter_line('1H', williams_1h)}\n"
             f"[ANTI-CHOP] LT 1m meme sens: {lt1m_same_block}",
             f"{symbol}_SCALP",
         )
@@ -877,7 +880,7 @@ def evaluate_context_scalp_secondary(symbol, ctx_1m, price, event_id):
 
 
 def evaluate_context30_strategy(symbol, price=0, event_id=None, source='webhook'):
-    """Strategie CONTEXT30: ST Context 30m + Williams 2H + ST Context 1m."""
+    """Strategie CONTEXT30: ST Context 30m + Williams 1H + ST Context 1m."""
     with STATE_LOCK:
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
@@ -896,17 +899,17 @@ def evaluate_context30_strategy(symbol, price=0, event_id=None, source='webhook'
         exp_ctx = 'buy' if signal_direction == 'LONG' else 'sell'
         ctx_30m_fresh = is_fresh(m.get('st_context_30m_ts'), 90 * 60)
         ctx_1m_fresh = is_fresh(m.get('st_context_1m_ts'), 5 * 60)
-        williams_2h = get_williams_filter(symbol, '2h', signal_direction, 6 * 3600)
+        williams_1h = get_williams_filter(symbol, '1h', signal_direction, 3 * 3600)
 
         ctx_30m_ok = ctx_30m_fresh and ctx_30m == exp_ctx
         ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_ctx
-        entry_ok = ctx_30m_ok and ctx_1m_ok and williams_2h['ok']
+        entry_ok = ctx_30m_ok and ctx_1m_ok and williams_1h['ok']
 
         logger.info(
             f"[CONTEXT30 CHECK] {symbol} dir={signal_direction} source={source} "
             f"ctx30m={ctx_30m}/{exp_ctx} fresh={ctx_30m_fresh} ok={ctx_30m_ok} "
             f"ctx1m={ctx_1m}/{exp_ctx} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
-            f"will2h={williams_2h['trend']} fresh={williams_2h['fresh']} ok={williams_2h['ok']} "
+            f"will1h={williams_1h['trend']} fresh={williams_1h['fresh']} ok={williams_1h['ok']} "
             f"entry={entry_ok}"
         )
         if not entry_ok:
@@ -941,7 +944,7 @@ def evaluate_context30_strategy(symbol, price=0, event_id=None, source='webhook'
             f"Exchange: OKX\n"
             f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
             f"[OK] Zone ST Context 30m: {(ctx_30m or 'N/A').upper()}\n"
-            f"{format_williams_filter_line('2H', williams_2h)}\n"
+            f"{format_williams_filter_line('1H', williams_1h)}\n"
             f"[OK] Zone ST Context 1m: {(ctx_1m or 'N/A').upper()}",
             f"{symbol}_CONTEXT30",
         )
@@ -972,26 +975,26 @@ def evaluate_range_scalp_signal(symbol, range_1m, price, event_id):
         exp_ctx = exp_st
         opp_ctx = 'sell' if signal_direction == 'LONG' else 'buy'
 
-        st_2h = m.get('st_ai_2h')
+        st_1h = m.get('st_ai_1h')
         st_30m = m.get('st_ai_30m')
         bias_30m = m.get('bias_30m')
         ctx_1m = m.get('st_context_1m')
         ctx_lt_1m = m.get('st_context_lt_1m')
         williams_30m = get_williams_filter(symbol, '30m', signal_direction, 2 * 3600)
 
-        st_2h_fresh = bool(st_2h) and is_fresh(m.get('st_ai_2h_ts'), 6 * 3600)
+        st_1h_fresh = bool(st_1h) and is_fresh(m.get('st_ai_1h_ts'), 3 * 3600)
         st_30m_fresh = bool(st_30m) and is_fresh(m.get('st_ai_30m_ts'), 90 * 60)
         bias_30m_fresh = bool(bias_30m) and is_fresh(m.get('bias_30m_ts'), 2 * 3600)
         ctx_1m_fresh = bool(ctx_1m) and is_fresh(m.get('st_context_1m_ts'), 5 * 60)
         ctx_lt_1m_fresh = bool(ctx_lt_1m) and is_fresh(m.get('st_context_lt_1m_ts'), 5 * 60)
 
-        st_2h_ok = st_2h_fresh and st_2h == exp_st
+        st_1h_ok = st_1h_fresh and st_1h == exp_st
         st_30m_ok = st_30m_fresh and st_30m == exp_st
         bias_30m_ok = bias_30m_fresh and bias_30m == exp_bias
         ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_ctx
         lt1m_same_block = ctx_lt_1m_fresh and ctx_lt_1m == exp_ctx
         antichop_block = lt1m_same_block
-        primary_ok = st_2h_ok and bias_30m_ok and ctx_1m_ok and not antichop_block
+        primary_ok = st_1h_ok and bias_30m_ok and ctx_1m_ok and not antichop_block
         secondary_ok = False
         third_ok = False
         scalp_all_ok = primary_ok or secondary_ok or third_ok
@@ -1000,7 +1003,7 @@ def evaluate_range_scalp_signal(symbol, range_1m, price, event_id):
         logger.info(
             f"[SCALP RANGE CHECK] {symbol} dir={signal_direction} "
             f"range1m={range_1m}/{exp_st} "
-            f"st2h={st_2h}/{exp_st} fresh={st_2h_fresh} ok={st_2h_ok} "
+            f"st1h={st_1h}/{exp_st} fresh={st_1h_fresh} ok={st_1h_ok} "
             f"bias30m={bias_30m}/{exp_bias} fresh={bias_30m_fresh} ok={bias_30m_ok} "
             f"will30m={williams_30m['trend']} fresh={williams_30m['fresh']} ok={williams_30m['ok']} "
             f"ctx1m={ctx_1m}/{exp_ctx} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
@@ -1065,7 +1068,7 @@ def evaluate_range_scalp_signal(symbol, range_1m, price, event_id):
             f"Exchange: OKX\n"
             f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
             f"[OK] Flip Range Filter 1m: {(range_1m or 'N/A').upper()}\n"
-            f"[INFO] ST AI 2H: {(st_2h or 'N/A').upper()}\n"
+            f"[INFO] ST AI 1H: {(st_1h or 'N/A').upper()}\n"
             f"[INFO] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
             f"{format_williams_filter_line('30m', williams_30m)}\n"
             f"[INFO] Zone ST Context 1m: {(ctx_1m or 'NEUTRE').upper()}\n"
@@ -1141,6 +1144,7 @@ def webhook():
             # Point 1 : 1H intégré dans le bloc supertrend
             prev_1h      = m.get('st_ai_1h')
             m['st_ai_1h']   = parsed
+            m['st_ai_1h_ts'] = time.time()
             m['last_st_1h'] = prev_1h
             state_changed = True
             flipped_1h   = (prev_1h is not None and parsed is not None and parsed != prev_1h)
@@ -1657,10 +1661,10 @@ def reset():
 def scalp_required_tv_signals():
     return [
         {
-            'label': 'ST AI 2H',
-            'field': 'st_ai_2h_ts',
-            'max_age': 6 * 3600,
-            'warmup': 7 * 3600,
+            'label': 'ST AI 1H',
+            'field': 'st_ai_1h_ts',
+            'max_age': 3 * 3600,
+            'warmup': 4 * 3600,
         },
         {
             'label': 'ST AI 30m',
@@ -1794,7 +1798,7 @@ def startup():
         "🚀 <b>Scalping Bot démarré</b>\n"
         f"━━━━━━━━━━\n"
         f"📊 Assets: {len(CONFIG['SYMBOLS'])}\n"
-        f"SCALP: Range Filter 1m + ST AI 2H + Bias 30m + Williams 30m + Context 1m\n"
+        f"SCALP: Range Filter 1m + ST AI 1H + Bias 30m + Williams 30m + Context 1m\n"
         f"Range Filter 1m: calcule par le bot via OKX\n"
         f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}"
         ,
