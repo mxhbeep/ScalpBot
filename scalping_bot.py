@@ -820,7 +820,7 @@ def evaluate_context_scalp_secondary(symbol, ctx_1m, price, event_id):
         bias_30m_ok = bias_30m_fresh and bias_30m == exp_bias
         ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_st
         lt1m_same_block = ctx_lt_1m_fresh and ctx_lt_1m == exp_st
-        secondary_ok = st_30m_ok and bias_30m_ok and williams_1h['ok'] and ctx_1m_ok and not lt1m_same_block
+        secondary_ok = st_30m_ok and bias_30m_ok and ctx_1m_ok and not lt1m_same_block
 
         logger.info(
             f"[SCALP CONTEXT SECONDARY CHECK] {symbol} dir={signal_direction} "
@@ -903,7 +903,7 @@ def evaluate_context30_strategy(symbol, price=0, event_id=None, source='webhook'
 
         ctx_30m_ok = ctx_30m_fresh and ctx_30m == exp_ctx
         ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_ctx
-        entry_ok = ctx_30m_ok and ctx_1m_ok and williams_1h['ok']
+        entry_ok = ctx_30m_ok and ctx_1m_ok
 
         logger.info(
             f"[CONTEXT30 CHECK] {symbol} dir={signal_direction} source={source} "
