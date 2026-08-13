@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot - ST AI 1H + Bias 30m + Williams 30m + Context 1m + RF1m
+# Scalping Bot - ST AI 1H + ST AI 30m + Bias 30m + Context 1m + RF10m
 # Tag haute qualite - ST Context 1H aligne
 # Service Railway séparé
 
@@ -251,7 +251,7 @@ def update_bias_20m():
                         logger.info(f"[BIAS] {symbol} bias20m=None reason=insufficient_confirmed_candles ({count}/30)")
                         results[symbol] = {'bias': None, 'price': None}
                         continue
-                    bias = calc_bias(df, ema_len=13, sma_len=30)
+                    bias = calc_bias(df, ema_len=8, sma_len=21)
                     williams_30m = calc_williams_ema(df, length=14, ema_length=14)
                     price = float(df['close'].iloc[-1]) if len(df) else None
                     results[symbol] = {'bias': bias, 'price': price, 'williams_30m': williams_30m}
@@ -299,7 +299,7 @@ def update_bias_30m():
                         logger.info(f"[BIAS] {symbol} bias30m=None reason=insufficient_confirmed_candles ({count}/30)")
                         results[symbol] = {'bias': None, 'price': None}
                         continue
-                    bias = calc_bias(df, ema_len=13, sma_len=30)
+                    bias = calc_bias(df, ema_len=8, sma_len=21)
                     williams_30m = calc_williams_ema(df, length=14, ema_length=14)
                     williams_1h = calc_williams_ema(df_1h, length=14, ema_length=14) if df_1h is not None else None
                     price = float(df['close'].iloc[-1]) if len(df) else None
@@ -324,13 +324,6 @@ def update_bias_30m():
                     if result.get('williams_1h') is not None:
                         MOMENTUM_STATE[symbol]['williams_1h'] = result.get('williams_1h')
                         MOMENTUM_STATE[symbol]['williams_1h_ts'] = time.time()
-                evaluate_context30_strategy(
-                    symbol,
-                    price=result.get('price') or 0,
-                    event_id=f"okx_context30_w1h_{symbol}_{int(time.time())}",
-                    source='okx_williams_1h',
-                )
-
             persist_state()
             bias_ok_count = sum(1 for r in results.values() if r.get('bias') is not None)
             fetch_ok_count = sum(1 for r in results.values() if r.get('price') is not None)
@@ -339,16 +332,35 @@ def update_bias_30m():
             logger.error(f"[BIAS] Erreur Bias 30m: {e}")
         time.sleep(300)
 
-def update_range_filter_1m():
-    """Calcule le Range Filter 1m depuis OKX et declenche les strategies scalp."""
-    logger.info("Scheduler Range Filter 1m demarre")
+def build_confirmed_10m_candles(df_5m):
+    """Agrege les bougies 5m confirmees par paires en bougies 10m."""
+    df_5m = keep_confirmed_candles(df_5m, 5)
+    if df_5m is None or len(df_5m) < 2:
+        return None
+    df = df_5m.copy().sort_values('ts').reset_index(drop=True)
+    bucket_ms = 10 * 60 * 1000
+    df['bucket'] = (df['ts'].astype('int64') // bucket_ms) * bucket_ms
+    counts = df.groupby('bucket').size()
+    complete = counts[counts >= 2].index
+    df = df[df['bucket'].isin(complete)]
+    if df.empty:
+        return None
+    return df.groupby('bucket', as_index=False).agg(
+        ts=('bucket', 'first'), open=('open', 'first'), high=('high', 'max'),
+        low=('low', 'min'), close=('close', 'last'), volume=('volume', 'sum'),
+    )
+
+
+def update_range_filter_10m():
+    """Calcule le Range Filter 10m depuis OKX et declenche la strategie scalp."""
+    logger.info("Scheduler Range Filter 10m demarre")
     while True:
         try:
             for symbol in list(CONFIG['SYMBOLS'].keys()):
                 try:
-                    df = fetch_ohlcv_okx(symbol, '1m', limit=260)
-                    df_confirmed = keep_confirmed_candles(df, 1)
-                    signal = calc_range_filter_signal(df_confirmed, per=100, mult=3.0)
+                    df_5m = fetch_ohlcv_okx(symbol, '5m', limit=300)
+                    df_10m = build_confirmed_10m_candles(df_5m)
+                    signal = calc_range_filter_signal(df_10m, per=100, mult=2.0)
                     if signal is None:
                         continue
 
@@ -360,22 +372,22 @@ def update_range_filter_1m():
                     with STATE_LOCK:
                         init_symbol(symbol)
                         m = MOMENTUM_STATE[symbol]
-                        if m.get('last_range_filter_1m_signal_ts') != signal_ts:
-                            m['last_range_filter_1m_signal_ts'] = signal_ts
+                        if m.get('last_range_filter_10m_signal_ts') != signal_ts:
+                            m['last_range_filter_10m_signal_ts'] = signal_ts
                             should_process = True
 
                     if not should_process:
                         continue
 
                     logger.info(
-                        f"[RANGE] Nouveau signal 1m {symbol} "
+                        f"[RANGE] Nouveau signal 10m {symbol} "
                         f"dir={direction} ts={signal_ts} price={signal_price}"
                     )
                     evaluate_range_scalp_signal(
                         symbol=symbol,
-                        range_1m=direction,
+                        range_10m=direction,
                         price=signal_price,
-                        event_id=f"okx_range_1m_{signal_ts}",
+                        event_id=f"okx_range_10m_{signal_ts}",
                     )
                 except Exception as e:
                     logger.info(f"[RANGE] {symbol} reason=exception:{e}")
@@ -492,6 +504,9 @@ def init_symbol(symbol):
             'range_filter_1m': None,
             'range_filter_1m_ts': None,
             'last_range_filter_1m_signal_ts': None,
+            'range_filter_10m': None,
+            'range_filter_10m_ts': None,
+            'last_range_filter_10m_signal_ts': None,
             'last_st_15m':    None,
             'last_st_1h':     None,
             'st_4h_flipped':  False,
@@ -880,7 +895,8 @@ def evaluate_context_scalp_secondary(symbol, ctx_1m, price, event_id):
 
 
 def evaluate_context30_strategy(symbol, price=0, event_id=None, source='webhook'):
-    """Strategie CONTEXT30: ST Context 30m + Williams 1H + ST Context 1m."""
+    """Strategie CONTEXT30 desactivee."""
+    return False
     with STATE_LOCK:
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
@@ -956,20 +972,20 @@ def evaluate_context30_strategy(symbol, price=0, event_id=None, source='webhook'
     return False
 
 
-def evaluate_range_scalp_signal(symbol, range_1m, price, event_id):
-    """Evalue SCALP sur un signal Range Filter 1m confirme."""
+def evaluate_range_scalp_signal(symbol, range_10m, price, event_id):
+    """Evalue SCALP sur un signal Range Filter 10m confirme."""
     with STATE_LOCK:
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
-        m['range_filter_1m'] = range_1m
-        m['range_filter_1m_ts'] = time.time()
+        m['range_filter_10m'] = range_10m
+        m['range_filter_10m_ts'] = time.time()
 
         if not SCALP_ENABLED:
             logger.info(f"[SCALP OFF] Signal ignore: {symbol}")
             persist_state()
             return
 
-        signal_direction = 'LONG' if range_1m == 'buy' else 'SHORT'
+        signal_direction = 'LONG' if range_10m == 'buy' else 'SHORT'
         exp_st = 'buy' if signal_direction == 'LONG' else 'sell'
         exp_bias = 'bull' if signal_direction == 'LONG' else 'bear'
         exp_ctx = exp_st
@@ -994,7 +1010,7 @@ def evaluate_range_scalp_signal(symbol, range_1m, price, event_id):
         ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_ctx
         lt1m_same_block = ctx_lt_1m_fresh and ctx_lt_1m == exp_ctx
         antichop_block = lt1m_same_block
-        primary_ok = st_1h_ok and bias_30m_ok and ctx_1m_ok and not antichop_block
+        primary_ok = st_1h_ok and st_30m_ok and bias_30m_ok and ctx_1m_ok and not antichop_block
         secondary_ok = False
         third_ok = False
         scalp_all_ok = primary_ok or secondary_ok or third_ok
@@ -1002,14 +1018,14 @@ def evaluate_range_scalp_signal(symbol, range_1m, price, event_id):
 
         logger.info(
             f"[SCALP RANGE CHECK] {symbol} dir={signal_direction} "
-            f"range1m={range_1m}/{exp_st} "
+            f"range10m={range_10m}/{exp_st} "
             f"st1h={st_1h}/{exp_st} fresh={st_1h_fresh} ok={st_1h_ok} "
             f"bias30m={bias_30m}/{exp_bias} fresh={bias_30m_fresh} ok={bias_30m_ok} "
             f"will30m={williams_30m['trend']} fresh={williams_30m['fresh']} ok={williams_30m['ok']} "
             f"ctx1m={ctx_1m}/{exp_ctx} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
             f"lt1m={ctx_lt_1m}/{exp_ctx} fresh={ctx_lt_1m_fresh} same_block={lt1m_same_block} "
             f"primary={primary_ok} secondary={secondary_ok} third={third_ok} signal_type={signal_type} "
-            f"st30m_quality={st_30m_ok} will30m_quality={williams_30m['ok']}"
+            f"will30m_quality={williams_30m['ok']}"
         )
 
         scalp_entry = False
@@ -1067,12 +1083,12 @@ def evaluate_range_scalp_signal(symbol, range_1m, price, event_id):
             f"Price: ${format_price(price)}\n"
             f"Exchange: OKX\n"
             f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-            f"[OK] Flip Range Filter 1m: {(range_1m or 'N/A').upper()}\n"
-            f"[INFO] ST AI 1H: {(st_1h or 'N/A').upper()}\n"
-            f"[INFO] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
+            f"[OK] Flip Range Filter 10m: {(range_10m or 'N/A').upper()}\n"
+            f"[OK] ST AI 1H: {(st_1h or 'N/A').upper()}\n"
+            f"[OK] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
+            f"[OK] Bias 30m: {(bias_30m or 'N/A').upper()} (EMA8/SMA21)\n"
             f"{format_williams_filter_line('30m', williams_30m)}\n"
-            f"[INFO] Zone ST Context 1m: {(ctx_1m or 'NEUTRE').upper()}\n"
-            f"[QUALITE] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
+            f"[OK] Zone ST Context 1m: {(ctx_1m or 'NEUTRE').upper()}\n"
             f"[ANTI-CHOP] LT 1m meme sens: {lt1m_same_block}",
             pos_key
         )
@@ -1100,7 +1116,7 @@ def webhook():
     event_id   = data.get('event_id') or data.get('time') or str(time.time())
 
     # Normaliser tf
-    tf_aliases = {'1': '1m', '1min': '1m', '1minute': '1m', '3': '3m', '3min': '3m', '3minute': '3m', '5': '5m', '5min': '5m', '5minute': '5m', '15': '15m', '20': '20m', '20min': '20m', '20minute': '20m', '30': '30m', '30min': '30m', '30minute': '30m', '60': '1h', '120': '2h', '2hr': '2h', '2hour': '2h', '180': '3h', '3hr': '3h', '3hour': '3h', '240': '4h', '4hr': '4h', '4hour': '4h'}
+    tf_aliases = {'1': '1m', '1min': '1m', '1minute': '1m', '3': '3m', '3min': '3m', '3minute': '3m', '5': '5m', '5min': '5m', '5minute': '5m', '10': '10m', '10min': '10m', '10minute': '10m', '15': '15m', '20': '20m', '20min': '20m', '20minute': '20m', '30': '30m', '30min': '30m', '30minute': '30m', '60': '1h', '120': '2h', '2hr': '2h', '2hour': '2h', '180': '3h', '3hr': '3h', '3hour': '3h', '240': '4h', '4hr': '4h', '4hour': '4h'}
     tf = tf_aliases.get(tf, tf)
 
     # Normaliser symbol
@@ -1195,7 +1211,7 @@ def webhook():
         if parsed is None:
             logger.warning(f"[WEBHOOK] Range Filter invalide: {symbol} tf={tf} value={val!r}")
             return jsonify({'status': 'ignored', 'reason': 'invalid_range_filter'}), 200
-        if tf == '1m':
+        if tf == '10m':
             evaluate_range_scalp_signal(symbol, parsed, price, event_id)
             return jsonify({'status': 'ok'}), 200
             
@@ -1231,8 +1247,6 @@ def webhook():
             m['st_context_1m'] = ctx_parsed
             m['st_context_1m_ts'] = time.time()
             state_changed = True
-            evaluate_context_scalp_secondary(symbol, ctx_parsed, price, event_id)
-            evaluate_context30_strategy(symbol, price=price, event_id=event_id, source='ctx1m_webhook')
         elif tf == '3m':
             m['st_context_3m'] = ctx_parsed
             m['st_context_3m_ts'] = time.time()
@@ -1249,7 +1263,6 @@ def webhook():
             m['st_context_30m'] = ctx_parsed
             m['st_context_30m_ts'] = time.time()
             state_changed = True
-            evaluate_context30_strategy(symbol, price=price, event_id=event_id, source='ctx30m_webhook')
         elif tf == '2h':
             m['st_context_2h'] = ctx_parsed
             m['st_context_2h_ts'] = time.time()
@@ -1679,12 +1692,6 @@ def scalp_required_tv_signals():
             'warmup': 10 * 60,
         },
         {
-            'label': 'ST Context 30m',
-            'field': 'st_context_30m_ts',
-            'max_age': 90 * 60,
-            'warmup': 2 * 3600,
-        },
-        {
             'label': 'ST Context LT 1m',
             'field': 'st_context_lt_1m_ts',
             'max_age': 5 * 60,
@@ -1764,7 +1771,7 @@ def startup():
             logger.warning(f"⚠️ Webhook setup: {e}")
 
     threading.Thread(target=update_bias_30m, daemon=True).start()
-    threading.Thread(target=update_range_filter_1m, daemon=True).start()
+    threading.Thread(target=update_range_filter_10m, daemon=True).start()
     threading.Thread(target=scalp_tv_signal_watchdog, daemon=True).start()
 
     # Sync état 4H depuis bot principal au démarrage
@@ -1798,8 +1805,8 @@ def startup():
         "🚀 <b>Scalping Bot démarré</b>\n"
         f"━━━━━━━━━━\n"
         f"📊 Assets: {len(CONFIG['SYMBOLS'])}\n"
-        f"SCALP: Range Filter 1m + ST AI 1H + Bias 30m + Williams 30m + Context 1m\n"
-        f"Range Filter 1m: calcule par le bot via OKX\n"
+        f"SCALP: Range Filter 10m + ST AI 1H + ST AI 30m + Bias 30m + Context 1m\n"
+        f"Range Filter 10m: calcule par le bot via OKX\n"
         f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}"
         ,
         ntfy=False,
