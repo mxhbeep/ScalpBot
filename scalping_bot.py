@@ -36,6 +36,8 @@ CONFIG = {
 
     'SYMBOLS': {
         'BTC/USDT':     {'exchange': 'okx'},
+        'CRV/USDT':     {'exchange': 'okx'},
+        'CVX/USDT':     {'exchange': 'okx'},
         'ETH/USDT':     {'exchange': 'okx'},
         'XRP/USDT':     {'exchange': 'okx'},
     }
