@@ -1702,6 +1702,20 @@ def scalp_required_tv_signals():
     ]
 
 
+def scalp_watchdog_max_age(symbol, req):
+    """Tolere des updates ST Context 1m moins frequents sur CRV/CVX.
+
+    La strategie garde ses propres checks de fraicheur a 5 minutes pour entrer
+    en trade. Cette tolerance ne sert qu'a eviter le bruit du watchdog.
+    """
+    if (
+        symbol in {'CRV/USDT', 'CVX/USDT'}
+        and req.get('field') in {'st_context_1m_ts', 'st_context_lt_1m_ts'}
+    ):
+        return 15 * 60
+    return req['max_age']
+
+
 def scalp_tv_signal_watchdog():
     """Surveille les webhooks TradingView critiques du scalpbot, asset par asset."""
     bot_start_time = time.time()
@@ -1725,9 +1739,10 @@ def scalp_tv_signal_watchdog():
             stale = []
             for symbol in symbols:
                 ts = state_copy.get(symbol, {}).get(req['field'])
+                max_age = scalp_watchdog_max_age(symbol, req)
                 if ts is None:
                     missing.append(symbol.replace('/USDT', ''))
-                elif now - float(ts) > req['max_age']:
+                elif now - float(ts) > max_age:
                     stale.append((symbol.replace('/USDT', ''), (now - float(ts)) / 60))
             if missing or stale:
                 details = []
