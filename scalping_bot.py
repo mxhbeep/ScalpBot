@@ -1869,13 +1869,15 @@ def startup():
         threading.Thread(target=_sync, daemon=True).start()
 
     send_telegram(
-        "🚀 <b>Scalping Bot démarré</b>\n"
-        f"━━━━━━━━━━\n"
-        f"📊 Assets: {len(CONFIG['SYMBOLS'])}\n"
-        f"SCALP: Range Filter 10m + ST AI 1H + ST AI 30m + Bias 30m + Context 1m\n"
-        f"Range Filter 10m: calcule par le bot via OKX\n"
-        f"⏰ {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}"
-        ,
+        "<b>Scalping Bot demarre</b>\n"
+        "--------------------\n"
+        f"Assets: {len(CONFIG['SYMBOLS'])}\n"
+        "SCALP principale: RF10m + ST AI 1H + ST AI 30m + Bias 30m + Context 1m\n"
+        "SCALP secondaire: ST AI 1H + Context 30m + Context 1m + (ST AI 30m ou Bias 30m)\n"
+        "SCALP CONTEXT10M: RF10m + Context 10m + ST AI 30m + Williams 30m\n"
+        "Anti-chop: ST Context LT 1m meme sens\n"
+        "Range Filter 10m: calcule par le bot via OKX\n"
+        f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
     )
 
