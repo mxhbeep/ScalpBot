@@ -520,6 +520,8 @@ def init_symbol(symbol):
             'st_context_lt_3m': None,
             'st_context_3m_ts': None,
             'st_context_lt_3m_ts': None,
+            'st_context_10m':   None,
+            'st_context_10m_ts': None,
             'st_context_2h':    None,
             'st_context_2h_ts': None,
             'st_context_30m':   None,
@@ -1008,6 +1010,7 @@ def evaluate_range_scalp_signal(symbol, range_10m, price, event_id):
         st_1h = m.get('st_ai_1h')
         st_30m = m.get('st_ai_30m')
         bias_30m = m.get('bias_30m')
+        ctx_10m = m.get('st_context_10m')
         ctx_1m = m.get('st_context_1m')
         ctx_lt_1m = m.get('st_context_lt_1m')
         williams_30m = get_williams_filter(symbol, '30m', signal_direction, 2 * 3600)
@@ -1015,30 +1018,34 @@ def evaluate_range_scalp_signal(symbol, range_10m, price, event_id):
         st_1h_fresh = bool(st_1h) and is_fresh(m.get('st_ai_1h_ts'), 3 * 3600)
         st_30m_fresh = bool(st_30m) and is_fresh(m.get('st_ai_30m_ts'), 90 * 60)
         bias_30m_fresh = bool(bias_30m) and is_fresh(m.get('bias_30m_ts'), 2 * 3600)
+        ctx_10m_fresh = bool(ctx_10m) and is_fresh(m.get('st_context_10m_ts'), 30 * 60)
         ctx_1m_fresh = bool(ctx_1m) and is_fresh(m.get('st_context_1m_ts'), 5 * 60)
         ctx_lt_1m_fresh = bool(ctx_lt_1m) and is_fresh(m.get('st_context_lt_1m_ts'), 5 * 60)
 
         st_1h_ok = st_1h_fresh and st_1h == exp_st
         st_30m_ok = st_30m_fresh and st_30m == exp_st
         bias_30m_ok = bias_30m_fresh and bias_30m == exp_bias
+        ctx_10m_ok = ctx_10m_fresh and ctx_10m == exp_ctx
         ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_ctx
         lt1m_same_block = ctx_lt_1m_fresh and ctx_lt_1m == exp_ctx
         antichop_block = lt1m_same_block
         primary_ok = st_1h_ok and st_30m_ok and bias_30m_ok and ctx_1m_ok and not antichop_block
         secondary_ok = False
-        third_ok = False
-        scalp_all_ok = primary_ok or secondary_ok or third_ok
-        signal_type = 'troisieme' if third_ok else 'secondaire' if secondary_ok else 'principal' if primary_ok else 'blocked'
+        context10m_ok = st_30m_ok and williams_30m['ok'] and ctx_10m_ok and not antichop_block
+        scalp_all_ok = primary_ok or secondary_ok or context10m_ok
+        signal_type = 'context10m' if context10m_ok else 'secondaire' if secondary_ok else 'principal' if primary_ok else 'blocked'
 
         logger.info(
             f"[SCALP RANGE CHECK] {symbol} dir={signal_direction} "
             f"range10m={range_10m}/{exp_st} "
             f"st1h={st_1h}/{exp_st} fresh={st_1h_fresh} ok={st_1h_ok} "
+            f"st30m={st_30m}/{exp_st} fresh={st_30m_fresh} ok={st_30m_ok} "
             f"bias30m={bias_30m}/{exp_bias} fresh={bias_30m_fresh} ok={bias_30m_ok} "
             f"will30m={williams_30m['trend']} fresh={williams_30m['fresh']} ok={williams_30m['ok']} "
+            f"ctx10m={ctx_10m}/{exp_ctx} fresh={ctx_10m_fresh} ok={ctx_10m_ok} "
             f"ctx1m={ctx_1m}/{exp_ctx} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
             f"lt1m={ctx_lt_1m}/{exp_ctx} fresh={ctx_lt_1m_fresh} same_block={lt1m_same_block} "
-            f"primary={primary_ok} secondary={secondary_ok} third={third_ok} signal_type={signal_type} "
+            f"primary={primary_ok} secondary={secondary_ok} context10m={context10m_ok} signal_type={signal_type} "
             f"will30m_quality={williams_30m['ok']}"
         )
 
@@ -1069,7 +1076,7 @@ def evaluate_range_scalp_signal(symbol, range_10m, price, event_id):
         elif not scalp_all_ok:
                 logger.info(
                     f"[SCALP BLOCKED] {symbol} dir={signal_direction} "
-                    f"primary={primary_ok} secondary={secondary_ok} third={third_ok} "
+                    f"primary={primary_ok} secondary={secondary_ok} context10m={context10m_ok} "
                     f"lt1m_same_block={lt1m_same_block} "
                     f"pos={pos['direction'] if pos else None}"
                 )
@@ -1081,7 +1088,7 @@ def evaluate_range_scalp_signal(symbol, range_10m, price, event_id):
         entry_label = {
             'principal': 'ENTREE PRINCIPALE',
             'secondaire': 'ENTREE SECONDAIRE',
-            'troisieme': 'ENTREE TROISIEME',
+            'context10m': 'ENTREE CONTEXT10M',
         }.get(pos.get('signal_type'), 'ENTREE')
         quality_txt = (
             ("<b>[QUALITE] ST AI 30m aligne</b>\n" if st_30m_ok else "")
@@ -1102,6 +1109,7 @@ def evaluate_range_scalp_signal(symbol, range_10m, price, event_id):
             f"[OK] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
             f"[OK] Bias 30m: {(bias_30m or 'N/A').upper()} (EMA8/SMA21)\n"
             f"{format_williams_filter_line('30m', williams_30m)}\n"
+            f"[OK] Zone ST Context 10m: {(ctx_10m or 'NEUTRE').upper()}\n"
             f"[OK] Zone ST Context 1m: {(ctx_1m or 'NEUTRE').upper()}\n"
             f"[ANTI-CHOP] LT 1m meme sens: {lt1m_same_block}",
             pos_key
@@ -1268,6 +1276,10 @@ def webhook():
         elif tf == '5m':
             m['st_context_5m'] = ctx_parsed
             m['st_context_5m_ts'] = time.time()
+            state_changed = True
+        elif tf == '10m':
+            m['st_context_10m'] = ctx_parsed
+            m['st_context_10m_ts'] = time.time()
             state_changed = True
         elif tf == '15m':
             m['st_context_15m'] = ctx_parsed
@@ -1728,6 +1740,12 @@ def scalp_required_tv_signals():
             'field': 'st_context_30m_ts',
             'max_age': 90 * 60,
             'warmup': 2 * 3600,
+        },
+        {
+            'label': 'ST Context 10m',
+            'field': 'st_context_10m_ts',
+            'max_age': 30 * 60,
+            'warmup': 45 * 60,
         },
     ]
 
