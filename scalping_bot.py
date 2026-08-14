@@ -806,7 +806,7 @@ def send_light_alert(direction: str) -> bool:
 
 
 def evaluate_context_scalp_secondary(symbol, ctx_1m, price, event_id):
-    """Entree SCALP secondaire sur zone ST Context 1m."""
+    """Entree SCALP secondaire sur zones ST Context 30m + 1m."""
     if ctx_1m not in ('buy', 'sell'):
         return False
 
@@ -823,27 +823,37 @@ def evaluate_context_scalp_secondary(symbol, ctx_1m, price, event_id):
         exp_st = 'buy' if signal_direction == 'LONG' else 'sell'
         exp_bias = 'bull' if signal_direction == 'LONG' else 'bear'
 
+        st_1h = m.get('st_ai_1h')
         st_30m = m.get('st_ai_30m')
         bias_30m = m.get('bias_30m')
+        ctx_30m = m.get('st_context_30m')
         ctx_lt_1m = m.get('st_context_lt_1m')
         williams_1h = get_williams_filter(symbol, '1h', signal_direction, 3 * 3600)
 
+        st_1h_fresh = bool(st_1h) and is_fresh(m.get('st_ai_1h_ts'), 3 * 3600)
         st_30m_fresh = bool(st_30m) and is_fresh(m.get('st_ai_30m_ts'), 90 * 60)
         bias_30m_fresh = bool(bias_30m) and is_fresh(m.get('bias_30m_ts'), 2 * 3600)
+        ctx_30m_fresh = bool(ctx_30m) and is_fresh(m.get('st_context_30m_ts'), 90 * 60)
         ctx_1m_fresh = bool(ctx_1m) and is_fresh(m.get('st_context_1m_ts'), 5 * 60)
         ctx_lt_1m_fresh = bool(ctx_lt_1m) and is_fresh(m.get('st_context_lt_1m_ts'), 5 * 60)
 
+        st_1h_ok = st_1h_fresh and st_1h == exp_st
         st_30m_ok = st_30m_fresh and st_30m == exp_st
         bias_30m_ok = bias_30m_fresh and bias_30m == exp_bias
+        ctx_30m_ok = ctx_30m_fresh and ctx_30m == exp_st
         ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_st
         lt1m_same_block = ctx_lt_1m_fresh and ctx_lt_1m == exp_st
-        secondary_ok = st_30m_ok and bias_30m_ok and ctx_1m_ok and not lt1m_same_block
+        momentum_30m_ok = st_30m_ok or bias_30m_ok
+        secondary_ok = st_1h_ok and momentum_30m_ok and ctx_30m_ok and ctx_1m_ok and not lt1m_same_block
 
         logger.info(
             f"[SCALP CONTEXT SECONDARY CHECK] {symbol} dir={signal_direction} "
             f"ctx1m={ctx_1m}/{exp_st} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
+            f"ctx30m={ctx_30m}/{exp_st} fresh={ctx_30m_fresh} ok={ctx_30m_ok} "
+            f"st1h={st_1h}/{exp_st} fresh={st_1h_fresh} ok={st_1h_ok} "
             f"st30m={st_30m}/{exp_st} fresh={st_30m_fresh} ok={st_30m_ok} "
             f"bias30m={bias_30m}/{exp_bias} fresh={bias_30m_fresh} ok={bias_30m_ok} "
+            f"momentum30m_ok={momentum_30m_ok} "
             f"will1h={williams_1h['trend']} fresh={williams_1h['fresh']} ok={williams_1h['ok']} "
             f"lt1m={ctx_lt_1m}/{exp_st} fresh={ctx_lt_1m_fresh} same_block={lt1m_same_block} "
             f"secondary={secondary_ok}"
@@ -882,8 +892,10 @@ def evaluate_context_scalp_secondary(symbol, ctx_1m, price, event_id):
             f"Exchange: OKX\n"
             f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
             f"[OK] Zone ST Context 1m: {(ctx_1m or 'NEUTRE').upper()}\n"
-            f"[OK] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
-            f"[OK] Bias 30m: {(bias_30m or 'N/A').upper()}\n"
+            f"[OK] Zone ST Context 30m: {(ctx_30m or 'NEUTRE').upper()}\n"
+            f"[OK] ST AI 1H: {(st_1h or 'N/A').upper()}\n"
+            f"[OK] ST AI 30m: {(st_30m or 'N/A').upper()} ({'OK' if st_30m_ok else 'option non retenue'})\n"
+            f"[OK] Bias 30m: {(bias_30m or 'N/A').upper()} ({'OK' if bias_30m_ok else 'option non retenue'})\n"
             f"{format_williams_filter_line('1H', williams_1h)}\n"
             f"[ANTI-CHOP] LT 1m meme sens: {lt1m_same_block}",
             f"{symbol}_SCALP",
@@ -1273,6 +1285,18 @@ def webhook():
             m['st_context_1h'] = ctx_parsed
             m['st_context_1h_ts'] = time.time()
             state_changed = True
+
+        if tf in ('1m', '30m'):
+            current_ctx_1m = m.get('st_context_1m')
+            if state_changed:
+                persist_state()
+                state_changed = False
+            evaluate_context_scalp_secondary(
+                symbol,
+                current_ctx_1m,
+                price,
+                event_id=f"context_secondary_{symbol}_{tf}_{event_id}",
+            )
 
     # Ancienne strategie CONTEXT1H desactivee.
     # ST Context 1H sert maintenant uniquement de tag haute qualite dans SCALP.
@@ -1698,6 +1722,12 @@ def scalp_required_tv_signals():
             'field': 'st_context_lt_1m_ts',
             'max_age': 5 * 60,
             'warmup': 10 * 60,
+        },
+        {
+            'label': 'ST Context 30m',
+            'field': 'st_context_30m_ts',
+            'max_age': 90 * 60,
+            'warmup': 2 * 3600,
         },
     ]
 
