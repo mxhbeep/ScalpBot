@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot - ST AI 1H + ST AI 30m + Bias 30m + Context 1m + RF10m
+# Scalping Bot - ST AI 2H + ST AI 30m + Bias 30m + Context 1m + RF10m
 # Tag haute qualite - ST Context 1H aligne
 # Service Railway séparé
 
@@ -810,7 +810,8 @@ def send_light_alert(direction: str) -> bool:
 
 
 def evaluate_context_scalp_secondary(symbol, ctx_1m, price, event_id):
-    """Entree SCALP secondaire sur zones ST Context 30m + 1m."""
+    """Ancienne entree SCALP secondaire, desactivee."""
+    return False
     if ctx_1m not in ('buy', 'sell'):
         return False
 
@@ -990,6 +991,88 @@ def evaluate_context30_strategy(symbol, price=0, event_id=None, source='webhook'
     return False
 
 
+def evaluate_context10m_on_st30m_flip(symbol, st_30m, price, event_id):
+    """Entree SCALP CONTEXT10M: flip ST AI 30m + Bias 2H + ST Context 10m."""
+    if st_30m not in ('buy', 'sell'):
+        return False
+
+    with STATE_LOCK:
+        init_symbol(symbol)
+        m = MOMENTUM_STATE[symbol]
+
+        if not SCALP_ENABLED:
+            logger.info(f"[SCALP OFF] Signal context10m ignore: {symbol}")
+            persist_state()
+            return False
+
+        signal_direction = 'LONG' if st_30m == 'buy' else 'SHORT'
+        exp_ctx = st_30m
+        exp_bias = 'bull' if signal_direction == 'LONG' else 'bear'
+
+        bias_2h = m.get('bias_2h')
+        ctx_10m = m.get('st_context_10m')
+        st_30m_fresh = bool(st_30m) and is_fresh(m.get('st_ai_30m_ts'), 90 * 60)
+        bias_2h_fresh = bool(bias_2h) and is_fresh(m.get('bias_2h_ts'), 6 * 3600)
+        ctx_10m_fresh = bool(ctx_10m) and is_fresh(m.get('st_context_10m_ts'), 30 * 60)
+
+        bias_2h_ok = bias_2h_fresh and bias_2h == exp_bias
+        ctx_10m_ok = ctx_10m_fresh and ctx_10m == exp_ctx
+        context10m_ok = st_30m_fresh and bias_2h_ok and ctx_10m_ok
+
+        logger.info(
+            f"[SCALP CONTEXT10M CHECK] {symbol} dir={signal_direction} "
+            f"trigger_st30m={st_30m}/{exp_ctx} fresh={st_30m_fresh} "
+            f"bias2h={bias_2h}/{exp_bias} fresh={bias_2h_fresh} ok={bias_2h_ok} "
+            f"ctx10m={ctx_10m}/{exp_ctx} fresh={ctx_10m_fresh} ok={ctx_10m_ok} "
+            f"entry={context10m_ok}"
+        )
+
+        pos_key = f"{symbol}_SCALP"
+        pos = SCALP_POSITIONS.get(pos_key)
+        if pos and pos.get('direction') != signal_direction:
+            SCALP_POSITIONS.pop(pos_key, None)
+            PYRA_ENABLED.pop(pos_key, None)
+            pos = None
+
+        scalp_entry = False
+        if context10m_ok and pos is None and should_send(
+            symbol,
+            f"scalp_context10m_st30m_flip_{exp_ctx}",
+            event_id=event_id,
+            cooldown=1800,
+        ):
+            SCALP_POSITIONS[pos_key] = {
+                'direction': signal_direction,
+                'entry_count': 1,
+                'signal_type': 'context10m',
+            }
+            PYRA_ENABLED.pop(pos_key, None)
+            pos = SCALP_POSITIONS[pos_key]
+            scalp_entry = True
+
+        persist_state()
+
+    if scalp_entry:
+        tg_sent = send_telegram_with_buttons(
+            f"<b>SCALP {signal_direction} - ENTREE CONTEXT10M</b> {symbol}\n"
+            f"--------------------\n"
+            f"Direction: {signal_direction}\n"
+            f"Price: ${format_price(price)}\n"
+            f"Exchange: OKX\n"
+            f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
+            f"[OK] Flip ST AI 30m: {(st_30m or 'N/A').upper()}\n"
+            f"[OK] Bias 2H: {(bias_2h or 'N/A').upper()} (EMA17/SMA40)\n"
+            f"[OK] Zone ST Context 10m: {(ctx_10m or 'N/A').upper()}",
+            pos_key,
+        )
+        if not tg_sent:
+            logger.warning(f"[SCALP CONTEXT10M] Entree {symbol} creee mais notification Telegram echouee")
+        send_light_alert(signal_direction)
+        logger.info(f"[SCALP CONTEXT10M] Entree: {symbol} {signal_direction}")
+        return True
+    return False
+
+
 def evaluate_range_scalp_signal(symbol, range_10m, price, event_id):
     """Evalue SCALP sur un signal Range Filter 10m confirme."""
     with STATE_LOCK:
@@ -1009,7 +1092,7 @@ def evaluate_range_scalp_signal(symbol, range_10m, price, event_id):
         exp_ctx = exp_st
         opp_ctx = 'sell' if signal_direction == 'LONG' else 'buy'
 
-        st_1h = m.get('st_ai_1h')
+        st_2h = m.get('st_ai_2h')
         st_30m = m.get('st_ai_30m')
         bias_30m = m.get('bias_30m')
         ctx_10m = m.get('st_context_10m')
@@ -1017,30 +1100,30 @@ def evaluate_range_scalp_signal(symbol, range_10m, price, event_id):
         ctx_lt_1m = m.get('st_context_lt_1m')
         williams_30m = get_williams_filter(symbol, '30m', signal_direction, 2 * 3600)
 
-        st_1h_fresh = bool(st_1h) and is_fresh(m.get('st_ai_1h_ts'), 3 * 3600)
+        st_2h_fresh = bool(st_2h) and is_fresh(m.get('st_ai_2h_ts'), 6 * 3600)
         st_30m_fresh = bool(st_30m) and is_fresh(m.get('st_ai_30m_ts'), 90 * 60)
         bias_30m_fresh = bool(bias_30m) and is_fresh(m.get('bias_30m_ts'), 2 * 3600)
         ctx_10m_fresh = bool(ctx_10m) and is_fresh(m.get('st_context_10m_ts'), 30 * 60)
         ctx_1m_fresh = bool(ctx_1m) and is_fresh(m.get('st_context_1m_ts'), 5 * 60)
         ctx_lt_1m_fresh = bool(ctx_lt_1m) and is_fresh(m.get('st_context_lt_1m_ts'), 5 * 60)
 
-        st_1h_ok = st_1h_fresh and st_1h == exp_st
+        st_2h_ok = st_2h_fresh and st_2h == exp_st
         st_30m_ok = st_30m_fresh and st_30m == exp_st
         bias_30m_ok = bias_30m_fresh and bias_30m == exp_bias
         ctx_10m_ok = ctx_10m_fresh and ctx_10m == exp_ctx
         ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_ctx
         lt1m_same_block = ctx_lt_1m_fresh and ctx_lt_1m == exp_ctx
         antichop_block = lt1m_same_block
-        primary_ok = st_1h_ok and st_30m_ok and bias_30m_ok and ctx_1m_ok and not antichop_block
+        primary_ok = st_2h_ok and st_30m_ok and bias_30m_ok and ctx_1m_ok and not antichop_block
         secondary_ok = False
-        context10m_ok = st_30m_ok and williams_30m['ok'] and ctx_10m_ok and not antichop_block
+        context10m_ok = False
         scalp_all_ok = primary_ok or secondary_ok or context10m_ok
         signal_type = 'context10m' if context10m_ok else 'secondaire' if secondary_ok else 'principal' if primary_ok else 'blocked'
 
         logger.info(
             f"[SCALP RANGE CHECK] {symbol} dir={signal_direction} "
             f"range10m={range_10m}/{exp_st} "
-            f"st1h={st_1h}/{exp_st} fresh={st_1h_fresh} ok={st_1h_ok} "
+            f"st2h={st_2h}/{exp_st} fresh={st_2h_fresh} ok={st_2h_ok} "
             f"st30m={st_30m}/{exp_st} fresh={st_30m_fresh} ok={st_30m_ok} "
             f"bias30m={bias_30m}/{exp_bias} fresh={bias_30m_fresh} ok={bias_30m_ok} "
             f"will30m={williams_30m['trend']} fresh={williams_30m['fresh']} ok={williams_30m['ok']} "
@@ -1107,7 +1190,7 @@ def evaluate_range_scalp_signal(symbol, range_10m, price, event_id):
             f"Exchange: OKX\n"
             f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
             f"[OK] Flip Range Filter 10m: {(range_10m or 'N/A').upper()}\n"
-            f"[OK] ST AI 1H: {(st_1h or 'N/A').upper()}\n"
+            f"[OK] ST AI 2H: {(st_2h or 'N/A').upper()}\n"
             f"[OK] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
             f"[OK] Bias 30m: {(bias_30m or 'N/A').upper()} (EMA8/SMA21)\n"
             f"{format_williams_filter_line('30m', williams_30m)}\n"
@@ -1164,6 +1247,7 @@ def webhook():
 
     # ── Mise à jour état ──────────────────────────────────────────────
     flipped_15m  = False  # calculé ci-dessous si supertrend 15m
+    flipped_30m  = False  # calculé ci-dessous si supertrend 30m
     state_changed = False  # True si état modifié → persist à la fin
     if alert_type == 'supertrend':
         parsed = parse_st_value(val)
@@ -1199,6 +1283,7 @@ def webhook():
             m['st_ai_30m'] = parsed
             m['st_ai_30m_ts'] = time.time()
             m['last_st_30m'] = prev_30m
+            flipped_30m = (prev_30m is not None and parsed is not None and parsed != prev_30m)
             state_changed = True
         elif tf == '4h':
             prev_4h = m.get('st_ai_4h')
@@ -1300,7 +1385,18 @@ def webhook():
             m['st_context_1h_ts'] = time.time()
             state_changed = True
 
-        if tf in ('1m', '30m'):
+    if alert_type == 'supertrend' and tf == '30m' and flipped_30m:
+        if state_changed:
+            persist_state()
+            state_changed = False
+        evaluate_context10m_on_st30m_flip(
+            symbol,
+            parsed,
+            price,
+            event_id=f"context10m_st30m_flip_{symbol}_{event_id}",
+        )
+
+        if False and tf in ('1m', '30m'):
             current_ctx_1m = m.get('st_context_1m')
             if state_changed:
                 persist_state()
@@ -1714,10 +1810,10 @@ def reset():
 def scalp_required_tv_signals():
     return [
         {
-            'label': 'ST AI 1H',
-            'field': 'st_ai_1h_ts',
-            'max_age': 3 * 3600,
-            'warmup': 4 * 3600,
+            'label': 'ST AI 2H',
+            'field': 'st_ai_2h_ts',
+            'max_age': 6 * 3600,
+            'warmup': 7 * 3600,
         },
         {
             'label': 'ST AI 30m',
@@ -1736,12 +1832,6 @@ def scalp_required_tv_signals():
             'field': 'st_context_lt_1m_ts',
             'max_age': 5 * 60,
             'warmup': 10 * 60,
-        },
-        {
-            'label': 'ST Context 30m',
-            'field': 'st_context_30m_ts',
-            'max_age': 90 * 60,
-            'warmup': 2 * 3600,
         },
         {
             'label': 'ST Context 10m',
@@ -1872,9 +1962,8 @@ def startup():
         "<b>Scalping Bot demarre</b>\n"
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
-        "SCALP principale: RF10m + ST AI 1H + ST AI 30m + Bias 30m + Context 1m\n"
-        "SCALP secondaire: ST AI 1H + Context 30m + Context 1m + (ST AI 30m ou Bias 30m)\n"
-        "SCALP CONTEXT10M: RF10m + Context 10m + ST AI 30m + Williams 30m\n"
+        "SCALP principale: RF10m + ST AI 2H + ST AI 30m + Bias 30m + Context 1m\n"
+        "SCALP CONTEXT10M: flip ST AI 30m + Bias 2H + Context 10m\n"
         "Anti-chop: ST Context LT 1m meme sens\n"
         "Range Filter 10m: calcule par le bot via OKX\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
