@@ -60,9 +60,11 @@ def fetch_ohlcv_okx(symbol, tf, limit=100):
             return None
         df = pd.DataFrame(data, columns=['ts','o','h','l','c','vol','volCcy','volCcyQuote','confirm'])
         df = df[df['confirm'] == '1'].copy()
+        df['open'] = df['o'].astype(float)
         df['high'] = df['h'].astype(float)
         df['low'] = df['l'].astype(float)
         df['close'] = df['c'].astype(float)
+        df['volume'] = df['vol'].astype(float)
         df = df.iloc[::-1].reset_index(drop=True)
         return df
     except Exception as e:
