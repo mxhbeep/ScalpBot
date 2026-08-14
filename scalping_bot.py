@@ -1742,7 +1742,7 @@ def scalp_watchdog_max_age(symbol, req):
         symbol in {'CRV/USDT', 'CVX/USDT'}
         and req.get('field') in {'st_context_1m_ts', 'st_context_lt_1m_ts'}
     ):
-        return 15 * 60
+        return 30 * 60
     return req['max_age']
 
 
