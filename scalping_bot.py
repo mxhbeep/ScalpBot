@@ -329,6 +329,14 @@ def update_bias_30m():
                         MOMENTUM_STATE[symbol]['williams_1h'] = result.get('williams_1h')
                         MOMENTUM_STATE[symbol]['williams_1h_ts'] = time.time()
             persist_state()
+            for symbol, result in results.items():
+                if result.get('price') is not None:
+                    replay_recent_range_filter_10m(
+                        symbol,
+                        price=result.get('price'),
+                        event_id=f"bias30m_refresh_rf10_{symbol}_{int(time.time())}",
+                        source='bias30m_refresh',
+                    )
             bias_ok_count = sum(1 for r in results.values() if r.get('bias') is not None)
             fetch_ok_count = sum(1 for r in results.values() if r.get('price') is not None)
             logger.info(f"[BIAS] Mise a jour Bias 30m terminee ({bias_ok_count}/{len(CONFIG['SYMBOLS'])} assets avec bias non-neutre, {fetch_ok_count}/{len(CONFIG['SYMBOLS'])} fetch OK)")
@@ -1000,8 +1008,8 @@ def evaluate_context30_strategy(symbol, price=0, event_id=None, source='webhook'
     return False
 
 
-def evaluate_context10m_on_st30m_flip(symbol, st_30m, price, event_id):
-    """Entree SCALP CONTEXT10M: flip ST AI 30m + Bias 2H + ST Context 10m."""
+def evaluate_context10m_on_st30m_flip(symbol, st_30m, price, event_id, trigger_label="Flip ST AI 30m"):
+    """Entree SCALP CONTEXT10M: ST AI 30m + Bias 2H + ST Context 10m."""
     if st_30m not in ('buy', 'sell'):
         return False
 
@@ -1030,7 +1038,7 @@ def evaluate_context10m_on_st30m_flip(symbol, st_30m, price, event_id):
 
         logger.info(
             f"[SCALP CONTEXT10M CHECK] {symbol} dir={signal_direction} "
-            f"trigger_st30m={st_30m}/{exp_ctx} fresh={st_30m_fresh} "
+            f"trigger={trigger_label} st30m={st_30m}/{exp_ctx} fresh={st_30m_fresh} "
             f"bias2h={bias_2h}/{exp_bias} fresh={bias_2h_fresh} ok={bias_2h_ok} "
             f"ctx10m={ctx_10m}/{exp_ctx} fresh={ctx_10m_fresh} ok={ctx_10m_ok} "
             f"entry={context10m_ok}"
@@ -1069,7 +1077,7 @@ def evaluate_context10m_on_st30m_flip(symbol, st_30m, price, event_id):
             f"Price: ${format_price(price)}\n"
             f"Exchange: OKX\n"
             f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-            f"[OK] Flip ST AI 30m: {(st_30m or 'N/A').upper()}\n"
+            f"[OK] {trigger_label}: {(st_30m or 'N/A').upper()}\n"
             f"[OK] Bias 2H: {(bias_2h or 'N/A').upper()} (EMA17/SMA40)\n"
             f"[OK] Zone ST Context 10m: {(ctx_10m or 'N/A').upper()}",
             pos_key,
@@ -1082,13 +1090,14 @@ def evaluate_context10m_on_st30m_flip(symbol, st_30m, price, event_id):
     return False
 
 
-def evaluate_range_scalp_signal(symbol, range_10m, price, event_id):
+def evaluate_range_scalp_signal(symbol, range_10m, price, event_id, update_range_state=True):
     """Evalue SCALP sur un signal Range Filter 10m confirme."""
     with STATE_LOCK:
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
-        m['range_filter_10m'] = range_10m
-        m['range_filter_10m_ts'] = time.time()
+        if update_range_state:
+            m['range_filter_10m'] = range_10m
+            m['range_filter_10m_ts'] = time.time()
 
         if not SCALP_ENABLED:
             logger.info(f"[SCALP OFF] Signal ignore: {symbol}")
@@ -1212,6 +1221,27 @@ def evaluate_range_scalp_signal(symbol, range_10m, price, event_id):
             logger.warning(f"[SCALP] Entree {symbol} creee mais notification Telegram echouee")
         send_light_alert(signal_direction)
         logger.info(f"[SCALP] {'Pyramiding' if scalp_pyra else 'Entree'}: {symbol} {signal_direction}")
+
+
+def replay_recent_range_filter_10m(symbol, price=0, event_id=None, source='state_refresh'):
+    """Rejoue le dernier RF10 frais quand un filtre arrive apres le flip."""
+    with STATE_LOCK:
+        init_symbol(symbol)
+        m = MOMENTUM_STATE[symbol]
+        range_10m = m.get('range_filter_10m')
+        range_ts = m.get('range_filter_10m_ts')
+        signal_ts = m.get('last_range_filter_10m_signal_ts') or int(range_ts or time.time())
+
+    if range_10m not in ('buy', 'sell') or not is_fresh(range_ts, 30 * 60):
+        return False
+
+    return evaluate_range_scalp_signal(
+        symbol,
+        range_10m,
+        price,
+        event_id=event_id or f"{source}_rf10_replay_{symbol}_{signal_ts}_{range_10m}",
+        update_range_state=False,
+    )
 
 # ============================================================================
 # WEBHOOK
@@ -1403,6 +1433,48 @@ def webhook():
             parsed,
             price,
             event_id=f"context10m_st30m_flip_{symbol}_{event_id}",
+        )
+
+    if alert_type == 'st_context' and tf == '10m' and ctx_parsed in ('buy', 'sell'):
+        current_st_30m = m.get('st_ai_30m')
+        if state_changed:
+            persist_state()
+            state_changed = False
+        evaluate_context10m_on_st30m_flip(
+            symbol,
+            current_st_30m,
+            price,
+            event_id=f"context10m_refresh_{symbol}_{event_id}",
+            trigger_label="ST AI 30m aligne",
+        )
+
+    if (
+        (alert_type == 'supertrend' and tf in ('2h', '30m'))
+        or (alert_type == 'bias' and tf == '30m')
+        or (alert_type == 'st_context' and tf == '1m')
+        or (alert_type == 'st_context_lt' and tf == '1m')
+    ):
+        if state_changed:
+            persist_state()
+            state_changed = False
+        replay_recent_range_filter_10m(
+            symbol,
+            price=price,
+            event_id=f"rf10_replay_{symbol}_{tf}_{alert_type}_{event_id}",
+            source=f"{alert_type}_{tf}",
+        )
+
+    if alert_type == 'bias' and tf == '2h':
+        current_st_30m = m.get('st_ai_30m')
+        if state_changed:
+            persist_state()
+            state_changed = False
+        evaluate_context10m_on_st30m_flip(
+            symbol,
+            current_st_30m,
+            price,
+            event_id=f"context10m_bias2h_refresh_{symbol}_{event_id}",
+            trigger_label="ST AI 30m aligne",
         )
 
         if False and tf in ('1m', '30m'):
