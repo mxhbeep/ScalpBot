@@ -639,18 +639,27 @@ class TelegramChannel(NotificationChannel):
         if not tok or not chat:
             logger.warning("Token ou chat_id manquant")
             return False
+        url = f"https://api.telegram.org/bot{tok}/sendMessage"
         payload = {"chat_id": chat, "text": message, "parse_mode": "HTML"}
         if reply_markup:
             payload['reply_markup'] = reply_markup
         try:
-            resp = requests.post(
-                f"https://api.telegram.org/bot{tok}/sendMessage",
-                json=payload,
-                timeout=10,
-            )
+            resp = requests.post(url, json=payload, timeout=10)
             if resp.status_code == 200:
                 logger.info(f"{self.label} envoye")
                 return True
+            if resp.status_code == 400 and "can't parse entities" in resp.text.lower():
+                plain = strip_html(message) or strip_html(title) or "Scalp alert"
+                fallback_payload = {"chat_id": chat, "text": plain}
+                if reply_markup:
+                    fallback_payload['reply_markup'] = reply_markup
+                logger.warning(f"Telegram HTML invalide ({self.label}) - fallback texte brut")
+                fallback_resp = requests.post(url, json=fallback_payload, timeout=10)
+                if fallback_resp.status_code == 200:
+                    logger.info(f"{self.label} envoye en texte brut")
+                    return True
+                logger.error(f"Telegram fallback {fallback_resp.status_code}: {fallback_resp.text[:100]}")
+                return False
             logger.error(f"Telegram {resp.status_code}: {resp.text[:100]}")
             return False
         except Exception as e:
