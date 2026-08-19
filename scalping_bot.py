@@ -39,6 +39,7 @@ CONFIG = {
         'CRV/USDT':     {'exchange': 'okx'},
         'CVX/USDT':     {'exchange': 'okx'},
         'ETH/USDT':     {'exchange': 'okx'},
+        'LINK/USDT':    {'exchange': 'okx'},
         'XRP/USDT':     {'exchange': 'okx'},
     }
 }
