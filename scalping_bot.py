@@ -331,11 +331,11 @@ def update_bias_30m():
             persist_state()
             for symbol, result in results.items():
                 if result.get('price') is not None:
-                    replay_recent_range_filter_10m(
+                    evaluate_scalp_primary_confluence(
                         symbol,
                         price=result.get('price'),
-                        event_id=f"bias30m_refresh_rf10_{symbol}_{int(time.time())}",
-                        source='bias30m_refresh',
+                        event_id=f"bias30m_refresh_scalp_{symbol}_{int(time.time())}",
+                        trigger_label="Bias 30m refresh",
                     )
             bias_ok_count = sum(1 for r in results.values() if r.get('bias') is not None)
             fetch_ok_count = sum(1 for r in results.values() if r.get('price') is not None)
@@ -1090,65 +1090,58 @@ def evaluate_context10m_on_st30m_flip(symbol, st_30m, price, event_id, trigger_l
     return False
 
 
-def evaluate_range_scalp_signal(symbol, range_10m, price, event_id, update_range_state=True):
-    """Evalue SCALP sur un signal Range Filter 10m confirme."""
+def evaluate_scalp_primary_confluence(symbol, price=0, event_id=None, trigger_label="state_refresh"):
+    """Evalue SCALP principale des que ST AI 2H + Bias 30m + Context 1m sont reunis."""
     with STATE_LOCK:
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
-        if update_range_state:
-            m['range_filter_10m'] = range_10m
-            m['range_filter_10m_ts'] = time.time()
 
         if not SCALP_ENABLED:
             logger.info(f"[SCALP OFF] Signal ignore: {symbol}")
             persist_state()
-            return
+            return False
 
-        signal_direction = 'LONG' if range_10m == 'buy' else 'SHORT'
+        ctx_1m = m.get('st_context_1m')
+        if ctx_1m not in ('buy', 'sell'):
+            logger.debug(f"[SCALP WAITING] {symbol} no active Context 1m trigger={trigger_label}")
+            persist_state()
+            return False
+
+        signal_direction = 'LONG' if ctx_1m == 'buy' else 'SHORT'
         exp_st = 'buy' if signal_direction == 'LONG' else 'sell'
         exp_bias = 'bull' if signal_direction == 'LONG' else 'bear'
         exp_ctx = exp_st
-        opp_ctx = 'sell' if signal_direction == 'LONG' else 'buy'
 
         st_2h = m.get('st_ai_2h')
         st_30m = m.get('st_ai_30m')
         bias_30m = m.get('bias_30m')
-        ctx_10m = m.get('st_context_10m')
-        ctx_1m = m.get('st_context_1m')
         ctx_lt_1m = m.get('st_context_lt_1m')
         williams_30m = get_williams_filter(symbol, '30m', signal_direction, 2 * 3600)
 
         st_2h_fresh = bool(st_2h) and is_fresh(m.get('st_ai_2h_ts'), 6 * 3600)
         st_30m_fresh = bool(st_30m) and is_fresh(m.get('st_ai_30m_ts'), 90 * 60)
         bias_30m_fresh = bool(bias_30m) and is_fresh(m.get('bias_30m_ts'), 2 * 3600)
-        ctx_10m_fresh = bool(ctx_10m) and is_fresh(m.get('st_context_10m_ts'), 30 * 60)
         ctx_1m_fresh = bool(ctx_1m) and is_fresh(m.get('st_context_1m_ts'), 5 * 60)
         ctx_lt_1m_fresh = bool(ctx_lt_1m) and is_fresh(m.get('st_context_lt_1m_ts'), 5 * 60)
 
         st_2h_ok = st_2h_fresh and st_2h == exp_st
         st_30m_ok = st_30m_fresh and st_30m == exp_st
         bias_30m_ok = bias_30m_fresh and bias_30m == exp_bias
-        ctx_10m_ok = ctx_10m_fresh and ctx_10m == exp_ctx
         ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_ctx
         lt1m_same_block = ctx_lt_1m_fresh and ctx_lt_1m == exp_ctx
         antichop_block = lt1m_same_block
         primary_ok = st_2h_ok and bias_30m_ok and ctx_1m_ok and not antichop_block
-        secondary_ok = False
-        context10m_ok = False
-        scalp_all_ok = primary_ok or secondary_ok or context10m_ok
-        signal_type = 'context10m' if context10m_ok else 'secondaire' if secondary_ok else 'principal' if primary_ok else 'blocked'
+        signal_type = 'principal' if primary_ok else 'blocked'
 
         logger.info(
-            f"[SCALP RANGE CHECK] {symbol} dir={signal_direction} "
-            f"range10m={range_10m}/{exp_st} "
+            f"[SCALP CHECK] {symbol} dir={signal_direction} trigger={trigger_label} "
             f"st2h={st_2h}/{exp_st} fresh={st_2h_fresh} ok={st_2h_ok} "
             f"st30m={st_30m}/{exp_st} fresh={st_30m_fresh} ok={st_30m_ok} "
             f"bias30m={bias_30m}/{exp_bias} fresh={bias_30m_fresh} ok={bias_30m_ok} "
             f"will30m={williams_30m['trend']} fresh={williams_30m['fresh']} ok={williams_30m['ok']} "
-            f"ctx10m={ctx_10m}/{exp_ctx} fresh={ctx_10m_fresh} ok={ctx_10m_ok} "
             f"ctx1m={ctx_1m}/{exp_ctx} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
             f"lt1m={ctx_lt_1m}/{exp_ctx} fresh={ctx_lt_1m_fresh} same_block={lt1m_same_block} "
-            f"primary={primary_ok} secondary={secondary_ok} context10m={context10m_ok} signal_type={signal_type} "
+            f"primary={primary_ok} signal_type={signal_type} "
             f"st30m_quality={st_30m_ok} "
             f"will30m_quality={williams_30m['ok']}"
         )
@@ -1163,7 +1156,7 @@ def evaluate_range_scalp_signal(symbol, range_10m, price, event_id, update_range
             PYRA_ENABLED.pop(pos_key, None)
             pos = None
 
-        if scalp_all_ok and pos is None and should_send(symbol, f"scalp_range_entry_{signal_type}_{exp_ctx}", event_id=event_id, cooldown=1800):
+        if primary_ok and pos is None and should_send(symbol, f"scalp_confluence_entry_{exp_ctx}", event_id=event_id, cooldown=1800):
             SCALP_POSITIONS[pos_key] = {
                 'direction': signal_direction,
                 'entry_count': 1,
@@ -1172,15 +1165,15 @@ def evaluate_range_scalp_signal(symbol, range_10m, price, event_id, update_range
             PYRA_ENABLED.pop(pos_key, None)
             pos = SCALP_POSITIONS[pos_key]
             scalp_entry = True
-        elif (pos and pos.get('direction') == signal_direction and scalp_all_ok
+        elif (pos and pos.get('direction') == signal_direction and primary_ok
                 and PYRA_ENABLED.get(pos_key, False)
                 and should_send(symbol, f"scalp_range_pyra_{exp_ctx}", event_id=event_id, cooldown=CONFIG['PYRA_COOLDOWN'])):
             pos['entry_count'] += 1
             scalp_pyra = True
-        elif not scalp_all_ok:
+        elif not primary_ok:
                 logger.info(
                     f"[SCALP BLOCKED] {symbol} dir={signal_direction} "
-                    f"primary={primary_ok} secondary={secondary_ok} context10m={context10m_ok} "
+                    f"primary={primary_ok} "
                     f"lt1m_same_block={lt1m_same_block} "
                     f"pos={pos['direction'] if pos else None}"
                 )
@@ -1208,12 +1201,10 @@ def evaluate_range_scalp_signal(symbol, range_10m, price, event_id, update_range
             f"Price: ${format_price(price)}\n"
             f"Exchange: OKX\n"
             f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-            f"[OK] Flip Range Filter 10m: {(range_10m or 'N/A').upper()}\n"
             f"[OK] ST AI 2H: {(st_2h or 'N/A').upper()}\n"
-            f"[OK] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
             f"[OK] Bias 30m: {(bias_30m or 'N/A').upper()} (EMA13/SMA30)\n"
+            f"[INFO] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
             f"{format_williams_filter_line('30m', williams_30m)}\n"
-            f"[OK] Zone ST Context 10m: {(ctx_10m or 'NEUTRE').upper()}\n"
             f"[OK] Zone ST Context 1m: {(ctx_1m or 'NEUTRE').upper()}\n"
             f"[ANTI-CHOP] LT 1m meme sens: {lt1m_same_block}",
             pos_key
@@ -1222,6 +1213,20 @@ def evaluate_range_scalp_signal(symbol, range_10m, price, event_id, update_range
             logger.warning(f"[SCALP] Entree {symbol} creee mais notification Telegram echouee")
         send_light_alert(signal_direction)
         logger.info(f"[SCALP] {'Pyramiding' if scalp_pyra else 'Entree'}: {symbol} {signal_direction}")
+        return True
+    return False
+
+
+def evaluate_range_scalp_signal(symbol, range_10m, price, event_id, update_range_state=True):
+    """Ancienne entree SCALP Range Filter 10m, desactivee."""
+    with STATE_LOCK:
+        init_symbol(symbol)
+        if update_range_state:
+            MOMENTUM_STATE[symbol]['range_filter_10m'] = range_10m
+            MOMENTUM_STATE[symbol]['range_filter_10m_ts'] = time.time()
+        persist_state()
+    logger.info(f"[SCALP RANGE DISABLED] {symbol} range10m={range_10m}")
+    return False
 
 
 def replay_recent_range_filter_10m(symbol, price=0, event_id=None, source='state_refresh'):
@@ -1458,11 +1463,11 @@ def webhook():
         if state_changed:
             persist_state()
             state_changed = False
-        replay_recent_range_filter_10m(
+        evaluate_scalp_primary_confluence(
             symbol,
             price=price,
-            event_id=f"rf10_replay_{symbol}_{tf}_{alert_type}_{event_id}",
-            source=f"{alert_type}_{tf}",
+            event_id=f"scalp_confluence_{symbol}_{tf}_{alert_type}_{event_id}",
+            trigger_label=f"{alert_type}_{tf}",
         )
 
     if alert_type == 'bias' and tf == '2h':
@@ -2010,7 +2015,6 @@ def startup():
             logger.warning(f"⚠️ Webhook setup: {e}")
 
     threading.Thread(target=update_bias_30m, daemon=True).start()
-    threading.Thread(target=update_range_filter_10m, daemon=True).start()
     threading.Thread(target=scalp_tv_signal_watchdog, daemon=True).start()
 
     # Sync état 4H depuis bot principal au démarrage
@@ -2044,11 +2048,10 @@ def startup():
         "<b>Scalping Bot demarre</b>\n"
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
-        "SCALP principale: RF10m + ST AI 2H + Bias 30m + Context 1m\n"
+        "SCALP principale: ST AI 2H + Bias 30m + Context 1m\n"
         "Qualite SCALP: ST AI 30m aligne + Williams 30m aligne\n"
         "SCALP CONTEXT10M: flip ST AI 30m + Bias 2H + Context 10m\n"
         "Anti-chop: ST Context LT 1m meme sens\n"
-        "Range Filter 10m: calcule par le bot via OKX\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
     )
