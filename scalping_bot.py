@@ -1092,7 +1092,7 @@ def evaluate_context10m_on_st30m_flip(symbol, st_30m, price, event_id, trigger_l
 
 
 def evaluate_context5m_confluence(symbol, price=0, event_id=None, trigger_label="state_refresh"):
-    """Entree SCALP CONTEXT5M: ST AI 2H + Bias 2H + ST Context 5m, bloque si Context 30m oppose."""
+    """Entree SCALP CONTEXT5M: ST AI 2H + Bias 2H + ST Context 5m, warning si Context 30m oppose."""
     with STATE_LOCK:
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
@@ -1125,15 +1125,15 @@ def evaluate_context5m_confluence(symbol, price=0, event_id=None, trigger_label=
         st_2h_ok = st_2h_fresh and st_2h == exp_ctx
         bias_2h_ok = bias_2h_fresh and bias_2h == exp_bias
         ctx_5m_ok = ctx_5m_fresh and ctx_5m == exp_ctx
-        ctx_30m_opp_block = ctx_30m_fresh and ctx_30m == opp_ctx
-        context5m_ok = st_2h_ok and bias_2h_ok and ctx_5m_ok and not ctx_30m_opp_block
+        ctx_30m_opp_warning = ctx_30m_fresh and ctx_30m == opp_ctx
+        context5m_ok = st_2h_ok and bias_2h_ok and ctx_5m_ok
 
         logger.info(
             f"[SCALP CONTEXT5M CHECK] {symbol} dir={signal_direction} "
             f"trigger={trigger_label} st2h={st_2h}/{exp_ctx} fresh={st_2h_fresh} ok={st_2h_ok} "
             f"bias2h={bias_2h}/{exp_bias} fresh={bias_2h_fresh} ok={bias_2h_ok} "
             f"ctx5m={ctx_5m}/{exp_ctx} fresh={ctx_5m_fresh} ok={ctx_5m_ok} "
-            f"ctx30m={ctx_30m}/{opp_ctx} fresh={ctx_30m_fresh} opp_block={ctx_30m_opp_block} "
+            f"ctx30m={ctx_30m}/{opp_ctx} fresh={ctx_30m_fresh} opp_warning={ctx_30m_opp_warning} "
             f"entry={context5m_ok}"
         )
 
@@ -1163,6 +1163,11 @@ def evaluate_context5m_confluence(symbol, price=0, event_id=None, trigger_label=
         persist_state()
 
     if scalp_entry:
+        ctx_30m_warning_line = (
+            f"<b>[WARNING NON BLOQUANT] Zone ST Context 30m OPPOSEE: {(ctx_30m or 'NEUTRE').upper()}</b>\n"
+            if ctx_30m_opp_warning
+            else f"[INFO] Zone ST Context 30m: {(ctx_30m or 'NEUTRE').upper()}\n"
+        )
         tg_sent = send_telegram_with_buttons(
             f"<b>SCALP {signal_direction} - ENTREE CONTEXT5M</b> {symbol}\n"
             f"--------------------\n"
@@ -1173,7 +1178,7 @@ def evaluate_context5m_confluence(symbol, price=0, event_id=None, trigger_label=
             f"[OK] ST AI 2H: {(st_2h or 'N/A').upper()}\n"
             f"[OK] Bias 2H: {(bias_2h or 'N/A').upper()} (EMA17/SMA40)\n"
             f"[OK] Zone ST Context 5m: {(ctx_5m or 'N/A').upper()}\n"
-            f"[ANTI-TRADE] Zone ST Context 30m opposee: {(ctx_30m or 'NEUTRE').upper()}",
+            f"{ctx_30m_warning_line}",
             pos_key,
         )
         if not tg_sent:
