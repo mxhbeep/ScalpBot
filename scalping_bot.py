@@ -255,7 +255,7 @@ def update_bias_20m():
                         logger.info(f"[BIAS] {symbol} bias20m=None reason=insufficient_confirmed_candles ({count}/30)")
                         results[symbol] = {'bias': None, 'price': None}
                         continue
-                    bias = calc_bias(df, ema_len=8, sma_len=21)
+                    bias = calc_bias(df, ema_len=13, sma_len=30)
                     williams_30m = calc_williams_ema(df, length=14, ema_length=14)
                     price = float(df['close'].iloc[-1]) if len(df) else None
                     results[symbol] = {'bias': bias, 'price': price, 'williams_30m': williams_30m}
@@ -303,7 +303,7 @@ def update_bias_30m():
                         logger.info(f"[BIAS] {symbol} bias30m=None reason=insufficient_confirmed_candles ({count}/30)")
                         results[symbol] = {'bias': None, 'price': None}
                         continue
-                    bias = calc_bias(df, ema_len=8, sma_len=21)
+                    bias = calc_bias(df, ema_len=13, sma_len=30)
                     williams_30m = calc_williams_ema(df, length=14, ema_length=14)
                     williams_1h = calc_williams_ema(df_1h, length=14, ema_length=14) if df_1h is not None else None
                     price = float(df['close'].iloc[-1]) if len(df) else None
@@ -1132,7 +1132,7 @@ def evaluate_range_scalp_signal(symbol, range_10m, price, event_id, update_range
         ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_ctx
         lt1m_same_block = ctx_lt_1m_fresh and ctx_lt_1m == exp_ctx
         antichop_block = lt1m_same_block
-        primary_ok = st_2h_ok and st_30m_ok and bias_30m_ok and ctx_1m_ok and not antichop_block
+        primary_ok = st_2h_ok and bias_30m_ok and ctx_1m_ok and not antichop_block
         secondary_ok = False
         context10m_ok = False
         scalp_all_ok = primary_ok or secondary_ok or context10m_ok
@@ -1149,6 +1149,7 @@ def evaluate_range_scalp_signal(symbol, range_10m, price, event_id, update_range
             f"ctx1m={ctx_1m}/{exp_ctx} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
             f"lt1m={ctx_lt_1m}/{exp_ctx} fresh={ctx_lt_1m_fresh} same_block={lt1m_same_block} "
             f"primary={primary_ok} secondary={secondary_ok} context10m={context10m_ok} signal_type={signal_type} "
+            f"st30m_quality={st_30m_ok} "
             f"will30m_quality={williams_30m['ok']}"
         )
 
@@ -1210,7 +1211,7 @@ def evaluate_range_scalp_signal(symbol, range_10m, price, event_id, update_range
             f"[OK] Flip Range Filter 10m: {(range_10m or 'N/A').upper()}\n"
             f"[OK] ST AI 2H: {(st_2h or 'N/A').upper()}\n"
             f"[OK] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
-            f"[OK] Bias 30m: {(bias_30m or 'N/A').upper()} (EMA8/SMA21)\n"
+            f"[OK] Bias 30m: {(bias_30m or 'N/A').upper()} (EMA13/SMA30)\n"
             f"{format_williams_filter_line('30m', williams_30m)}\n"
             f"[OK] Zone ST Context 10m: {(ctx_10m or 'NEUTRE').upper()}\n"
             f"[OK] Zone ST Context 1m: {(ctx_1m or 'NEUTRE').upper()}\n"
@@ -2043,7 +2044,8 @@ def startup():
         "<b>Scalping Bot demarre</b>\n"
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
-        "SCALP principale: RF10m + ST AI 2H + ST AI 30m + Bias 30m + Context 1m\n"
+        "SCALP principale: RF10m + ST AI 2H + Bias 30m + Context 1m\n"
+        "Qualite SCALP: ST AI 30m aligne + Williams 30m aligne\n"
         "SCALP CONTEXT10M: flip ST AI 30m + Bias 2H + Context 10m\n"
         "Anti-chop: ST Context LT 1m meme sens\n"
         "Range Filter 10m: calcule par le bot via OKX\n"
