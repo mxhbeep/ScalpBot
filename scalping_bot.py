@@ -754,7 +754,7 @@ def send_notification(title: str, message: str, priority=5, tags=None, telegram=
 
 def sanitize_scalp_notification(msg: str) -> str:
     """Normalise le titre directionnel des alertes scalp et ajoute la pastille couleur.
-    N'alimente plus ntfy (voir send_light_alert) donc les emojis sont conserves."""
+    Les emojis sont conserves: Telegram les affiche et ntfy les ignore si besoin."""
     text = str(msg or '')
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     text_joined = '\n'.join(lines)
@@ -769,7 +769,7 @@ def sanitize_scalp_notification(msg: str) -> str:
     return '\n'.join(lines)
 
 
-def send_telegram(msg, ntfy=False):
+def send_telegram(msg, ntfy=True):
     msg = sanitize_scalp_notification(msg)
     result = send_notification(
         notification_title_from_message(msg),
@@ -796,35 +796,12 @@ def send_telegram_with_buttons(msg, callback_key):
         priority=5,
         tags=[],
         telegram=True,
-        ntfy=False,
+        ntfy=True,
         reply_markup=keyboard,
     )
     if not result.get('telegram_scalp'):
         logger.warning("position creee sans notification Telegram")
     return bool(result.get('telegram_scalp'))
-
-
-def send_light_alert(direction: str) -> bool:
-    """Envoie uniquement LONG ou SHORT au listener ntfy des ampoules."""
-    command = str(direction or '').strip().upper()
-    if command not in ('LONG', 'SHORT'):
-        logger.warning(f"[LIGHTS] Commande ignoree: {command!r}")
-        return False
-
-    result = send_notification(
-        title=f"SCALP {command}",
-        message=command,
-        priority=5,
-        tags=[],
-        telegram=False,
-        ntfy=True,
-    )
-    sent = bool(result.get('ntfy'))
-    if sent:
-        logger.info(f"[LIGHTS] Alerte {command} envoyee")
-    else:
-        logger.warning(f"[LIGHTS] Echec alerte {command}")
-    return sent
 
 
 def evaluate_context_scalp_secondary(symbol, ctx_1m, price, event_id):
@@ -925,7 +902,6 @@ def evaluate_context_scalp_secondary(symbol, ctx_1m, price, event_id):
         )
         if not tg_sent:
             logger.warning(f"[SCALP] Entree secondaire {symbol} creee mais notification Telegram echouee")
-        send_light_alert(signal_direction)
         logger.info(f"[SCALP] Entree secondaire: {symbol} {signal_direction}")
         return True
     return False
@@ -1003,7 +979,6 @@ def evaluate_context30_strategy(symbol, price=0, event_id=None, source='webhook'
         )
         if not tg_sent:
             logger.warning(f"[CONTEXT30] Entree {symbol} creee mais notification Telegram echouee")
-        send_light_alert(signal_direction)
         logger.info(f"[CONTEXT30] Entree: {symbol} {signal_direction}")
         return True
     return False
@@ -1085,7 +1060,6 @@ def evaluate_context10m_on_st30m_flip(symbol, st_30m, price, event_id, trigger_l
         )
         if not tg_sent:
             logger.warning(f"[SCALP CONTEXT10M] Entree {symbol} creee mais notification Telegram echouee")
-        send_light_alert(signal_direction)
         logger.info(f"[SCALP CONTEXT10M] Entree: {symbol} {signal_direction}")
         return True
     return False
@@ -1183,7 +1157,6 @@ def evaluate_context5m_confluence(symbol, price=0, event_id=None, trigger_label=
         )
         if not tg_sent:
             logger.warning(f"[SCALP CONTEXT5M] Entree {symbol} creee mais notification Telegram echouee")
-        send_light_alert(signal_direction)
         logger.info(f"[SCALP CONTEXT5M] Entree: {symbol} {signal_direction}")
         return True
     return False
@@ -1310,7 +1283,6 @@ def evaluate_scalp_primary_confluence(symbol, price=0, event_id=None, trigger_la
         )
         if not tg_sent:
             logger.warning(f"[SCALP] Entree {symbol} creee mais notification Telegram echouee")
-        send_light_alert(signal_direction)
         logger.info(f"[SCALP] {'Pyramiding' if scalp_pyra else 'Entree'}: {symbol} {signal_direction}")
         return True
     return False
@@ -1806,7 +1778,6 @@ def webhook():
             )
             if not tg_sent:
                 logger.warning(f"[SCALP] Entree {symbol} creee mais notification Telegram echouee")
-            send_light_alert(signal_direction)
             logger.info(f"[SCALP] Entree: {symbol} {signal_direction}")
             state_changed = True
 
