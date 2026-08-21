@@ -30,7 +30,7 @@ CONFIG = {
     'TELEGRAM_BOT_TOKEN': os.environ.get('TELEGRAM_BOT_TOKEN', ''),
     'TELEGRAM_CHAT_ID':   os.environ.get('TELEGRAM_CHAT_ID', ''),
     'REDIS_URL':          os.environ.get('REDIS_URL', ''),
-    'NTFY_TOPIC':         os.environ.get('NTFY_TOPIC', 'maxence-trading-3f8a72'),
+    'NTFY_TOPIC':         os.environ.get('NTFY_TOPIC') or 'maxence-trading-3f8a72',
     'MIN_COOLDOWN':       3600,   # 1H entrée
     'PYRA_COOLDOWN':      1800,   # 30min pyramiding
 
@@ -683,6 +683,7 @@ class NtfyChannel(NotificationChannel):
     def send(self, title: str, message: str, priority=5, tags=None, **kwargs) -> bool:
         topic = str(self.topic_getter() or '').strip()
         if not topic:
+            logger.warning("ntfy topic manquant")
             return False
         url = topic if topic.startswith(('http://', 'https://')) else f"https://ntfy.sh/{topic}"
         headers = {
@@ -1929,7 +1930,13 @@ def test_ntfy():
     )
     ok = bool(result.get('ntfy'))
     logger.info(f"[NTFY TEST] result={result}")
-    return jsonify({'status': 'ok' if ok else 'error', 'result': result}), (200 if ok else 502)
+    topic = CONFIG.get('NTFY_TOPIC', '')
+    return jsonify({
+        'status': 'ok' if ok else 'error',
+        'result': result,
+        'ntfy_topic_configured': bool(topic),
+        'ntfy_topic': topic if topic.startswith(('http://', 'https://')) else f"https://ntfy.sh/{topic}" if topic else '',
+    }), (200 if ok else 502)
 
 @app.route('/scalp_on', methods=['POST'])
 def scalp_on():
