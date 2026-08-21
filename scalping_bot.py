@@ -775,10 +775,12 @@ def send_telegram(msg, ntfy=True):
         notification_title_from_message(msg),
         msg,
         priority=5,
-        tags=[],
+        tags=None,
         telegram=True,
         ntfy=ntfy,
     )
+    if ntfy and not result.get('ntfy'):
+        logger.warning("[NTFY] Echec envoi depuis send_telegram")
     return bool(result.get('telegram_scalp'))
 
 
@@ -794,13 +796,15 @@ def send_telegram_with_buttons(msg, callback_key):
         notification_title_from_message(msg),
         msg,
         priority=5,
-        tags=[],
+        tags=None,
         telegram=True,
         ntfy=True,
         reply_markup=keyboard,
     )
     if not result.get('telegram_scalp'):
         logger.warning("position creee sans notification Telegram")
+    if not result.get('ntfy'):
+        logger.warning("position creee sans notification ntfy")
     return bool(result.get('telegram_scalp'))
 
 
@@ -1909,6 +1913,23 @@ def scalp_status():
         'positions': len(SCALP_POSITIONS),
         'assets': len(CONFIG['SYMBOLS']),
     })
+
+@app.route('/test_ntfy', methods=['POST'])
+def test_ntfy():
+    secret = os.environ.get('ADMIN_SECRET', '')
+    if not secret or request.headers.get('X-Admin-Secret') != secret:
+        return jsonify({'error': 'unauthorized'}), 401
+    result = send_notification(
+        title='SCALPBOT TEST NTFY',
+        message=f"Test ntfy scalpbot - {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S')} Shanghai",
+        priority=5,
+        tags=['bell'],
+        telegram=False,
+        ntfy=True,
+    )
+    ok = bool(result.get('ntfy'))
+    logger.info(f"[NTFY TEST] result={result}")
+    return jsonify({'status': 'ok' if ok else 'error', 'result': result}), (200 if ok else 502)
 
 @app.route('/scalp_on', methods=['POST'])
 def scalp_on():
