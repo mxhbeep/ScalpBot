@@ -138,7 +138,7 @@ def format_williams_filter_line(label, williams_filter):
     trend = williams_filter.get('trend')
     if value is None or ema_value is None:
         return f"[OK] Williams {label}: N/A"
-    relation = ">" if trend == 'bull' else "<" if trend == 'bear' else "="
+    relation = "&gt;" if trend == 'bull' else "&lt;" if trend == 'bear' else "="
     return f"[OK] Williams {label}: W%R {value:.2f} {relation} EMA14 {ema_value:.2f}"
 
 def calc_range_filter_signal(df, per=100, mult=3.0):
