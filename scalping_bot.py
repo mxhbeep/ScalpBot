@@ -527,16 +527,23 @@ def init_symbol(symbol):
             'st_context_lt_1m': None,
             'st_context_1m_ts': None,
             'st_context_lt_1m_ts': None,
+            'st_context_1m_raw': None,
+            'st_context_lt_1m_raw': None,
             'st_context_3m':    None,
             'st_context_lt_3m': None,
             'st_context_3m_ts': None,
             'st_context_lt_3m_ts': None,
+            'st_context_3m_raw': None,
+            'st_context_lt_3m_raw': None,
             'st_context_10m':   None,
             'st_context_10m_ts': None,
+            'st_context_10m_raw': None,
             'st_context_2h':    None,
             'st_context_2h_ts': None,
+            'st_context_2h_raw': None,
             'st_context_30m':   None,
             'st_context_30m_ts': None,
+            'st_context_30m_raw': None,
             'st_context_5m':    None,
             'st_context_15m':   None,
             'st_context_15m_ts': None,
@@ -547,6 +554,11 @@ def init_symbol(symbol):
             'st_context_1h_ts': None,
             'st_context_lt_5m_ts': None,
             'st_context_lt_1h_ts': None,
+            'st_context_5m_raw': None,
+            'st_context_15m_raw': None,
+            'st_context_1h_raw': None,
+            'st_context_lt_5m_raw': None,
+            'st_context_lt_1h_raw': None,
         }
 
 def format_price(price):
@@ -1210,7 +1222,9 @@ def evaluate_scalp_primary_confluence(symbol, price=0, event_id=None, trigger_la
         primary_ok = st_2h_ok and bias_30m_ok and ctx_1m_ok and not antichop_block
         signal_type = 'principal' if primary_ok else 'blocked'
 
-        logger.info(
+        scalp_check_level = logging.INFO if primary_ok else logging.DEBUG
+        logger.log(
+            scalp_check_level,
             f"[SCALP CHECK] {symbol} dir={signal_direction} trigger={trigger_label} "
             f"st2h={st_2h}/{exp_st} fresh={st_2h_fresh} ok={st_2h_ok} "
             f"st30m={st_30m}/{exp_st} fresh={st_30m_fresh} ok={st_30m_ok} "
@@ -1233,27 +1247,38 @@ def evaluate_scalp_primary_confluence(symbol, price=0, event_id=None, trigger_la
             PYRA_ENABLED.pop(pos_key, None)
             pos = None
 
-        if primary_ok and pos is None and should_send(symbol, f"scalp_confluence_entry_{exp_ctx}", event_id=event_id, cooldown=1800):
-            SCALP_POSITIONS[pos_key] = {
-                'direction': signal_direction,
-                'entry_count': 1,
-                'signal_type': signal_type,
-            }
-            PYRA_ENABLED.pop(pos_key, None)
-            pos = SCALP_POSITIONS[pos_key]
-            scalp_entry = True
+        if primary_ok and pos is None:
+            if should_send(symbol, f"scalp_confluence_entry_{exp_ctx}", event_id=event_id, cooldown=1800):
+                SCALP_POSITIONS[pos_key] = {
+                    'direction': signal_direction,
+                    'entry_count': 1,
+                    'signal_type': signal_type,
+                }
+                PYRA_ENABLED.pop(pos_key, None)
+                pos = SCALP_POSITIONS[pos_key]
+                scalp_entry = True
+            else:
+                logger.info(
+                    f"[SCALP SKIPPED] {symbol} dir={signal_direction} "
+                    f"reason=cooldown_or_duplicate event_id={event_id}"
+                )
         elif (pos and pos.get('direction') == signal_direction and primary_ok
                 and PYRA_ENABLED.get(pos_key, False)
                 and should_send(symbol, f"scalp_range_pyra_{exp_ctx}", event_id=event_id, cooldown=CONFIG['PYRA_COOLDOWN'])):
             pos['entry_count'] += 1
             scalp_pyra = True
         elif not primary_ok:
-                logger.info(
-                    f"[SCALP BLOCKED] {symbol} dir={signal_direction} "
-                    f"primary={primary_ok} "
-                    f"lt1m_same_block={lt1m_same_block} "
-                    f"pos={pos['direction'] if pos else None}"
-                )
+            logger.debug(
+                f"[SCALP BLOCKED] {symbol} dir={signal_direction} "
+                f"primary={primary_ok} "
+                f"lt1m_same_block={lt1m_same_block} "
+                f"pos={pos['direction'] if pos else None}"
+            )
+        elif pos and pos.get('direction') == signal_direction:
+            logger.info(
+                f"[SCALP SKIPPED] {symbol} dir={signal_direction} "
+                f"reason=position_already_tracked pyra_enabled={PYRA_ENABLED.get(pos_key, False)}"
+            )
 
         persist_state()
 
@@ -1455,15 +1480,19 @@ def webhook():
         if tf == '1m':
             m['st_context_lt_1m'] = lt_parsed
             m['st_context_lt_1m_ts'] = time.time()
+            m['st_context_lt_1m_raw'] = lt_val
         elif tf == '3m':
             m['st_context_lt_3m'] = lt_parsed
             m['st_context_lt_3m_ts'] = time.time()
+            m['st_context_lt_3m_raw'] = lt_val
         elif tf == '5m':
             m['st_context_lt_5m'] = lt_parsed
             m['st_context_lt_5m_ts'] = time.time()
+            m['st_context_lt_5m_raw'] = lt_val
         elif tf == '1h':
             m['st_context_lt_1h'] = lt_parsed
             m['st_context_lt_1h_ts'] = time.time()
+            m['st_context_lt_1h_raw'] = lt_val
         state_changed = True
 
     elif alert_type == 'st_context':
@@ -1476,34 +1505,42 @@ def webhook():
         if tf == '1m':
             m['st_context_1m'] = ctx_parsed
             m['st_context_1m_ts'] = time.time()
+            m['st_context_1m_raw'] = ctx_val
             state_changed = True
         elif tf == '3m':
             m['st_context_3m'] = ctx_parsed
             m['st_context_3m_ts'] = time.time()
+            m['st_context_3m_raw'] = ctx_val
             state_changed = True
         elif tf == '5m':
             m['st_context_5m'] = ctx_parsed
             m['st_context_5m_ts'] = time.time()
+            m['st_context_5m_raw'] = ctx_val
             state_changed = True
         elif tf == '10m':
             m['st_context_10m'] = ctx_parsed
             m['st_context_10m_ts'] = time.time()
+            m['st_context_10m_raw'] = ctx_val
             state_changed = True
         elif tf == '15m':
             m['st_context_15m'] = ctx_parsed
             m['st_context_15m_ts'] = time.time()
+            m['st_context_15m_raw'] = ctx_val
             state_changed = True
         elif tf == '30m':
             m['st_context_30m'] = ctx_parsed
             m['st_context_30m_ts'] = time.time()
+            m['st_context_30m_raw'] = ctx_val
             state_changed = True
         elif tf == '2h':
             m['st_context_2h'] = ctx_parsed
             m['st_context_2h_ts'] = time.time()
+            m['st_context_2h_raw'] = ctx_val
             state_changed = True
         elif tf == '1h':
             m['st_context_1h'] = ctx_parsed
             m['st_context_1h_ts'] = time.time()
+            m['st_context_1h_raw'] = ctx_val
             state_changed = True
 
     if alert_type == 'supertrend' and tf == '30m' and flipped_30m:
@@ -1914,6 +1951,117 @@ def scalp_status():
         'positions': len(SCALP_POSITIONS),
         'assets': len(CONFIG['SYMBOLS']),
     })
+
+
+def normalize_symbol_for_debug(raw_symbol):
+    symbol = (raw_symbol or '').strip().upper()
+    if not symbol:
+        return ''
+    if '/' not in symbol:
+        for quote in ('USDT', 'USDC'):
+            if symbol.endswith(quote):
+                symbol = symbol[:-len(quote)] + '/' + quote
+                break
+        else:
+            symbol = f"{symbol}/USDT"
+    if symbol.endswith('/USDC'):
+        symbol = symbol.replace('/USDC', '/USDT')
+    return symbol
+
+
+def signal_age_seconds(ts):
+    if not ts:
+        return None
+    try:
+        return round(time.time() - float(ts), 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def signal_debug_payload(state, field, max_age):
+    ts = state.get(f'{field}_ts')
+    age = signal_age_seconds(ts)
+    return {
+        'value': state.get(field),
+        'raw': state.get(f'{field}_raw'),
+        'ts': ts,
+        'age_sec': age,
+        'fresh': bool(state.get(field)) and age is not None and age <= max_age,
+    }
+
+
+@app.route('/debug_symbol', methods=['GET'])
+def debug_symbol():
+    secret = os.environ.get('ADMIN_SECRET', '')
+    if not secret or request.headers.get('X-Admin-Secret') != secret:
+        return jsonify({'error': 'unauthorized'}), 401
+
+    symbol = normalize_symbol_for_debug(request.args.get('symbol', ''))
+    if symbol not in CONFIG['SYMBOLS']:
+        return jsonify({
+            'status': 'error',
+            'reason': 'not_in_watchlist',
+            'symbol': symbol,
+            'available_symbols': sorted(CONFIG['SYMBOLS'].keys()),
+        }), 404
+
+    with STATE_LOCK:
+        init_symbol(symbol)
+        m = dict(MOMENTUM_STATE.get(symbol, {}))
+        pos_key = f"{symbol}_SCALP"
+        pos = dict(SCALP_POSITIONS.get(pos_key, {})) if SCALP_POSITIONS.get(pos_key) else None
+        pyra_enabled = bool(PYRA_ENABLED.get(pos_key, False))
+
+    ctx_1m = m.get('st_context_1m')
+    direction = 'LONG' if ctx_1m == 'buy' else 'SHORT' if ctx_1m == 'sell' else None
+    exp_st = 'buy' if direction == 'LONG' else 'sell' if direction == 'SHORT' else None
+    exp_bias = 'bull' if direction == 'LONG' else 'bear' if direction == 'SHORT' else None
+
+    st2h = signal_debug_payload(m, 'st_ai_2h', 6 * 3600)
+    st30m = signal_debug_payload(m, 'st_ai_30m', 90 * 60)
+    bias30m = signal_debug_payload(m, 'bias_30m', 2 * 3600)
+    ctx1m = signal_debug_payload(m, 'st_context_1m', 5 * 60)
+    lt1m = signal_debug_payload(m, 'st_context_lt_1m', 5 * 60)
+
+    if direction:
+        st2h_ok = st2h['fresh'] and st2h['value'] == exp_st
+        bias30m_ok = bias30m['fresh'] and bias30m['value'] == exp_bias
+        ctx1m_ok = ctx1m['fresh'] and ctx1m['value'] == exp_st
+        lt1m_same_block = lt1m['fresh'] and lt1m['value'] == exp_st
+        primary_ok = st2h_ok and bias30m_ok and ctx1m_ok and not lt1m_same_block
+    else:
+        st2h_ok = bias30m_ok = ctx1m_ok = lt1m_same_block = primary_ok = False
+
+    return jsonify({
+        'status': 'ok',
+        'symbol': symbol,
+        'enabled': SCALP_ENABLED,
+        'now_shanghai': datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S'),
+        'scalp_primary': {
+            'direction_from_context_1m': direction,
+            'expected_st': exp_st,
+            'expected_bias': exp_bias,
+            'primary_ok': primary_ok,
+            'st2h_ok': st2h_ok,
+            'bias30m_ok': bias30m_ok,
+            'ctx1m_ok': ctx1m_ok,
+            'lt1m_same_block': lt1m_same_block,
+            'position': pos,
+            'pyra_enabled': pyra_enabled,
+        },
+        'signals': {
+            'st_ai_2h': st2h,
+            'st_ai_30m': st30m,
+            'bias_30m': bias30m,
+            'st_context_1m': ctx1m,
+            'st_context_lt_1m': lt1m,
+            'st_context_5m': signal_debug_payload(m, 'st_context_5m', 15 * 60),
+            'st_context_10m': signal_debug_payload(m, 'st_context_10m', 30 * 60),
+            'st_context_30m': signal_debug_payload(m, 'st_context_30m', 90 * 60),
+            'st_context_2h': signal_debug_payload(m, 'st_context_2h', 6 * 3600),
+        },
+    })
+
 
 @app.route('/test_ntfy', methods=['POST'])
 def test_ntfy():
