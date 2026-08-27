@@ -41,14 +41,14 @@ CONFIG = {
         'CVX/USDT':     {'exchange': 'okx'},
         'DOGE/USDT':    {'exchange': 'okx'},
         'ETH/USDT':     {'exchange': 'okx'},
-        'FARTCOIN/USDT': {'exchange': 'okx'},
-        'HYPE/USDT':    {'exchange': 'okx'},
+        'FARTCOIN/USDT': {'exchange': 'okx', 'okx_inst_id': 'FARTCOIN-USDT-SWAP'},
+        'HYPE/USDT':    {'exchange': 'okx', 'okx_inst_id': 'HYPE-USDT-SWAP'},
         'LINK/USDT':    {'exchange': 'okx'},
         'PENGU/USDT':   {'exchange': 'okx'},
         'PEPE/USDT':    {'exchange': 'okx'},
-        'USELESS/USDT': {'exchange': 'okx'},
+        'USELESS/USDT': {'exchange': 'okx', 'okx_inst_id': 'USELESS-USDT-SWAP'},
         'XRP/USDT':     {'exchange': 'okx'},
-        'XPL/USDT':     {'exchange': 'okx'},
+        'XPL/USDT':     {'exchange': 'okx', 'okx_inst_id': 'XPL-USDT-SWAP'},
         'ZEC/USDT':     {'exchange': 'okx'},
     }
 }
@@ -60,8 +60,9 @@ CONFIG = {
 def fetch_ohlcv_okx(symbol, tf, limit=100):
     """Fetch OHLCV depuis OKX API publique."""
     try:
-        inst_id = symbol.replace('/', '-')
-        bar_map = {'1m': '1m', '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1H', '2h': '2H', '4h': '4H', '1d': '1D'}
+        cfg = CONFIG['SYMBOLS'].get(symbol, {})
+        inst_id = cfg.get('okx_inst_id') or symbol.replace('/', '-')
+        bar_map = {'1m': '1m', '5m': '5m', '10m': '10m', '15m': '15m', '30m': '30m', '1h': '1H', '2h': '2H', '4h': '4H', '1d': '1D'}
         bar = bar_map.get(tf, '1H')
         url = f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar={bar}&limit={limit}"
         resp = requests.get(url, timeout=10)
@@ -345,6 +346,12 @@ def update_bias_30m():
                         symbol,
                         price=result.get('price'),
                         event_id=f"bias30m_refresh_scalp_{symbol}_{int(time.time())}",
+                        trigger_label="Bias 30m refresh",
+                    )
+                    evaluate_scalp_30m_confluence(
+                        symbol,
+                        price=result.get('price'),
+                        event_id=f"bias30m_refresh_scalp30m_{symbol}_{int(time.time())}",
                         trigger_label="Bias 30m refresh",
                     )
             bias_ok_count = sum(1 for r in results.values() if r.get('bias') is not None)
@@ -1010,40 +1017,46 @@ def evaluate_context30_strategy(symbol, price=0, event_id=None, source='webhook'
     return False
 
 
-def evaluate_context10m_on_st30m_flip(symbol, st_30m, price, event_id, trigger_label="Flip ST AI 30m"):
-    """Entree SCALP CONTEXT10M: ST AI 30m + Bias 2H + ST Context 10m."""
-    if st_30m not in ('buy', 'sell'):
-        return False
-
+def evaluate_scalp_30m_confluence(symbol, price=0, event_id=None, trigger_label="state_refresh"):
+    """Entree SCALP 30M: ST AI 30m + Bias 30m + ST Context 1m."""
     with STATE_LOCK:
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
 
         if not SCALP_ENABLED:
-            logger.info(f"[SCALP OFF] Signal context10m ignore: {symbol}")
+            logger.info(f"[SCALP OFF] Signal 30m ignore: {symbol}")
             persist_state()
             return False
 
-        signal_direction = 'LONG' if st_30m == 'buy' else 'SHORT'
-        exp_ctx = st_30m
+        ctx_1m = m.get('st_context_1m')
+        if ctx_1m not in ('buy', 'sell'):
+            logger.debug(f"[SCALP 30M WAITING] {symbol} no active Context 1m trigger={trigger_label}")
+            persist_state()
+            return False
+
+        signal_direction = 'LONG' if ctx_1m == 'buy' else 'SHORT'
+        exp_st = ctx_1m
         exp_bias = 'bull' if signal_direction == 'LONG' else 'bear'
 
-        bias_2h = m.get('bias_2h')
-        ctx_10m = m.get('st_context_10m')
+        st_30m = m.get('st_ai_30m')
+        bias_30m = m.get('bias_30m')
+
         st_30m_fresh = bool(st_30m) and is_fresh(m.get('st_ai_30m_ts'), 90 * 60)
-        bias_2h_fresh = bool(bias_2h) and is_fresh(m.get('bias_2h_ts'), 6 * 3600)
-        ctx_10m_fresh = bool(ctx_10m) and is_fresh(m.get('st_context_10m_ts'), 30 * 60)
+        bias_30m_fresh = bool(bias_30m) and is_fresh(m.get('bias_30m_ts'), 2 * 3600)
+        ctx_1m_fresh = bool(ctx_1m) and is_fresh(m.get('st_context_1m_ts'), 5 * 60)
 
-        bias_2h_ok = bias_2h_fresh and bias_2h == exp_bias
-        ctx_10m_ok = ctx_10m_fresh and ctx_10m == exp_ctx
-        context10m_ok = st_30m_fresh and bias_2h_ok and ctx_10m_ok
+        st_30m_ok = st_30m_fresh and st_30m == exp_st
+        bias_30m_ok = bias_30m_fresh and bias_30m == exp_bias
+        ctx_1m_ok = ctx_1m_fresh and ctx_1m == exp_st
+        scalp_30m_ok = st_30m_ok and bias_30m_ok and ctx_1m_ok
 
-        logger.info(
-            f"[SCALP CONTEXT10M CHECK] {symbol} dir={signal_direction} "
-            f"trigger={trigger_label} st30m={st_30m}/{exp_ctx} fresh={st_30m_fresh} "
-            f"bias2h={bias_2h}/{exp_bias} fresh={bias_2h_fresh} ok={bias_2h_ok} "
-            f"ctx10m={ctx_10m}/{exp_ctx} fresh={ctx_10m_fresh} ok={ctx_10m_ok} "
-            f"entry={context10m_ok}"
+        logger.log(
+            logging.INFO if scalp_30m_ok else logging.DEBUG,
+            f"[SCALP 30M CHECK] {symbol} dir={signal_direction} trigger={trigger_label} "
+            f"st30m={st_30m}/{exp_st} fresh={st_30m_fresh} ok={st_30m_ok} "
+            f"bias30m={bias_30m}/{exp_bias} fresh={bias_30m_fresh} ok={bias_30m_ok} "
+            f"ctx1m={ctx_1m}/{exp_st} fresh={ctx_1m_fresh} ok={ctx_1m_ok} "
+            f"entry={scalp_30m_ok}"
         )
 
         pos_key = f"{symbol}_SCALP"
@@ -1054,42 +1067,46 @@ def evaluate_context10m_on_st30m_flip(symbol, st_30m, price, event_id, trigger_l
             pos = None
 
         scalp_entry = False
-        if context10m_ok and pos is None and should_send(
+        if scalp_30m_ok and pos is None and should_send(
             symbol,
-            f"scalp_context10m_st30m_flip_{exp_ctx}",
+            f"scalp_30m_entry_{exp_st}",
             event_id=event_id,
             cooldown=1800,
         ):
             SCALP_POSITIONS[pos_key] = {
                 'direction': signal_direction,
                 'entry_count': 1,
-                'signal_type': 'context10m',
+                'signal_type': 'scalp30m',
             }
             PYRA_ENABLED.pop(pos_key, None)
             pos = SCALP_POSITIONS[pos_key]
             scalp_entry = True
+        elif pos and pos.get('direction') == signal_direction and scalp_30m_ok:
+            logger.info(
+                f"[SCALP 30M SKIPPED] {symbol} dir={signal_direction} "
+                f"reason=position_already_tracked"
+            )
 
         persist_state()
 
     if scalp_entry:
         tg_sent = send_telegram_with_buttons(
-            f"<b>SCALP {signal_direction} - ENTREE CONTEXT10M</b> {symbol}\n"
+            f"<b>SCALP {signal_direction} - ENTREE 30M</b> {symbol}\n"
             f"--------------------\n"
             f"Direction: {signal_direction}\n"
             f"Price: ${format_price(price)}\n"
             f"Exchange: OKX\n"
             f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-            f"[OK] {trigger_label}: {(st_30m or 'N/A').upper()}\n"
-            f"[OK] Bias 2H: {(bias_2h or 'N/A').upper()} (EMA17/SMA40)\n"
-            f"[OK] Zone ST Context 10m: {(ctx_10m or 'N/A').upper()}",
+            f"[OK] ST AI 30m: {(st_30m or 'N/A').upper()}\n"
+            f"[OK] Bias 30m: {(bias_30m or 'N/A').upper()} (EMA13/SMA30)\n"
+            f"[OK] Zone ST Context 1m: {(ctx_1m or 'NEUTRE').upper()}",
             pos_key,
         )
         if not tg_sent:
-            logger.warning(f"[SCALP CONTEXT10M] Entree {symbol} creee mais notification Telegram echouee")
-        logger.info(f"[SCALP CONTEXT10M] Entree: {symbol} {signal_direction}")
+            logger.warning(f"[SCALP 30M] Entree {symbol} creee mais notification Telegram echouee")
+        logger.info(f"[SCALP 30M] Entree: {symbol} {signal_direction}")
         return True
     return False
-
 
 def evaluate_context5m_confluence(symbol, price=0, event_id=None, trigger_label="state_refresh"):
     """Entree SCALP CONTEXT5M: ST AI 2H + Bias 2H + ST Context 5m, warning si Context 30m oppose."""
@@ -1296,7 +1313,7 @@ def evaluate_scalp_primary_confluence(symbol, price=0, event_id=None, trigger_la
         entry_label = {
             'principal': 'ENTREE PRINCIPALE',
             'secondaire': 'ENTREE SECONDAIRE',
-            'context10m': 'ENTREE CONTEXT10M',
+            'scalp30m': 'ENTREE 30M',
         }.get(pos.get('signal_type'), 'ENTREE')
         quality_txt = (
             ("<b>[QUALITE] ST AI 30m aligne</b>\n" if st_30m_ok else "")
@@ -1552,30 +1569,6 @@ def webhook():
             m['st_context_1h_raw'] = ctx_val
             state_changed = True
 
-    if alert_type == 'supertrend' and tf == '30m' and flipped_30m:
-        if state_changed:
-            persist_state()
-            state_changed = False
-        evaluate_context10m_on_st30m_flip(
-            symbol,
-            parsed,
-            price,
-            event_id=f"context10m_st30m_flip_{symbol}_{event_id}",
-        )
-
-    if alert_type == 'st_context' and tf == '10m' and ctx_parsed in ('buy', 'sell'):
-        current_st_30m = m.get('st_ai_30m')
-        if state_changed:
-            persist_state()
-            state_changed = False
-        evaluate_context10m_on_st30m_flip(
-            symbol,
-            current_st_30m,
-            price,
-            event_id=f"context10m_refresh_{symbol}_{event_id}",
-            trigger_label="ST AI 30m aligne",
-        )
-
     if (
         (alert_type == 'supertrend' and tf in ('2h', '30m'))
         or (alert_type == 'bias' and tf == '30m')
@@ -1591,18 +1584,11 @@ def webhook():
             event_id=f"scalp_confluence_{symbol}_{tf}_{alert_type}_{event_id}",
             trigger_label=f"{alert_type}_{tf}",
         )
-
-    if alert_type == 'bias' and tf == '2h':
-        current_st_30m = m.get('st_ai_30m')
-        if state_changed:
-            persist_state()
-            state_changed = False
-        evaluate_context10m_on_st30m_flip(
+        evaluate_scalp_30m_confluence(
             symbol,
-            current_st_30m,
-            price,
-            event_id=f"context10m_bias2h_refresh_{symbol}_{event_id}",
-            trigger_label="ST AI 30m aligne",
+            price=price,
+            event_id=f"scalp_30m_{symbol}_{tf}_{alert_type}_{event_id}",
+            trigger_label=f"{alert_type}_{tf}",
         )
 
     if (
@@ -2191,12 +2177,6 @@ def scalp_required_tv_signals():
             'warmup': 10 * 60,
         },
         {
-            'label': 'ST Context 10m',
-            'field': 'st_context_10m_ts',
-            'max_age': 30 * 60,
-            'warmup': 45 * 60,
-        },
-        {
             'label': 'ST Context 5m',
             'field': 'st_context_5m_ts',
             'max_age': 15 * 60,
@@ -2332,7 +2312,7 @@ def startup():
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         "SCALP principale: ST AI 2H + Bias 30m + Context 1m\n"
         "Qualite SCALP: ST AI 30m aligne + Williams 30m aligne\n"
-        "SCALP CONTEXT10M: flip ST AI 30m + Bias 2H + Context 10m\n"
+        "SCALP 30M: ST AI 30m + Bias 30m + Context 1m\n"
         "SCALP CONTEXT5M: ST AI 2H + Bias 2H + Context 5m\n"
         "Anti-chop: ST Context LT 1m meme sens\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
