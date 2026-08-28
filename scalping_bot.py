@@ -1005,6 +1005,7 @@ def evaluate_context30_strategy(symbol, price=0, event_id=None, source='webhook'
 
 def evaluate_context10m_on_st30m_flip(symbol, st_30m, price, event_id, trigger_label="Flip ST AI 30m"):
     """Entree SCALP CONTEXT10M: ST AI 30m + Bias 2H + ST Context 10m."""
+    return False  # Desactivee: on garde uniquement SCALP RMI/TTI en test
     if st_30m not in ('buy', 'sell'):
         return False
 
@@ -1183,6 +1184,7 @@ def evaluate_context5m_confluence(symbol, price=0, event_id=None, trigger_label=
 
 def evaluate_scalp_primary_confluence(symbol, price=0, event_id=None, trigger_label="state_refresh"):
     """Evalue SCALP principale des que ST AI 2H + Bias 30m + Context 1m sont reunis."""
+    return False  # Desactivee: on garde uniquement SCALP RMI/TTI en test
     with STATE_LOCK:
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
