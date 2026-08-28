@@ -1087,6 +1087,7 @@ def evaluate_context10m_on_st30m_flip(symbol, st_30m, price, event_id, trigger_l
 
 def evaluate_context5m_confluence(symbol, price=0, event_id=None, trigger_label="state_refresh"):
     """Entree SCALP CONTEXT5M: ST AI 2H + Bias 2H + ST Context 5m, warning si Context 30m oppose."""
+    return False  # Desactivee: on garde uniquement SCALP RMI/TTI en test
     with STATE_LOCK:
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
@@ -2344,11 +2345,10 @@ def startup():
         "<b>Scalping Bot demarre</b>\n"
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
-        "SCALP principale: ST AI 2H + Bias 30m + Context 1m\n"
-        "Qualite SCALP: ST AI 30m aligne + Williams 30m aligne\n"
-        "SCALP CONTEXT10M: flip ST AI 30m + Bias 2H + Context 10m\n"
-        "SCALP CONTEXT5M: ST AI 2H + Bias 2H + Context 5m\n"
-        "Anti-chop: ST Context LT 1m meme sens\n"
+        "Strategie active: SCALP RMI/TTI uniquement\n"
+        "Conditions: RMI 30m + TTI 30m + ST Context 1m ou 3m\n"
+        "Anti-chop: ST Context 3m oppose\n"
+        "Desactivees: SCALP principale, CONTEXT10M, CONTEXT5M\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
     )
