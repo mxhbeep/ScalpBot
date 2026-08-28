@@ -12,6 +12,7 @@ import threading
 import os
 import re
 import redis as redis_lib
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from flask import Flask, request, jsonify
@@ -25,6 +26,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+WEBHOOK_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 
 CONFIG = {
     'TELEGRAM_BOT_TOKEN': os.environ.get('TELEGRAM_BOT_TOKEN', ''),
@@ -1358,7 +1360,26 @@ def replay_recent_range_filter_10m(symbol, price=0, event_id=None, source='state
 def webhook():
     data = request.get_json(silent=True)
     if not data:
+        logger.warning("[WEBHOOK] Requete sans JSON")
         return jsonify({'status': 'error', 'reason': 'no_json'}), 400
+
+    WEBHOOK_EXECUTOR.submit(run_webhook_job, data)
+    return jsonify({'status': 'ok', 'queued': True}), 200
+
+
+def run_webhook_job(data):
+    """Traite le webhook en arriere-plan pour repondre vite a TradingView."""
+    try:
+        with app.app_context():
+            process_webhook(data)
+    except Exception:
+        logger.exception("[WEBHOOK] Erreur non geree dans le job async")
+
+
+def process_webhook(data):
+    if not data:
+        logger.warning("[WEBHOOK] Donnees vides dans le job async")
+        return
 
     # Parser les champs
     raw_symbol = str(data.get('symbol', '')).strip().upper()
