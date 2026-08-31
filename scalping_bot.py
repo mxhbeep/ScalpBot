@@ -522,6 +522,12 @@ def init_symbol(symbol):
             'range_filter_10m': None,
             'range_filter_10m_ts': None,
             'last_range_filter_10m_signal_ts': None,
+            'zalt_1m': None,
+            'zalt_1m_ts': None,
+            'last_zalt_1m_signal_ts': None,
+            'zalt_10m': None,
+            'zalt_10m_ts': None,
+            'last_zalt_10m_signal_ts': None,
             'last_st_15m':    None,
             'last_st_1h':     None,
             'st_4h_flipped':  False,
@@ -585,6 +591,12 @@ def parse_direction_value(val):
     normalized = str(val).strip().lower()
     if normalized in ('1', 'buy', 'long'):  return 'buy'
     if normalized in ('0', 'sell', 'short'): return 'sell'
+    return None
+
+def parse_zalt_value(val):
+    normalized = str(val).strip().lower()
+    if normalized in ('1', 'buy', 'long', 'bull', 'bullish'):  return 'buy'
+    if normalized in ('0', '-1', 'sell', 'short', 'bear', 'bearish'): return 'sell'
     return None
 
 def is_fresh(ts, max_age_seconds):
@@ -821,6 +833,86 @@ def send_telegram_with_buttons(msg, callback_key):
     if not result.get('ntfy'):
         logger.warning("position creee sans notification ntfy")
     return bool(result.get('telegram_scalp'))
+
+
+def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_label="state_refresh"):
+    """SCALP V3: ZALT 10m + ST Context 1m + flip ZALT 1m."""
+    if trigger_dir not in (None, 'buy', 'sell'):
+        return False
+
+    with STATE_LOCK:
+        init_symbol(symbol)
+        m = MOMENTUM_STATE[symbol]
+        if not SCALP_ENABLED:
+            logger.info(f"[SCALP V3 OFF] Signal ignore: {symbol}")
+            persist_state()
+            return False
+
+        directions = [trigger_dir] if trigger_dir in ('buy', 'sell') else ['buy', 'sell']
+        selected = None
+        for exp in directions:
+            direction = 'LONG' if exp == 'buy' else 'SHORT'
+            zalt10 = m.get('zalt_10m')
+            zalt1 = m.get('zalt_1m')
+            ctx1 = m.get('st_context_1m')
+            zalt10_fresh = is_fresh(m.get('zalt_10m_ts'), 45 * 60)
+            zalt1_fresh = is_fresh(m.get('zalt_1m_ts'), 5 * 60)
+            zalt1_flip_fresh = is_fresh(m.get('last_zalt_1m_signal_ts'), 5 * 60)
+            ctx1_fresh = is_fresh(m.get('st_context_1m_ts'), 5 * 60)
+            zalt10_ok = zalt10_fresh and zalt10 == exp
+            zalt1_ok = zalt1_fresh and zalt1 == exp
+            ctx1_ok = ctx1_fresh and ctx1 == exp
+            entry_ok = zalt10_ok and zalt1_ok and zalt1_flip_fresh and ctx1_ok
+
+            logger.info(
+                f"[SCALP V3 CHECK] {symbol} trigger={trigger_label} dir={direction} "
+                f"zalt10={zalt10}/{exp} fresh={zalt10_fresh} ok={zalt10_ok} "
+                f"zalt1={zalt1}/{exp} fresh={zalt1_fresh} flip_fresh={zalt1_flip_fresh} ok={zalt1_ok} "
+                f"ctx1={ctx1}/{exp} fresh={ctx1_fresh} ok={ctx1_ok} entry={entry_ok}"
+            )
+
+            if entry_ok:
+                selected = (exp, direction, zalt10, zalt1, ctx1)
+                break
+
+        if selected is None:
+            persist_state()
+            return False
+
+        exp, direction, zalt10, zalt1, ctx1 = selected
+        pos_key = f"{symbol}_SCALP"
+        pos = SCALP_POSITIONS.get(pos_key)
+        if pos and pos.get('direction') != direction:
+            SCALP_POSITIONS.pop(pos_key, None)
+            PYRA_ENABLED.pop(pos_key, None)
+            pos = None
+
+        if pos is not None or not should_send(symbol, f"scalp_v3_entry_{exp}", event_id=event_id, cooldown=900):
+            persist_state()
+            return False
+
+        SCALP_POSITIONS[pos_key] = {
+            'direction': direction,
+            'entry_count': 1,
+            'signal_type': 'scalp_v3_zalt10_ctx1_zalt1_flip',
+        }
+        PYRA_ENABLED.pop(pos_key, None)
+        persist_state()
+
+    msg = (
+        f"<b>SCALP {direction} - V3</b> {symbol}\n"
+        f"--------------------\n"
+        f"Direction: {direction}\n"
+        f"Price: ${format_price(price)}\n"
+        f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
+        f"[OK] ZALT 10m: {(zalt10 or 'N/A').upper()}\n"
+        f"[OK] Zone ST Context 1m: {(ctx1 or 'N/A').upper()}\n"
+        f"[OK] Flip ZALT 1m: {(zalt1 or 'N/A').upper()}"
+    )
+    if not send_telegram_with_buttons(msg, f"{symbol}_SCALP"):
+        logger.warning(f"[SCALP V3] Entree {symbol} creee mais notification Telegram echouee")
+    logger.info(f"[SCALP V3] Entree: {symbol} {direction}")
+    return True
 
 
 def evaluate_context_scalp_secondary(symbol, ctx_1m, price, event_id):
@@ -1395,6 +1487,15 @@ def process_webhook(data):
     # Normaliser tf
     tf_aliases = {'1': '1m', '1min': '1m', '1minute': '1m', '3': '3m', '3min': '3m', '3minute': '3m', '5': '5m', '5min': '5m', '5minute': '5m', '10': '10m', '10min': '10m', '10minute': '10m', '15': '15m', '20': '20m', '20min': '20m', '20minute': '20m', '30': '30m', '30min': '30m', '30minute': '30m', '60': '1h', '120': '2h', '2hr': '2h', '2hour': '2h', '180': '3h', '3hr': '3h', '3hour': '3h', '240': '4h', '4hr': '4h', '4hour': '4h'}
     tf = tf_aliases.get(tf, tf)
+    alert_type_aliases = {
+        'rangefilter': 'range_filter',
+        'zerolagtrendsignal': 'zalt',
+        'zerolagtrendsignals': 'zalt',
+        'zero_lag_trend_signal': 'zalt',
+        'zero_lag_trend_signals': 'zalt',
+        'zls': 'zalt',
+    }
+    alert_type = alert_type_aliases.get(alert_type.replace(' ', '').replace('-', '_'), alert_type)
 
     # Normaliser symbol
     if '/' not in raw_symbol:
@@ -1493,6 +1594,22 @@ def process_webhook(data):
         if tf == '10m':
             evaluate_range_scalp_signal(symbol, parsed, price, event_id)
             return jsonify({'status': 'ok'}), 200
+
+    elif alert_type == 'zalt':
+        parsed = parse_zalt_value(val)
+        zalt_signal = str(data.get('signal') or data.get('event') or '').strip().lower()
+        if parsed is None:
+            logger.warning(f"[WEBHOOK] ZALT invalide: {symbol} tf={tf} value={val!r}")
+            return jsonify({'status': 'ignored', 'reason': 'invalid_zalt'}), 200
+        if tf in ('1m', '10m'):
+            m[f'zalt_{tf}'] = parsed
+            m[f'zalt_{tf}_ts'] = time.time()
+            if zalt_signal in ('trend_flip', 'flip'):
+                m[f'last_zalt_{tf}_signal_ts'] = time.time()
+            state_changed = True
+            logger.info(f"[ZALT {tf.upper()}] {symbol} = {parsed} signal={zalt_signal or 'state'}")
+        else:
+            logger.info(f"[ZALT] {symbol} tf={tf} ignore: timeframe non utilise par SCALP V3")
             
     elif alert_type == 'st_context_lt' and tf in ('1m', '3m', '5m', '1h'):
         try:
@@ -1604,6 +1721,23 @@ def process_webhook(data):
             symbol,
             price=price,
             event_id=f"scalp_confluence_{symbol}_{tf}_{alert_type}_{event_id}",
+            trigger_label=f"{alert_type}_{tf}",
+        )
+
+    if (
+        (alert_type == 'zalt' and tf in ('1m', '10m'))
+        or (alert_type == 'st_context' and tf == '1m')
+    ):
+        zalt_signal = str(data.get('signal') or data.get('event') or '').strip().lower()
+        trigger_dir = parse_zalt_value(val) if alert_type == 'zalt' and tf == '1m' and zalt_signal in ('trend_flip', 'flip') else None
+        if state_changed:
+            persist_state()
+            state_changed = False
+        evaluate_scalp_v3(
+            symbol,
+            trigger_dir=trigger_dir,
+            price=price,
+            event_id=f"scalp_v3_{symbol}_{tf}_{alert_type}_{event_id}",
             trigger_label=f"{alert_type}_{tf}",
         )
 
@@ -2182,46 +2316,22 @@ def reset():
 def scalp_required_tv_signals():
     return [
         {
-            'label': 'ST AI 2H',
-            'field': 'st_ai_2h_ts',
-            'max_age': 6 * 3600,
-            'warmup': 7 * 3600,
+            'label': 'ZALT 10m',
+            'field': 'zalt_10m_ts',
+            'max_age': 45 * 60,
+            'warmup': 60 * 60,
         },
         {
-            'label': 'ST AI 30m',
-            'field': 'st_ai_30m_ts',
-            'max_age': 90 * 60,
-            'warmup': 2 * 3600,
+            'label': 'ZALT 1m',
+            'field': 'zalt_1m_ts',
+            'max_age': 5 * 60,
+            'warmup': 10 * 60,
         },
         {
             'label': 'ST Context 1m',
             'field': 'st_context_1m_ts',
             'max_age': 5 * 60,
             'warmup': 10 * 60,
-        },
-        {
-            'label': 'ST Context LT 1m',
-            'field': 'st_context_lt_1m_ts',
-            'max_age': 5 * 60,
-            'warmup': 10 * 60,
-        },
-        {
-            'label': 'ST Context 10m',
-            'field': 'st_context_10m_ts',
-            'max_age': 30 * 60,
-            'warmup': 45 * 60,
-        },
-        {
-            'label': 'ST Context 5m',
-            'field': 'st_context_5m_ts',
-            'max_age': 15 * 60,
-            'warmup': 30 * 60,
-        },
-        {
-            'label': 'ST Context 30m',
-            'field': 'st_context_30m_ts',
-            'max_age': 90 * 60,
-            'warmup': 2 * 3600,
         },
     ]
 
@@ -2345,10 +2455,9 @@ def startup():
         "<b>Scalping Bot demarre</b>\n"
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
-        "Strategie active: SCALP RMI/TTI uniquement\n"
-        "Conditions: RMI 30m + TTI 30m + ST Context 1m ou 3m\n"
-        "Anti-chop: ST Context 3m oppose\n"
-        "Desactivees: SCALP principale, CONTEXT10M, CONTEXT5M\n"
+        "Strategie active: SCALP V3\n"
+        "Conditions: ZALT 10m + ST Context 1m + flip ZALT 1m\n"
+        "Desactivees: SCALP principale, CONTEXT10M, CONTEXT5M, RMI/TTI test\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
     )
