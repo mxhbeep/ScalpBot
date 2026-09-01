@@ -839,7 +839,7 @@ def send_telegram_with_buttons(msg, callback_key):
 
 
 def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_label="state_refresh"):
-    """SCALP V3: ZALT 30m + ZALT 10m + flip ZALT 1m."""
+    """SCALP V3 principale: ZALT 30m + Bias 30m (EMA13/SMA30, calcule en interne) + flip ZALT 1m."""
     if trigger_dir not in (None, 'buy', 'sell'):
         return False
 
@@ -855,35 +855,36 @@ def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_
         selected = None
         for exp in directions:
             direction = 'LONG' if exp == 'buy' else 'SHORT'
+            exp_bias = 'bull' if exp == 'buy' else 'bear'
             zalt30 = m.get('zalt_30m')
-            zalt10 = m.get('zalt_10m')
+            bias30 = m.get('bias_30m')
             zalt1 = m.get('zalt_1m')
             zalt30_fresh = is_fresh(m.get('zalt_30m_ts'), 90 * 60)
-            zalt10_fresh = is_fresh(m.get('zalt_10m_ts'), 45 * 60)
+            bias30_fresh = bool(bias30) and is_fresh(m.get('bias_30m_ts'), 2 * 3600)
             zalt1_fresh = is_fresh(m.get('zalt_1m_ts'), 5 * 60)
             zalt1_flip_fresh = is_fresh(m.get('last_zalt_1m_signal_ts'), 5 * 60)
             zalt30_ok = zalt30_fresh and zalt30 == exp
-            zalt10_ok = zalt10_fresh and zalt10 == exp
+            bias30_ok = bias30_fresh and bias30 == exp_bias
             zalt1_ok = zalt1_fresh and zalt1 == exp
-            entry_ok = zalt30_ok and zalt10_ok and zalt1_ok and zalt1_flip_fresh
+            entry_ok = zalt30_ok and bias30_ok and zalt1_ok and zalt1_flip_fresh
 
             logger.info(
                 f"[SCALP V3 CHECK] {symbol} trigger={trigger_label} dir={direction} "
                 f"zalt30={zalt30}/{exp} fresh={zalt30_fresh} ok={zalt30_ok} "
-                f"zalt10={zalt10}/{exp} fresh={zalt10_fresh} ok={zalt10_ok} "
+                f"bias30={bias30}/{exp_bias} fresh={bias30_fresh} ok={bias30_ok} "
                 f"zalt1={zalt1}/{exp} fresh={zalt1_fresh} flip_fresh={zalt1_flip_fresh} ok={zalt1_ok} "
                 f"entry={entry_ok}"
             )
 
             if entry_ok:
-                selected = (exp, direction, zalt30, zalt10, zalt1)
+                selected = (exp, direction, zalt30, bias30, zalt1)
                 break
 
         if selected is None:
             persist_state()
             return False
 
-        exp, direction, zalt30, zalt10, zalt1 = selected
+        exp, direction, zalt30, bias30, zalt1 = selected
         pos_key = f"{symbol}_SCALP"
         pos = SCALP_POSITIONS.get(pos_key)
         if pos and pos.get('direction') != direction:
@@ -898,7 +899,7 @@ def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_
         SCALP_POSITIONS[pos_key] = {
             'direction': direction,
             'entry_count': 1,
-            'signal_type': 'scalp_v3_zalt30_zalt10_zalt1_flip',
+            'signal_type': 'scalp_v3_zalt30_bias30_zalt1_flip',
         }
         PYRA_ENABLED.pop(pos_key, None)
         persist_state()
@@ -910,12 +911,93 @@ def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_
         f"Price: ${format_price(price)}\n"
         f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
         f"[OK] ZALT 30m: {(zalt30 or 'N/A').upper()}\n"
-        f"[OK] ZALT 10m: {(zalt10 or 'N/A').upper()}\n"
+        f"[OK] Bias 30m: {(bias30 or 'N/A').upper()}\n"
         f"[OK] Flip ZALT 1m: {(zalt1 or 'N/A').upper()}"
     )
     if not send_telegram_with_buttons(msg, f"{symbol}_SCALP"):
         logger.warning(f"[SCALP V3] Entree {symbol} creee mais notification Telegram echouee")
     logger.info(f"[SCALP V3] Entree: {symbol} {direction}")
+    return True
+
+
+def evaluate_scalp_v3_secondary(symbol, trigger_dir=None, price=0, event_id=None, trigger_label="state_refresh"):
+    """SCALP V3 secondaire: ZALT 30m + zone ST Context 3m + flip ZALT 1m."""
+    if trigger_dir not in (None, 'buy', 'sell'):
+        return False
+
+    with STATE_LOCK:
+        init_symbol(symbol)
+        m = MOMENTUM_STATE[symbol]
+        if not SCALP_ENABLED:
+            logger.info(f"[SCALP V3 SECONDARY OFF] Signal ignore: {symbol}")
+            persist_state()
+            return False
+
+        directions = [trigger_dir] if trigger_dir in ('buy', 'sell') else ['buy', 'sell']
+        selected = None
+        for exp in directions:
+            direction = 'LONG' if exp == 'buy' else 'SHORT'
+            zalt30 = m.get('zalt_30m')
+            ctx3 = m.get('st_context_3m')
+            zalt1 = m.get('zalt_1m')
+            zalt30_fresh = is_fresh(m.get('zalt_30m_ts'), 90 * 60)
+            ctx3_fresh = is_fresh(m.get('st_context_3m_ts'), 10 * 60)
+            zalt1_fresh = is_fresh(m.get('zalt_1m_ts'), 5 * 60)
+            zalt1_flip_fresh = is_fresh(m.get('last_zalt_1m_signal_ts'), 5 * 60)
+            zalt30_ok = zalt30_fresh and zalt30 == exp
+            ctx3_ok = ctx3_fresh and ctx3 == exp
+            zalt1_ok = zalt1_fresh and zalt1 == exp
+            entry_ok = zalt30_ok and ctx3_ok and zalt1_ok and zalt1_flip_fresh
+
+            logger.info(
+                f"[SCALP V3 SECONDARY CHECK] {symbol} trigger={trigger_label} dir={direction} "
+                f"zalt30={zalt30}/{exp} fresh={zalt30_fresh} ok={zalt30_ok} "
+                f"ctx3={ctx3}/{exp} fresh={ctx3_fresh} ok={ctx3_ok} "
+                f"zalt1={zalt1}/{exp} fresh={zalt1_fresh} flip_fresh={zalt1_flip_fresh} ok={zalt1_ok} "
+                f"entry={entry_ok}"
+            )
+
+            if entry_ok:
+                selected = (exp, direction, zalt30, ctx3, zalt1)
+                break
+
+        if selected is None:
+            persist_state()
+            return False
+
+        exp, direction, zalt30, ctx3, zalt1 = selected
+        pos_key = f"{symbol}_SCALP"
+        pos = SCALP_POSITIONS.get(pos_key)
+        if pos and pos.get('direction') != direction:
+            SCALP_POSITIONS.pop(pos_key, None)
+            PYRA_ENABLED.pop(pos_key, None)
+            pos = None
+
+        if pos is not None or not should_send(symbol, f"scalp_v3_secondary_entry_{exp}", event_id=event_id, cooldown=900):
+            persist_state()
+            return False
+
+        SCALP_POSITIONS[pos_key] = {
+            'direction': direction,
+            'entry_count': 1,
+            'signal_type': 'scalp_v3_secondary_zalt30_ctx3_zalt1_flip',
+        }
+        PYRA_ENABLED.pop(pos_key, None)
+        persist_state()
+
+    msg = (
+        f"<b>SCALP {direction} - V3 SECONDAIRE</b> {symbol}\n"
+        f"--------------------\n"
+        f"Direction: {direction}\n"
+        f"Price: ${format_price(price)}\n"
+        f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
+        f"[OK] ZALT 30m: {(zalt30 or 'N/A').upper()}\n"
+        f"[OK] Zone ST Context 3m: {(ctx3 or 'N/A').upper()}\n"
+        f"[OK] Flip ZALT 1m: {(zalt1 or 'N/A').upper()}"
+    )
+    if not send_telegram_with_buttons(msg, f"{symbol}_SCALP"):
+        logger.warning(f"[SCALP V3 SECONDARY] Entree {symbol} creee mais notification Telegram echouee")
+    logger.info(f"[SCALP V3 SECONDARY] Entree: {symbol} {direction}")
     return True
 
 
@@ -1729,7 +1811,7 @@ def process_webhook(data):
         )
 
     if (
-        (alert_type == 'zalt' and tf in ('1m', '10m', '30m'))
+        (alert_type == 'zalt' and tf in ('1m', '30m'))
     ):
         zalt_signal = str(data.get('signal') or data.get('event') or '').strip().lower()
         trigger_dir = parse_zalt_value(val) if alert_type == 'zalt' and tf == '1m' and zalt_signal in ('trend_flip', 'flip') else None
@@ -1741,6 +1823,24 @@ def process_webhook(data):
             trigger_dir=trigger_dir,
             price=price,
             event_id=f"scalp_v3_{symbol}_{tf}_{alert_type}_{event_id}",
+            trigger_label=f"{alert_type}_{tf}",
+        )
+        evaluate_scalp_v3_secondary(
+            symbol,
+            trigger_dir=trigger_dir,
+            price=price,
+            event_id=f"scalp_v3_secondary_{symbol}_{tf}_{alert_type}_{event_id}",
+            trigger_label=f"{alert_type}_{tf}",
+        )
+
+    if alert_type == 'st_context' and tf == '3m':
+        if state_changed:
+            persist_state()
+            state_changed = False
+        evaluate_scalp_v3_secondary(
+            symbol,
+            price=price,
+            event_id=f"scalp_v3_secondary_ctx3_{symbol}_{event_id}",
             trigger_label=f"{alert_type}_{tf}",
         )
 
@@ -2325,16 +2425,16 @@ def scalp_required_tv_signals():
             'warmup': 2 * 60 * 60,
         },
         {
-            'label': 'ZALT 10m',
-            'field': 'zalt_10m_ts',
-            'max_age': 45 * 60,
-            'warmup': 60 * 60,
-        },
-        {
             'label': 'ZALT 1m',
             'field': 'zalt_1m_ts',
             'max_age': 5 * 60,
             'warmup': 10 * 60,
+        },
+        {
+            'label': 'ST Context 3m',
+            'field': 'st_context_3m_ts',
+            'max_age': 10 * 60,
+            'warmup': 20 * 60,
         },
     ]
 
