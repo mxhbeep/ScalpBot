@@ -836,7 +836,7 @@ def send_telegram_with_buttons(msg, callback_key):
 
 
 def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_label="state_refresh"):
-    """SCALP V3: ZALT 10m + ST Context 1m + flip ZALT 1m."""
+    """SCALP V3: ZALT 10m + flip ZALT 1m, anti-chop ST Context 1m oppose."""
     if trigger_dir not in (None, 'buy', 'sell'):
         return False
 
@@ -861,14 +861,14 @@ def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_
             ctx1_fresh = is_fresh(m.get('st_context_1m_ts'), 5 * 60)
             zalt10_ok = zalt10_fresh and zalt10 == exp
             zalt1_ok = zalt1_fresh and zalt1 == exp
-            ctx1_ok = ctx1_fresh and ctx1 == exp
-            entry_ok = zalt10_ok and zalt1_ok and zalt1_flip_fresh and ctx1_ok
+            anti_chop = ctx1_fresh and ctx1 in ('buy', 'sell') and ctx1 != exp
+            entry_ok = zalt10_ok and zalt1_ok and zalt1_flip_fresh and not anti_chop
 
             logger.info(
                 f"[SCALP V3 CHECK] {symbol} trigger={trigger_label} dir={direction} "
                 f"zalt10={zalt10}/{exp} fresh={zalt10_fresh} ok={zalt10_ok} "
                 f"zalt1={zalt1}/{exp} fresh={zalt1_fresh} flip_fresh={zalt1_flip_fresh} ok={zalt1_ok} "
-                f"ctx1={ctx1}/{exp} fresh={ctx1_fresh} ok={ctx1_ok} entry={entry_ok}"
+                f"ctx1={ctx1} fresh={ctx1_fresh} anti_chop={anti_chop} entry={entry_ok}"
             )
 
             if entry_ok:
@@ -894,7 +894,7 @@ def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_
         SCALP_POSITIONS[pos_key] = {
             'direction': direction,
             'entry_count': 1,
-            'signal_type': 'scalp_v3_zalt10_ctx1_zalt1_flip',
+            'signal_type': 'scalp_v3_zalt10_zalt1_flip',
         }
         PYRA_ENABLED.pop(pos_key, None)
         persist_state()
@@ -906,8 +906,8 @@ def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_
         f"Price: ${format_price(price)}\n"
         f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
         f"[OK] ZALT 10m: {(zalt10 or 'N/A').upper()}\n"
-        f"[OK] Zone ST Context 1m: {(ctx1 or 'N/A').upper()}\n"
-        f"[OK] Flip ZALT 1m: {(zalt1 or 'N/A').upper()}"
+        f"[OK] Flip ZALT 1m: {(zalt1 or 'N/A').upper()}\n"
+        f"[ANTI-CHOP] ST Context 1m oppose: False ({(ctx1 or 'NEUTRE').upper()})"
     )
     if not send_telegram_with_buttons(msg, f"{symbol}_SCALP"):
         logger.warning(f"[SCALP V3] Entree {symbol} creee mais notification Telegram echouee")
@@ -1610,7 +1610,7 @@ def process_webhook(data):
             logger.info(f"[ZALT {tf.upper()}] {symbol} = {parsed} signal={zalt_signal or 'state'}")
         else:
             logger.info(f"[ZALT] {symbol} tf={tf} ignore: timeframe non utilise par SCALP V3")
-            
+
     elif alert_type == 'st_context_lt' and tf in ('1m', '3m', '5m', '1h'):
         try:
             lt_val = float(val)
@@ -2456,7 +2456,8 @@ def startup():
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         "Strategie active: SCALP V3\n"
-        "Conditions: ZALT 10m + ST Context 1m + flip ZALT 1m\n"
+        "Conditions: ZALT 10m + flip ZALT 1m\n"
+        "Anti-chop: ST Context 1m oppose bloque l'entree\n"
         "Desactivees: SCALP principale, CONTEXT10M, CONTEXT5M, RMI/TTI test\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
