@@ -528,6 +528,9 @@ def init_symbol(symbol):
             'zalt_10m': None,
             'zalt_10m_ts': None,
             'last_zalt_10m_signal_ts': None,
+            'zalt_30m': None,
+            'zalt_30m_ts': None,
+            'last_zalt_30m_signal_ts': None,
             'last_st_15m':    None,
             'last_st_1h':     None,
             'st_4h_flipped':  False,
@@ -836,7 +839,7 @@ def send_telegram_with_buttons(msg, callback_key):
 
 
 def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_label="state_refresh"):
-    """SCALP V3: ZALT 10m + flip ZALT 1m, anti-chop ST Context 1m oppose."""
+    """SCALP V3: ZALT 30m + ZALT 10m + flip ZALT 1m."""
     if trigger_dir not in (None, 'buy', 'sell'):
         return False
 
@@ -852,34 +855,35 @@ def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_
         selected = None
         for exp in directions:
             direction = 'LONG' if exp == 'buy' else 'SHORT'
+            zalt30 = m.get('zalt_30m')
             zalt10 = m.get('zalt_10m')
             zalt1 = m.get('zalt_1m')
-            ctx1 = m.get('st_context_1m')
+            zalt30_fresh = is_fresh(m.get('zalt_30m_ts'), 90 * 60)
             zalt10_fresh = is_fresh(m.get('zalt_10m_ts'), 45 * 60)
             zalt1_fresh = is_fresh(m.get('zalt_1m_ts'), 5 * 60)
             zalt1_flip_fresh = is_fresh(m.get('last_zalt_1m_signal_ts'), 5 * 60)
-            ctx1_fresh = is_fresh(m.get('st_context_1m_ts'), 5 * 60)
+            zalt30_ok = zalt30_fresh and zalt30 == exp
             zalt10_ok = zalt10_fresh and zalt10 == exp
             zalt1_ok = zalt1_fresh and zalt1 == exp
-            anti_chop = ctx1_fresh and ctx1 in ('buy', 'sell') and ctx1 != exp
-            entry_ok = zalt10_ok and zalt1_ok and zalt1_flip_fresh and not anti_chop
+            entry_ok = zalt30_ok and zalt10_ok and zalt1_ok and zalt1_flip_fresh
 
             logger.info(
                 f"[SCALP V3 CHECK] {symbol} trigger={trigger_label} dir={direction} "
+                f"zalt30={zalt30}/{exp} fresh={zalt30_fresh} ok={zalt30_ok} "
                 f"zalt10={zalt10}/{exp} fresh={zalt10_fresh} ok={zalt10_ok} "
                 f"zalt1={zalt1}/{exp} fresh={zalt1_fresh} flip_fresh={zalt1_flip_fresh} ok={zalt1_ok} "
-                f"ctx1={ctx1} fresh={ctx1_fresh} anti_chop={anti_chop} entry={entry_ok}"
+                f"entry={entry_ok}"
             )
 
             if entry_ok:
-                selected = (exp, direction, zalt10, zalt1, ctx1)
+                selected = (exp, direction, zalt30, zalt10, zalt1)
                 break
 
         if selected is None:
             persist_state()
             return False
 
-        exp, direction, zalt10, zalt1, ctx1 = selected
+        exp, direction, zalt30, zalt10, zalt1 = selected
         pos_key = f"{symbol}_SCALP"
         pos = SCALP_POSITIONS.get(pos_key)
         if pos and pos.get('direction') != direction:
@@ -894,7 +898,7 @@ def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_
         SCALP_POSITIONS[pos_key] = {
             'direction': direction,
             'entry_count': 1,
-            'signal_type': 'scalp_v3_zalt10_zalt1_flip',
+            'signal_type': 'scalp_v3_zalt30_zalt10_zalt1_flip',
         }
         PYRA_ENABLED.pop(pos_key, None)
         persist_state()
@@ -905,9 +909,9 @@ def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_
         f"Direction: {direction}\n"
         f"Price: ${format_price(price)}\n"
         f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
+        f"[OK] ZALT 30m: {(zalt30 or 'N/A').upper()}\n"
         f"[OK] ZALT 10m: {(zalt10 or 'N/A').upper()}\n"
-        f"[OK] Flip ZALT 1m: {(zalt1 or 'N/A').upper()}\n"
-        f"[ANTI-CHOP] ST Context 1m oppose: False ({(ctx1 or 'NEUTRE').upper()})"
+        f"[OK] Flip ZALT 1m: {(zalt1 or 'N/A').upper()}"
     )
     if not send_telegram_with_buttons(msg, f"{symbol}_SCALP"):
         logger.warning(f"[SCALP V3] Entree {symbol} creee mais notification Telegram echouee")
@@ -1601,7 +1605,7 @@ def process_webhook(data):
         if parsed is None:
             logger.warning(f"[WEBHOOK] ZALT invalide: {symbol} tf={tf} value={val!r}")
             return jsonify({'status': 'ignored', 'reason': 'invalid_zalt'}), 200
-        if tf in ('1m', '10m'):
+        if tf in ('1m', '10m', '30m'):
             m[f'zalt_{tf}'] = parsed
             m[f'zalt_{tf}_ts'] = time.time()
             if zalt_signal in ('trend_flip', 'flip'):
@@ -1725,8 +1729,7 @@ def process_webhook(data):
         )
 
     if (
-        (alert_type == 'zalt' and tf in ('1m', '10m'))
-        or (alert_type == 'st_context' and tf == '1m')
+        (alert_type == 'zalt' and tf in ('1m', '10m', '30m'))
     ):
         zalt_signal = str(data.get('signal') or data.get('event') or '').strip().lower()
         trigger_dir = parse_zalt_value(val) if alert_type == 'zalt' and tf == '1m' and zalt_signal in ('trend_flip', 'flip') else None
@@ -2316,6 +2319,12 @@ def reset():
 def scalp_required_tv_signals():
     return [
         {
+            'label': 'ZALT 30m',
+            'field': 'zalt_30m_ts',
+            'max_age': 90 * 60,
+            'warmup': 2 * 60 * 60,
+        },
+        {
             'label': 'ZALT 10m',
             'field': 'zalt_10m_ts',
             'max_age': 45 * 60,
@@ -2324,12 +2333,6 @@ def scalp_required_tv_signals():
         {
             'label': 'ZALT 1m',
             'field': 'zalt_1m_ts',
-            'max_age': 5 * 60,
-            'warmup': 10 * 60,
-        },
-        {
-            'label': 'ST Context 1m',
-            'field': 'st_context_1m_ts',
             'max_age': 5 * 60,
             'warmup': 10 * 60,
         },
@@ -2456,8 +2459,7 @@ def startup():
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         "Strategie active: SCALP V3\n"
-        "Conditions: ZALT 10m + flip ZALT 1m\n"
-        "Anti-chop: ST Context 1m oppose bloque l'entree\n"
+        "Conditions: ZALT 30m + ZALT 10m + flip ZALT 1m\n"
         "Desactivees: SCALP principale, CONTEXT10M, CONTEXT5M, RMI/TTI test\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
