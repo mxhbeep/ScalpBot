@@ -31,12 +31,21 @@ CONFIG = {
     'NTFY_TOPIC': os.environ.get('NTFY_TOPIC', ''),
     'MIN_COOLDOWN': 900,
     'SYMBOLS': {
+        'APT/USDT': {'exchange': 'okx'},
         'BTC/USDT': {'exchange': 'okx'},
         'CRV/USDT': {'exchange': 'okx'},
         'CVX/USDT': {'exchange': 'okx'},
+        'DOGE/USDT': {'exchange': 'okx'},
         'ETH/USDT': {'exchange': 'okx'},
+        'FARTCOIN/USDT': {'exchange': 'okx'},
+        'HYPE/USDT': {'exchange': 'okx'},
         'LINK/USDT': {'exchange': 'okx'},
+        'PENGU/USDT': {'exchange': 'okx'},
+        'PEPE/USDT': {'exchange': 'okx'},
+        'USELESS/USDT': {'exchange': 'okx'},
+        'XPL/USDT': {'exchange': 'okx'},
         'XRP/USDT': {'exchange': 'okx'},
+        'ZEC/USDT': {'exchange': 'okx'},
     },
 }
 
