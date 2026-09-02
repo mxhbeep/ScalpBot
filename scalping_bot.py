@@ -31,21 +31,12 @@ CONFIG = {
     'NTFY_TOPIC': os.environ.get('NTFY_TOPIC', ''),
     'MIN_COOLDOWN': 900,
     'SYMBOLS': {
-        'APT/USDT': {'exchange': 'okx'},
         'BTC/USDT': {'exchange': 'okx'},
         'CRV/USDT': {'exchange': 'okx'},
         'CVX/USDT': {'exchange': 'okx'},
-        'DOGE/USDT': {'exchange': 'okx'},
         'ETH/USDT': {'exchange': 'okx'},
-        'FARTCOIN/USDT': {'exchange': 'okx'},
-        'HYPE/USDT': {'exchange': 'okx'},
         'LINK/USDT': {'exchange': 'okx'},
-        'PENGU/USDT': {'exchange': 'okx'},
-        'PEPE/USDT': {'exchange': 'okx'},
-        'USELESS/USDT': {'exchange': 'okx'},
-        'XPL/USDT': {'exchange': 'okx'},
         'XRP/USDT': {'exchange': 'okx'},
-        'ZEC/USDT': {'exchange': 'okx'},
     },
 }
 
@@ -913,6 +904,14 @@ def scalp_required_tv_signals():
     ]
 
 
+def scalp_watchdog_max_age(symbol, req):
+    """CVX est tolerant a 24h sur tous les signaux du watchdog (asset moins liquide/actif,
+    evite le bruit de fausses alertes 'signal manquant')."""
+    if symbol == 'CVX/USDT':
+        return 24 * 60 * 60
+    return req['max_age']
+
+
 def scalp_tv_signal_watchdog():
     bot_start_time = time.time()
     time.sleep(10 * 60)
@@ -934,9 +933,10 @@ def scalp_tv_signal_watchdog():
             stale = []
             for symbol in symbols:
                 ts = state_copy.get(symbol, {}).get(req['field'])
+                max_age = scalp_watchdog_max_age(symbol, req)
                 if ts is None:
                     missing.append(symbol.replace('/USDT', ''))
-                elif now - float(ts) > req['max_age']:
+                elif now - float(ts) > max_age:
                     stale.append((symbol.replace('/USDT', ''), (now - float(ts)) / 60))
             if missing or stale:
                 details = []
