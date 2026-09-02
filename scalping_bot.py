@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Scalping Bot V3
-# Principale : ZALT 30m + Bias 10m (EMA13/SMA30) + flip ZALT 1m
-# Secondaire : ZALT 30m + ST Context 3m + flip ZALT 1m
+# Principale : ZALT 30m + ZALT 10m + ST Context 1m + flip ZALT 1m | anti-chop ST Context 3m
+# Secondaire : RPZ 30m + ZALT 10m + ST Context 1m + flip ZALT 1m | anti-chop ST Context 3m
 # Service Railway séparé — alertes uniquement, pas d'exécution exchange
 
 import json
@@ -17,7 +17,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from flask import Flask, request, jsonify
-import pandas as pd
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger(__name__)
@@ -32,12 +31,21 @@ CONFIG = {
     'NTFY_TOPIC': os.environ.get('NTFY_TOPIC', ''),
     'MIN_COOLDOWN': 900,
     'SYMBOLS': {
+        'APT/USDT': {'exchange': 'okx'},
         'BTC/USDT': {'exchange': 'okx'},
         'CRV/USDT': {'exchange': 'okx'},
         'CVX/USDT': {'exchange': 'okx'},
+        'DOGE/USDT': {'exchange': 'okx'},
         'ETH/USDT': {'exchange': 'okx'},
+        'FARTCOIN/USDT': {'exchange': 'okx'},
+        'HYPE/USDT': {'exchange': 'okx'},
         'LINK/USDT': {'exchange': 'okx'},
+        'PENGU/USDT': {'exchange': 'okx'},
+        'PEPE/USDT': {'exchange': 'okx'},
+        'USELESS/USDT': {'exchange': 'okx'},
+        'XPL/USDT': {'exchange': 'okx'},
         'XRP/USDT': {'exchange': 'okx'},
+        'ZEC/USDT': {'exchange': 'okx'},
     },
 }
 
@@ -47,136 +55,6 @@ LAST_SIGNALS = {}
 LAST_SIGNAL_EVENTS = {}
 SCALP_ENABLED = True
 REDIS_CLIENT = None
-
-
-def fetch_ohlcv_okx(symbol, tf, limit=100):
-    try:
-        inst_id = symbol.replace('/', '-')
-        bar_map = {
-            '1m': '1m', '5m': '5m', '15m': '15m', '30m': '30m',
-            '1h': '1H', '2h': '2H', '4h': '4H', '1d': '1D',
-        }
-        bar = bar_map.get(tf, '1H')
-        url = f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar={bar}&limit={limit}"
-        resp = requests.get(url, timeout=10)
-        if resp.status_code != 200:
-            logger.debug(f"[OKX] {symbol} {tf} HTTP {resp.status_code}")
-            return None
-        body = resp.json()
-        if body.get('code') not in (None, '0'):
-            logger.debug(f"[OKX] {symbol} {tf} code={body.get('code')} msg={body.get('msg')}")
-            return None
-        data = body.get('data', [])
-        if not data:
-            return None
-        df = pd.DataFrame(data, columns=['ts', 'o', 'h', 'l', 'c', 'vol', 'volCcy', 'volCcyQuote', 'confirm'])
-        df = df[df['confirm'] == '1'].copy()
-        df['open'] = df['o'].astype(float)
-        df['high'] = df['h'].astype(float)
-        df['low'] = df['l'].astype(float)
-        df['close'] = df['c'].astype(float)
-        df['volume'] = df['vol'].astype(float)
-        df = df.iloc[::-1].reset_index(drop=True)
-        return df
-    except Exception as e:
-        logger.debug(f"[OKX] {symbol} {tf}: {e}")
-        return None
-
-
-def calc_bias(df, ema_len=13, sma_len=30):
-    try:
-        if df is None or len(df) < sma_len:
-            return None
-        close = df['close']
-        ema = close.ewm(span=ema_len, adjust=False).mean().iloc[-1]
-        sma = close.rolling(sma_len).mean().iloc[-1]
-        c = close.iloc[-1]
-        if c > ema and ema > sma:
-            return 'bull'
-        if c < ema and ema < sma:
-            return 'bear'
-        return None
-    except Exception as e:
-        logger.debug(f"[BIAS] calc failed: {e}")
-        return None
-
-
-def keep_confirmed_candles(df, timeframe_minutes):
-    if df is None or df.empty:
-        return None
-    duration_ms = int(timeframe_minutes * 60 * 1000)
-    now_ms = int(time.time() * 1000)
-    confirmed = df[df['ts'].astype('int64') + duration_ms <= now_ms].copy()
-    if confirmed.empty:
-        return None
-    return confirmed.reset_index(drop=True)
-
-
-def build_confirmed_10m_candles(df_5m):
-    df_5m = keep_confirmed_candles(df_5m, 5)
-    if df_5m is None or len(df_5m) < 2:
-        return None
-    df = df_5m.copy().sort_values('ts').reset_index(drop=True)
-    bucket_ms = 10 * 60 * 1000
-    df['bucket'] = (df['ts'].astype('int64') // bucket_ms) * bucket_ms
-    counts = df.groupby('bucket').size()
-    complete = counts[counts >= 2].index
-    df = df[df['bucket'].isin(complete)]
-    if df.empty:
-        return None
-    return df.groupby('bucket', as_index=False).agg(
-        ts=('bucket', 'first'),
-        open=('open', 'first'),
-        high=('high', 'max'),
-        low=('low', 'min'),
-        close=('close', 'last'),
-        volume=('volume', 'sum'),
-    )
-
-
-def update_bias_10m():
-    logger.info("Scheduler Bias 10m demarre")
-    while True:
-        try:
-            results = {}
-            for symbol in list(CONFIG['SYMBOLS'].keys()):
-                try:
-                    df_5m = fetch_ohlcv_okx(symbol, '5m', limit=160)
-                    if df_5m is None:
-                        logger.info(f"[BIAS] {symbol} bias10m=None reason=fetch_failed")
-                        results[symbol] = {'bias': None, 'price': None}
-                        continue
-                    df = build_confirmed_10m_candles(df_5m)
-                    if df is None or len(df) < 30:
-                        count = 0 if df is None else len(df)
-                        logger.info(f"[BIAS] {symbol} bias10m=None reason=insufficient_confirmed_candles ({count}/30)")
-                        results[symbol] = {'bias': None, 'price': None}
-                        continue
-                    bias = calc_bias(df, ema_len=13, sma_len=30)
-                    price = float(df['close'].iloc[-1]) if len(df) else None
-                    results[symbol] = {'bias': bias, 'price': price}
-                    logger.info(f"[BIAS] {symbol} bias10m={bias} price={price}")
-                except Exception as e:
-                    logger.info(f"[BIAS] {symbol} bias10m=None reason=exception:{e}")
-                    results[symbol] = {'bias': None, 'price': None}
-
-            with STATE_LOCK:
-                for symbol, result in results.items():
-                    init_symbol(symbol)
-                    MOMENTUM_STATE[symbol]['bias_10m'] = result.get('bias')
-                    MOMENTUM_STATE[symbol]['bias_10m_ts'] = time.time()
-                persist_state()
-
-            bias_ok_count = sum(1 for r in results.values() if r.get('bias') is not None)
-            fetch_ok_count = sum(1 for r in results.values() if r.get('price') is not None)
-            logger.info(
-                f"[BIAS] Mise a jour Bias 10m terminee "
-                f"({bias_ok_count}/{len(CONFIG['SYMBOLS'])} non-neutre, "
-                f"{fetch_ok_count}/{len(CONFIG['SYMBOLS'])} fetch OK)"
-            )
-        except Exception as e:
-            logger.error(f"[BIAS] Erreur: {e}")
-        time.sleep(300)
 
 
 def init_redis():
@@ -233,13 +111,18 @@ def load_state():
 def init_symbol(symbol):
     if symbol not in MOMENTUM_STATE:
         MOMENTUM_STATE[symbol] = {
-            'bias_10m': None,
-            'bias_10m_ts': None,
             'zalt_1m': None,
             'zalt_1m_ts': None,
             'last_zalt_1m_signal_ts': None,
+            'zalt_10m': None,
+            'zalt_10m_ts': None,
             'zalt_30m': None,
             'zalt_30m_ts': None,
+            'rpz_30m': None,
+            'rpz_30m_ts': None,
+            'st_context_1m': None,
+            'st_context_1m_ts': None,
+            'st_context_1m_raw': None,
             'st_context_3m': None,
             'st_context_3m_ts': None,
             'st_context_3m_raw': None,
@@ -262,13 +145,26 @@ def format_price(price):
         return str(price)
 
 
-def parse_zalt_value(val):
+def parse_dir_value(val):
     normalized = str(val).strip().lower()
     if normalized in ('1', 'buy', 'long', 'bull', 'bullish'):
         return 'buy'
     if normalized in ('0', '-1', 'sell', 'short', 'bear', 'bearish'):
         return 'sell'
     return None
+
+
+def parse_st_context_value(val):
+    try:
+        ctx_val = float(val)
+        if ctx_val < -1.96:
+            return 'buy', ctx_val
+        if ctx_val > 1.96:
+            return 'sell', ctx_val
+        return None, ctx_val
+    except (TypeError, ValueError):
+        parsed = parse_dir_value(val)
+        return parsed, val
 
 
 def is_fresh(ts, max_age_seconds):
@@ -509,34 +405,39 @@ def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_
         selected = None
         for exp in directions:
             direction = 'LONG' if exp == 'buy' else 'SHORT'
-            exp_bias = 'bull' if exp == 'buy' else 'bear'
             zalt30 = m.get('zalt_30m')
-            bias10 = m.get('bias_10m')
+            zalt10 = m.get('zalt_10m')
+            ctx1 = m.get('st_context_1m')
+            ctx3 = m.get('st_context_3m')
             zalt1 = m.get('zalt_1m')
             zalt30_ok = is_fresh(m.get('zalt_30m_ts'), 90 * 60) and zalt30 == exp
-            bias10_ok = bool(bias10) and is_fresh(m.get('bias_10m_ts'), 45 * 60) and bias10 == exp_bias
+            zalt10_ok = is_fresh(m.get('zalt_10m_ts'), 30 * 60) and zalt10 == exp
+            ctx1_ok = is_fresh(m.get('st_context_1m_ts'), 5 * 60) and ctx1 == exp
+            antichop_ok = is_fresh(m.get('st_context_3m_ts'), 10 * 60) and ctx3 == exp
             zalt1_ok = is_fresh(m.get('zalt_1m_ts'), 5 * 60) and zalt1 == exp
             flip_ok = is_fresh(m.get('last_zalt_1m_signal_ts'), 5 * 60)
-            entry_ok = zalt30_ok and bias10_ok and zalt1_ok and flip_ok
+            entry_ok = zalt30_ok and zalt10_ok and ctx1_ok and antichop_ok and zalt1_ok and flip_ok
             logger.info(
                 f"[SCALP V3 CHECK] {symbol} trigger={trigger_label} dir={direction} "
                 f"zalt30={zalt30}/{exp} ok={zalt30_ok} "
-                f"bias10={bias10}/{exp_bias} ok={bias10_ok} "
+                f"zalt10={zalt10}/{exp} ok={zalt10_ok} "
+                f"ctx1={ctx1}/{exp} ok={ctx1_ok} "
+                f"ctx3={ctx3}/{exp} antichop={antichop_ok} "
                 f"zalt1={zalt1}/{exp} ok={zalt1_ok} flip={flip_ok} entry={entry_ok}"
             )
             if entry_ok:
-                selected = (exp, direction, zalt30, bias10, zalt1)
+                selected = (exp, direction, zalt30, zalt10, ctx1, ctx3, zalt1)
                 break
 
         if selected is None:
             return False
-        exp, direction, zalt30, bias10, zalt1 = selected
+        exp, direction, zalt30, zalt10, ctx1, ctx3, zalt1 = selected
         if not should_send(symbol, f"scalp_v3_entry_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
             return False
         persist_state()
-        notify_payload = (direction, zalt30, bias10, zalt1)
+        notify_payload = (direction, zalt30, zalt10, ctx1, ctx3, zalt1)
 
-    direction, zalt30, bias10, zalt1 = notify_payload
+    direction, zalt30, zalt10, ctx1, ctx3, zalt1 = notify_payload
     msg = (
         f"<b>SCALP {direction} - V3</b> {symbol}\n"
         f"--------------------\n"
@@ -544,7 +445,9 @@ def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_
         f"Price: ${format_price(price)}\n"
         f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
         f"[OK] ZALT 30m: {(zalt30 or 'N/A').upper()}\n"
-        f"[OK] Bias 10m: {(bias10 or 'N/A').upper()}\n"
+        f"[OK] ZALT 10m: {(zalt10 or 'N/A').upper()}\n"
+        f"[OK] ST Context 1m: {(ctx1 or 'N/A').upper()}\n"
+        f"[OK] Anti-chop ST Context 3m: {(ctx3 or 'N/A').upper()}\n"
         f"[OK] Flip ZALT 1m: {(zalt1 or 'N/A').upper()}"
     )
     if not send_telegram_with_buttons(msg):
@@ -568,41 +471,49 @@ def evaluate_scalp_v3_secondary(symbol, trigger_dir=None, price=0, event_id=None
         selected = None
         for exp in directions:
             direction = 'LONG' if exp == 'buy' else 'SHORT'
-            zalt30 = m.get('zalt_30m')
+            rpz30 = m.get('rpz_30m')
+            zalt10 = m.get('zalt_10m')
+            ctx1 = m.get('st_context_1m')
             ctx3 = m.get('st_context_3m')
             zalt1 = m.get('zalt_1m')
-            zalt30_ok = is_fresh(m.get('zalt_30m_ts'), 90 * 60) and zalt30 == exp
-            ctx3_ok = is_fresh(m.get('st_context_3m_ts'), 10 * 60) and ctx3 == exp
+            rpz30_ok = is_fresh(m.get('rpz_30m_ts'), 90 * 60) and rpz30 == exp
+            zalt10_ok = is_fresh(m.get('zalt_10m_ts'), 30 * 60) and zalt10 == exp
+            ctx1_ok = is_fresh(m.get('st_context_1m_ts'), 5 * 60) and ctx1 == exp
+            antichop_ok = is_fresh(m.get('st_context_3m_ts'), 10 * 60) and ctx3 == exp
             zalt1_ok = is_fresh(m.get('zalt_1m_ts'), 5 * 60) and zalt1 == exp
             flip_ok = is_fresh(m.get('last_zalt_1m_signal_ts'), 5 * 60)
-            entry_ok = zalt30_ok and ctx3_ok and zalt1_ok and flip_ok
+            entry_ok = rpz30_ok and zalt10_ok and ctx1_ok and antichop_ok and zalt1_ok and flip_ok
             logger.info(
                 f"[SCALP V3 SECONDARY CHECK] {symbol} trigger={trigger_label} dir={direction} "
-                f"zalt30={zalt30}/{exp} ok={zalt30_ok} "
-                f"ctx3={ctx3}/{exp} ok={ctx3_ok} "
+                f"rpz30={rpz30}/{exp} ok={rpz30_ok} "
+                f"zalt10={zalt10}/{exp} ok={zalt10_ok} "
+                f"ctx1={ctx1}/{exp} ok={ctx1_ok} "
+                f"ctx3={ctx3}/{exp} antichop={antichop_ok} "
                 f"zalt1={zalt1}/{exp} ok={zalt1_ok} flip={flip_ok} entry={entry_ok}"
             )
             if entry_ok:
-                selected = (exp, direction, zalt30, ctx3, zalt1)
+                selected = (exp, direction, rpz30, zalt10, ctx1, ctx3, zalt1)
                 break
 
         if selected is None:
             return False
-        exp, direction, zalt30, ctx3, zalt1 = selected
+        exp, direction, rpz30, zalt10, ctx1, ctx3, zalt1 = selected
         if not should_send(symbol, f"scalp_v3_secondary_entry_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
             return False
         persist_state()
-        notify_payload = (direction, zalt30, ctx3, zalt1)
+        notify_payload = (direction, rpz30, zalt10, ctx1, ctx3, zalt1)
 
-    direction, zalt30, ctx3, zalt1 = notify_payload
+    direction, rpz30, zalt10, ctx1, ctx3, zalt1 = notify_payload
     msg = (
         f"<b>SCALP {direction} - V3 SECONDAIRE</b> {symbol}\n"
         f"--------------------\n"
         f"Direction: {direction}\n"
         f"Price: ${format_price(price)}\n"
         f"Time: {datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}\n\n"
-        f"[OK] ZALT 30m: {(zalt30 or 'N/A').upper()}\n"
-        f"[OK] Zone ST Context 3m: {(ctx3 or 'N/A').upper()}\n"
+        f"[OK] RPZ 30m: {(rpz30 or 'N/A').upper()}\n"
+        f"[OK] ZALT 10m: {(zalt10 or 'N/A').upper()}\n"
+        f"[OK] ST Context 1m: {(ctx1 or 'N/A').upper()}\n"
+        f"[OK] Anti-chop ST Context 3m: {(ctx3 or 'N/A').upper()}\n"
         f"[OK] Flip ZALT 1m: {(zalt1 or 'N/A').upper()}"
     )
     if not send_telegram_with_buttons(msg):
@@ -644,6 +555,7 @@ def process_webhook(data):
     tf_aliases = {
         '1': '1m', '1min': '1m', '1minute': '1m',
         '3': '3m', '3min': '3m', '3minute': '3m',
+        '10': '10m', '10min': '10m', '10minute': '10m',
         '30': '30m', '30min': '30m', '30minute': '30m',
     }
     tf = tf_aliases.get(tf, tf)
@@ -653,6 +565,10 @@ def process_webhook(data):
         'zero_lag_trend_signal': 'zalt',
         'zero_lag_trend_signals': 'zalt',
         'zls': 'zalt',
+        'reversal_probability_zone': 'rpz',
+        'reversal_probability': 'rpz',
+        'rpz_zone': 'rpz',
+        'stcontext': 'st_context',
     }
     alert_type = alert_type_aliases.get(alert_type.replace(' ', '').replace('-', '_'), alert_type)
 
@@ -669,7 +585,7 @@ def process_webhook(data):
         return
 
     zalt_signal = str(data.get('signal') or data.get('event') or '').strip().lower()
-    parsed_zalt = parse_zalt_value(val) if alert_type == 'zalt' else None
+    parsed_dir = parse_dir_value(val) if alert_type in ('zalt', 'rpz') else None
 
     with STATE_LOCK:
         init_symbol(symbol)
@@ -677,11 +593,11 @@ def process_webhook(data):
         logger.info(f"Webhook: {symbol} | tf={tf} | type={alert_type} | val={val} | signal={zalt_signal or '-'}")
 
         if alert_type == 'zalt':
-            if parsed_zalt is None:
+            if parsed_dir is None:
                 logger.warning(f"[WEBHOOK] ZALT invalide: {symbol} tf={tf} value={val!r}")
                 return
-            if tf in ('1m', '30m'):
-                m[f'zalt_{tf}'] = parsed_zalt
+            if tf in ('1m', '10m', '30m'):
+                m[f'zalt_{tf}'] = parsed_dir
                 m[f'zalt_{tf}_ts'] = time.time()
                 if tf == '1m' and zalt_signal in ('trend_flip', 'flip'):
                     m['last_zalt_1m_signal_ts'] = time.time()
@@ -690,25 +606,28 @@ def process_webhook(data):
                 logger.info(f"[ZALT] {symbol} tf={tf} ignore: timeframe non utilise par SCALP V3")
                 return
 
-        elif alert_type == 'st_context' and tf == '3m':
-            try:
-                ctx_val = float(val)
-                ctx_parsed = 'buy' if ctx_val < -1.96 else 'sell' if ctx_val > 1.96 else None
-            except (TypeError, ValueError):
-                logger.warning(f"[WEBHOOK] ST Context invalide: {symbol} tf={tf} value={val!r}")
+        elif alert_type == 'rpz' and tf == '30m':
+            if parsed_dir is None:
+                logger.warning(f"[WEBHOOK] RPZ invalide: {symbol} tf={tf} value={val!r}")
                 return
-            m['st_context_3m'] = ctx_parsed
-            m['st_context_3m_ts'] = time.time()
-            m['st_context_3m_raw'] = ctx_val
+            m['rpz_30m'] = parsed_dir
+            m['rpz_30m_ts'] = time.time()
+            persist_state()
+
+        elif alert_type == 'st_context' and tf in ('1m', '3m'):
+            ctx_parsed, ctx_raw = parse_st_context_value(val)
+            m[f'st_context_{tf}'] = ctx_parsed
+            m[f'st_context_{tf}_ts'] = time.time()
+            m[f'st_context_{tf}_raw'] = ctx_raw
             persist_state()
         else:
             return
 
     trigger_dir = None
     if alert_type == 'zalt' and tf == '1m' and zalt_signal in ('trend_flip', 'flip'):
-        trigger_dir = parsed_zalt
+        trigger_dir = parsed_dir
 
-    if alert_type == 'zalt' and tf in ('1m', '30m'):
+    if alert_type in ('zalt', 'rpz', 'st_context'):
         evaluate_scalp_v3(
             symbol,
             trigger_dir=trigger_dir,
@@ -721,14 +640,6 @@ def process_webhook(data):
             trigger_dir=trigger_dir,
             price=price,
             event_id=f"scalp_v3_secondary_{symbol}_{tf}_{alert_type}_{event_id}",
-            trigger_label=f"{alert_type}_{tf}",
-        )
-
-    if alert_type == 'st_context' and tf == '3m':
-        evaluate_scalp_v3_secondary(
-            symbol,
-            price=price,
-            event_id=f"scalp_v3_secondary_ctx3_{symbol}_{event_id}",
             trigger_label=f"{alert_type}_{tf}",
         )
 
@@ -871,21 +782,24 @@ def debug_symbol():
         m = dict(MOMENTUM_STATE.get(symbol, {}))
         zalt1 = m.get('zalt_1m')
         direction = 'LONG' if zalt1 == 'buy' else 'SHORT' if zalt1 == 'sell' else None
-        exp_zalt = 'buy' if direction == 'LONG' else 'sell' if direction == 'SHORT' else None
-        exp_bias = 'bull' if direction == 'LONG' else 'bear' if direction == 'SHORT' else None
+        exp = 'buy' if direction == 'LONG' else 'sell' if direction == 'SHORT' else None
         zalt30 = signal_debug_payload(m, 'zalt_30m', 90 * 60)
+        zalt10 = signal_debug_payload(m, 'zalt_10m', 30 * 60)
         zalt1_sig = signal_debug_payload(m, 'zalt_1m', 5 * 60)
-        bias10 = signal_debug_payload(m, 'bias_10m', 45 * 60)
+        rpz30 = signal_debug_payload(m, 'rpz_30m', 90 * 60)
+        ctx1m = signal_debug_payload(m, 'st_context_1m', 5 * 60)
         ctx3m = signal_debug_payload(m, 'st_context_3m', 10 * 60)
         flip_fresh = is_fresh(m.get('last_zalt_1m_signal_ts'), 5 * 60)
         if direction:
-            zalt30_ok = zalt30['fresh'] and zalt30['value'] == exp_zalt
-            bias10_ok = bias10['fresh'] and bias10['value'] == exp_bias
-            ctx3m_ok = ctx3m['fresh'] and ctx3m['value'] == exp_zalt
-            primary_ok = zalt30_ok and bias10_ok and flip_fresh
-            secondary_ok = zalt30_ok and ctx3m_ok and flip_fresh
+            zalt30_ok = zalt30['fresh'] and zalt30['value'] == exp
+            zalt10_ok = zalt10['fresh'] and zalt10['value'] == exp
+            ctx1_ok = ctx1m['fresh'] and ctx1m['value'] == exp
+            antichop_ok = ctx3m['fresh'] and ctx3m['value'] == exp
+            rpz30_ok = rpz30['fresh'] and rpz30['value'] == exp
+            primary_ok = zalt30_ok and zalt10_ok and ctx1_ok and antichop_ok and flip_fresh
+            secondary_ok = rpz30_ok and zalt10_ok and ctx1_ok and antichop_ok and flip_fresh
         else:
-            zalt30_ok = bias10_ok = ctx3m_ok = primary_ok = secondary_ok = False
+            zalt30_ok = zalt10_ok = ctx1_ok = antichop_ok = rpz30_ok = primary_ok = secondary_ok = False
         return jsonify({
             'status': 'ok',
             'symbol': symbol,
@@ -893,20 +807,23 @@ def debug_symbol():
             'now_shanghai': datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S'),
             'scalp_v3': {
                 'direction_from_zalt_1m': direction,
-                'expected_zalt': exp_zalt,
-                'expected_bias': exp_bias,
+                'expected': exp,
                 'flip_1m_fresh': flip_fresh,
                 'principale_ok': primary_ok,
                 'secondaire_ok': secondary_ok,
                 'zalt30_ok': zalt30_ok,
-                'bias10_ok': bias10_ok,
-                'ctx3m_ok': ctx3m_ok,
+                'zalt10_ok': zalt10_ok,
+                'rpz30_ok': rpz30_ok,
+                'ctx1m_ok': ctx1_ok,
+                'antichop_ctx3m_ok': antichop_ok,
             },
             'signals': {
                 'zalt_30m': zalt30,
+                'zalt_10m': zalt10,
                 'zalt_1m': zalt1_sig,
                 'last_zalt_1m_signal_ts': m.get('last_zalt_1m_signal_ts'),
-                'bias_10m': bias10,
+                'rpz_30m': rpz30,
+                'st_context_1m': ctx1m,
                 'st_context_3m': ctx3m,
             },
         })
@@ -988,7 +905,10 @@ def reset():
 def scalp_required_tv_signals():
     return [
         {'label': 'ZALT 30m', 'field': 'zalt_30m_ts', 'max_age': 90 * 60, 'warmup': 2 * 60 * 60},
+        {'label': 'ZALT 10m', 'field': 'zalt_10m_ts', 'max_age': 30 * 60, 'warmup': 45 * 60},
         {'label': 'ZALT 1m', 'field': 'zalt_1m_ts', 'max_age': 5 * 60, 'warmup': 10 * 60},
+        {'label': 'RPZ 30m', 'field': 'rpz_30m_ts', 'max_age': 90 * 60, 'warmup': 2 * 60 * 60},
+        {'label': 'ST Context 1m', 'field': 'st_context_1m_ts', 'max_age': 5 * 60, 'warmup': 15 * 60},
         {'label': 'ST Context 3m', 'field': 'st_context_3m_ts', 'max_age': 10 * 60, 'warmup': 20 * 60},
     ]
 
@@ -1062,7 +982,6 @@ def startup():
         except Exception as e:
             logger.warning(f"Webhook setup: {e}")
 
-    threading.Thread(target=update_bias_10m, daemon=True).start()
     threading.Thread(target=scalp_tv_signal_watchdog, daemon=True).start()
 
     main_url = os.environ.get('MAIN_BOT_URL', '').rstrip('/')
@@ -1091,8 +1010,9 @@ def startup():
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         "Strategie active: SCALP V3\n"
-        "Principale: ZALT 30m + Bias 10m + flip ZALT 1m\n"
-        "Secondaire: ZALT 30m + ST Context 3m + flip ZALT 1m\n"
+        "Principale: ZALT 30m + ZALT 10m + ST Context 1m + flip ZALT 1m\n"
+        "Secondaire: RPZ 30m + ZALT 10m + ST Context 1m + flip ZALT 1m\n"
+        "Anti-chop: ST Context 3m aligne\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
     )
