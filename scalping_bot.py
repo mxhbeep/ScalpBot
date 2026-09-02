@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot V3
-# Principale : ZALT 30m + ZALT 10m + ST Context 1m + flip ZALT 1m | anti-chop ST Context 3m
-# Secondaire : RPZ 30m + ZALT 10m + ST Context 1m + flip ZALT 1m | anti-chop ST Context 3m
-# Service Railway séparé — alertes uniquement, pas d'exécution exchange
+# Scalping Bot V3.1
+# Tendance : ZALT 1H  OU  RPZ 1H + ZALT 30m
+# Principale : tendance + CTX 30m + CTX 3m + flip ZALT 1m
+# Secondaire : (ZALT 1H + ZALT 30m + CTX 3m) OU (RPZ 1H + ZALT 30m + CTX 3m) + flip ZALT 1m
 
 import json
 import time
@@ -388,7 +388,6 @@ def _trend_ok(m, exp):
 
 
 def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_label="state_refresh"):
-    """SCALP V3.1 principale: (ZALT 1H ou RPZ 1H+ZALT 30m) + ST Context 30m + ST Context 3m + flip ZALT 1m."""
     if trigger_dir not in (None, 'buy', 'sell'):
         return False
     notify_payload = None
@@ -427,7 +426,7 @@ def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_
         direction, symbol, price, trend_txt = notify_payload
         emoji = "🟢" if direction == "LONG" else "🔴"
         send_telegram_with_buttons(
-            f"{emoji} SCALP {direction} {symbol}\n"
+            f"{emoji} <b>SCALP {direction}</b> {symbol}\n"
             f"--------------------\n"
             f"Price: ${format_price(price)}\n"
             f"Principale: CTX 30m + CTX 3m + flip ZALT 1m\n"
@@ -438,7 +437,6 @@ def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_
 
 
 def evaluate_scalp_v3_secondary(symbol, trigger_dir=None, price=0, event_id=None, trigger_label="state_refresh"):
-    """SCALP V3.1 secondaire: (ZALT 1H+ZALT 30m+CTX 3m) ou (RPZ 1H+ZALT 30m+CTX 3m) + flip ZALT 1m."""
     if trigger_dir not in (None, 'buy', 'sell'):
         return False
     notify_payload = None
@@ -479,13 +477,16 @@ def evaluate_scalp_v3_secondary(symbol, trigger_dir=None, price=0, event_id=None
         direction, symbol, price, path = notify_payload
         emoji = "🟢" if direction == "LONG" else "🔴"
         send_telegram_with_buttons(
-            f"{emoji} SCALP {direction} SEC {symbol}\n"
+            f"{emoji} <b>SCALP {direction} SEC</b> {symbol}\n"
             f"--------------------\n"
             f"Price: ${format_price(price)}\n"
             f"Secondaire: {path} + flip ZALT 1m"
         )
         return True
     return False
+
+
+@app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json(silent=True)
     if not data:
@@ -520,6 +521,7 @@ def process_webhook(data):
         '3': '3m', '3min': '3m', '3minute': '3m',
         '10': '10m', '10min': '10m', '10minute': '10m',
         '30': '30m', '30min': '30m', '30minute': '30m',
+        '60': '1h', '1hr': '1h', '1hour': '1h',
     }
     tf = tf_aliases.get(tf, tf)
     alert_type_aliases = {
@@ -886,10 +888,10 @@ def scalp_required_tv_signals():
 
 
 def scalp_watchdog_max_age(symbol, req):
-    """CVX est tolerant a 24h sur tous les signaux du watchdog (asset moins liquide/actif,
-    evite le bruit de fausses alertes 'signal manquant')."""
     if symbol == 'CVX/USDT':
         return 24 * 60 * 60
+    if req.get('field') == 'zalt_1m_ts':
+        return 60 * 60
     return req['max_age']
 
 
@@ -990,10 +992,9 @@ def startup():
         "<b>Scalping Bot demarre</b>\n"
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
-        "Strategie active: SCALP V3\n"
+        "Strategie active: SCALP V3.1\n"
         "Principale: tendance (ZALT1H ou RPZ1H+ZALT30) + CTX30 + CTX3 + flip ZALT1m\n"
         "Secondaire: (ZALT1H+ZALT30 ou RPZ1H+ZALT30) + CTX3 + flip ZALT1m\n"
-        "Anti-chop: ST Context 3m aligne\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
     )
