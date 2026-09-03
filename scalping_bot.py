@@ -815,7 +815,6 @@ def reset():
 def scalp_required_tv_signals():
     return [
         {'label': 'RPZ 30m', 'field': 'rpz_30m_ts', 'max_age': 90 * 60, 'warmup': 2 * 3600},
-        {'label': 'ZALT 5m', 'field': 'zalt_5m_ts', 'max_age': 22 * 60, 'warmup': 30 * 60},
         {'label': 'ST Context 15m', 'field': 'st_context_15m_ts', 'max_age': 45 * 60, 'warmup': 90 * 60},
         {'label': 'ST Context 30m', 'field': 'st_context_30m_ts', 'max_age': 90 * 60, 'warmup': 2 * 3600},
         {'label': 'ST Context 5m', 'field': 'st_context_5m_ts', 'max_age': 22 * 60, 'warmup': 30 * 60},
