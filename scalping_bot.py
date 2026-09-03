@@ -34,18 +34,10 @@ CONFIG = {
         'APT/USDT': {'exchange': 'okx'},
         'BTC/USDT': {'exchange': 'okx'},
         'CRV/USDT': {'exchange': 'okx'},
-        'CVX/USDT': {'exchange': 'okx'},
         'DOGE/USDT': {'exchange': 'okx'},
         'ETH/USDT': {'exchange': 'okx'},
-        'FARTCOIN/USDT': {'exchange': 'okx'},
-        'HYPE/USDT': {'exchange': 'okx'},
         'LINK/USDT': {'exchange': 'okx'},
-        'PENGU/USDT': {'exchange': 'okx'},
-        'PEPE/USDT': {'exchange': 'okx'},
-        'USELESS/USDT': {'exchange': 'okx'},
-        'XPL/USDT': {'exchange': 'okx'},
         'XRP/USDT': {'exchange': 'okx'},
-        'ZEC/USDT': {'exchange': 'okx'},
     },
 }
 
@@ -111,12 +103,9 @@ def load_state():
 def init_symbol(symbol):
     if symbol not in MOMENTUM_STATE:
         MOMENTUM_STATE[symbol] = {
-            'zalt_1m': None, 'zalt_1m_ts': None, 'last_zalt_1m_signal_ts': None,
             'zalt_30m': None, 'zalt_30m_ts': None,
-            'zalt_1h': None, 'zalt_1h_ts': None,
-            'rpz_1h': None, 'rpz_1h_ts': None,
-            'st_context_3m': None, 'st_context_3m_ts': None, 'st_context_3m_raw': None,
-            'st_context_30m': None, 'st_context_30m_ts': None, 'st_context_30m_raw': None,
+            'zalt_3m': None, 'zalt_3m_ts': None, 'last_zalt_3m_signal_ts': None,
+            'st_context_15m': None, 'st_context_15m_ts': None, 'st_context_15m_raw': None,
         }
 
 
@@ -380,14 +369,16 @@ def send_telegram_with_buttons(msg):
     return bool(result.get('telegram_scalp'))
 
 
-def _trend_ok(m, exp):
-    zalt1h_ok = is_fresh(m.get('zalt_1h_ts'), 3 * 3600) and m.get('zalt_1h') == exp
-    rpz1h_ok = is_fresh(m.get('rpz_1h_ts'), 3 * 3600) and m.get('rpz_1h') == exp
-    zalt30_ok = is_fresh(m.get('zalt_30m_ts'), 90 * 60) and m.get('zalt_30m') == exp
-    return zalt1h_ok or (rpz1h_ok and zalt30_ok), zalt1h_ok, rpz1h_ok, zalt30_ok
+def _ctx_veto(m, field, exp, max_age):
+    """Veto seulement si le contexte est OPPOSE et frais. Neutre/None/perime = pas de veto."""
+    value = m.get(field)
+    fresh = is_fresh(m.get(f'{field}_ts'), max_age)
+    opp = 'sell' if exp == 'buy' else 'buy'
+    return value, fresh, bool(fresh and value == opp)
 
 
-def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_label="state_refresh"):
+def evaluate_scalp(symbol, trigger_dir=None, price=0, event_id=None, trigger_label="state_refresh"):
+    """Scalp simplifie: tendance ZALT 30m + trigger flip ZALT 3m + veto Context 15m oppose."""
     if trigger_dir not in (None, 'buy', 'sell'):
         return False
     notify_payload = None
@@ -401,86 +392,34 @@ def evaluate_scalp_v3(symbol, trigger_dir=None, price=0, event_id=None, trigger_
         selected = None
         for exp in directions:
             direction = 'LONG' if exp == 'buy' else 'SHORT'
-            trend_ok, zalt1h_ok, rpz1h_ok, zalt30_ok = _trend_ok(m, exp)
-            ctx30_ok = is_fresh(m.get('st_context_30m_ts'), 90 * 60) and m.get('st_context_30m') == exp
-            ctx3_ok = is_fresh(m.get('st_context_3m_ts'), 10 * 60) and m.get('st_context_3m') == exp
-            zalt1_ok = is_fresh(m.get('zalt_1m_ts'), 5 * 60) and m.get('zalt_1m') == exp
-            flip_ok = is_fresh(m.get('last_zalt_1m_signal_ts'), 5 * 60)
-            primary_ok = trend_ok and ctx30_ok and ctx3_ok and zalt1_ok and flip_ok
+            trend_ok = is_fresh(m.get('zalt_30m_ts'), 90 * 60) and m.get('zalt_30m') == exp
+            zalt3_ok = is_fresh(m.get('zalt_3m_ts'), 15 * 60) and m.get('zalt_3m') == exp
+            flip_ok = is_fresh(m.get('last_zalt_3m_signal_ts'), 15 * 60)
+            ctx15, ctx15_fresh, ctx15_veto = _ctx_veto(m, 'st_context_15m', exp, 45 * 60)
+            entry_ok = trend_ok and zalt3_ok and flip_ok and not ctx15_veto
             logger.info(
-                f"[SCALP PRIM] {symbol} {direction} src={trigger_label} "
-                f"trend={trend_ok} z1h={zalt1h_ok} rpz1h={rpz1h_ok} z30={zalt30_ok} "
-                f"ctx30={ctx30_ok} ctx3={ctx3_ok} z1m={zalt1_ok} flip={flip_ok} ok={primary_ok}"
+                f"[SCALP CHECK] {symbol} {direction} src={trigger_label} "
+                f"zalt30={trend_ok} zalt3={zalt3_ok} flip={flip_ok} "
+                f"ctx15={ctx15} fresh={ctx15_fresh} veto={ctx15_veto} entry={entry_ok}"
             )
-            if primary_ok:
-                selected = (exp, direction, zalt1h_ok, rpz1h_ok, zalt30_ok)
+            if entry_ok:
+                selected = (exp, direction)
                 break
         if not selected:
             return False
-        exp, direction, zalt1h_ok, rpz1h_ok, zalt30_ok = selected
-        if not should_send(symbol, f"scalp_v3_primary_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
+        exp, direction = selected
+        if not should_send(symbol, f"scalp_entry_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
             return False
-        trend_txt = "ZALT 1H" if zalt1h_ok else "RPZ 1H + ZALT 30m"
-        notify_payload = (direction, symbol, price, trend_txt)
+        notify_payload = (direction, symbol, price)
     if notify_payload:
-        direction, symbol, price, trend_txt = notify_payload
+        direction, symbol, price = notify_payload
         emoji = "🟢" if direction == "LONG" else "🔴"
         send_telegram_with_buttons(
             f"{emoji} <b>SCALP {direction}</b> {symbol}\n"
             f"--------------------\n"
             f"Price: ${format_price(price)}\n"
-            f"Principale: CTX 30m + CTX 3m + flip ZALT 1m\n"
-            f"Tendance: {trend_txt}"
-        )
-        return True
-    return False
-
-
-def evaluate_scalp_v3_secondary(symbol, trigger_dir=None, price=0, event_id=None, trigger_label="state_refresh"):
-    if trigger_dir not in (None, 'buy', 'sell'):
-        return False
-    notify_payload = None
-    with STATE_LOCK:
-        init_symbol(symbol)
-        m = MOMENTUM_STATE[symbol]
-        if not SCALP_ENABLED:
-            return False
-        directions = [trigger_dir] if trigger_dir in ('buy', 'sell') else ['buy', 'sell']
-        selected = None
-        path = None
-        for exp in directions:
-            direction = 'LONG' if exp == 'buy' else 'SHORT'
-            zalt1h_ok = is_fresh(m.get('zalt_1h_ts'), 3 * 3600) and m.get('zalt_1h') == exp
-            rpz1h_ok = is_fresh(m.get('rpz_1h_ts'), 3 * 3600) and m.get('rpz_1h') == exp
-            zalt30_ok = is_fresh(m.get('zalt_30m_ts'), 90 * 60) and m.get('zalt_30m') == exp
-            ctx3_ok = is_fresh(m.get('st_context_3m_ts'), 10 * 60) and m.get('st_context_3m') == exp
-            zalt1_ok = is_fresh(m.get('zalt_1m_ts'), 5 * 60) and m.get('zalt_1m') == exp
-            flip_ok = is_fresh(m.get('last_zalt_1m_signal_ts'), 5 * 60)
-            path_a = zalt1h_ok and zalt30_ok and ctx3_ok and zalt1_ok and flip_ok
-            path_b = rpz1h_ok and zalt30_ok and ctx3_ok and zalt1_ok and flip_ok
-            logger.info(
-                f"[SCALP SEC] {symbol} {direction} src={trigger_label} "
-                f"A={path_a} B={path_b} z1h={zalt1h_ok} rpz1h={rpz1h_ok} "
-                f"z30={zalt30_ok} ctx3={ctx3_ok} flip={flip_ok}"
-            )
-            if path_a or path_b:
-                selected = (exp, direction)
-                path = "ZALT 1H + ZALT 30m + CTX 3m" if path_a else "RPZ 1H + ZALT 30m + CTX 3m"
-                break
-        if not selected:
-            return False
-        exp, direction = selected
-        if not should_send(symbol, f"scalp_v3_secondary_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
-            return False
-        notify_payload = (direction, symbol, price, path)
-    if notify_payload:
-        direction, symbol, price, path = notify_payload
-        emoji = "🟢" if direction == "LONG" else "🔴"
-        send_telegram_with_buttons(
-            f"{emoji} <b>SCALP {direction} SEC</b> {symbol}\n"
-            f"--------------------\n"
-            f"Price: ${format_price(price)}\n"
-            f"Secondaire: {path} + flip ZALT 1m"
+            f"Tendance: ZALT 30m + flip ZALT 3m\n"
+            f"Veto: ST Context 15m (bloque si oppose)"
         )
         return True
     return False
@@ -550,7 +489,7 @@ def process_webhook(data):
         return
 
     zalt_signal = str(data.get('signal') or data.get('event') or '').strip().lower()
-    parsed_dir = parse_dir_value(val) if alert_type in ('zalt', 'rpz') else None
+    parsed_dir = parse_dir_value(val) if alert_type == 'zalt' else None
 
     with STATE_LOCK:
         init_symbol(symbol)
@@ -561,50 +500,35 @@ def process_webhook(data):
             if parsed_dir is None:
                 logger.warning(f"[WEBHOOK] ZALT invalide: {symbol} tf={tf} value={val!r}")
                 return
-            if tf in ('1m', '30m', '1h'):
+            if tf in ('30m', '3m'):
                 m[f'zalt_{tf}'] = parsed_dir
                 m[f'zalt_{tf}_ts'] = time.time()
-                if tf == '1m' and zalt_signal in ('trend_flip', 'flip'):
-                    m['last_zalt_1m_signal_ts'] = time.time()
+                if tf == '3m' and zalt_signal in ('trend_flip', 'flip'):
+                    m['last_zalt_3m_signal_ts'] = time.time()
                 persist_state()
             else:
-                logger.info(f"[ZALT] {symbol} tf={tf} ignore: timeframe non utilise par SCALP V3")
+                logger.info(f"[ZALT] {symbol} tf={tf} ignore: timeframe non utilise par SCALP")
                 return
 
-        elif alert_type == 'rpz' and tf == '1h':
-            if parsed_dir is None:
-                logger.warning(f"[WEBHOOK] RPZ invalide: {symbol} tf={tf} value={val!r}")
-                return
-            m['rpz_1h'] = parsed_dir
-            m['rpz_1h_ts'] = time.time()
-            persist_state()
-
-        elif alert_type == 'st_context' and tf in ('3m', '30m'):
+        elif alert_type == 'st_context' and tf == '15m':
             ctx_parsed, ctx_raw = parse_st_context_value(val)
-            m[f'st_context_{tf}'] = ctx_parsed
-            m[f'st_context_{tf}_ts'] = time.time()
-            m[f'st_context_{tf}_raw'] = ctx_raw
+            m['st_context_15m'] = ctx_parsed
+            m['st_context_15m_ts'] = time.time()
+            m['st_context_15m_raw'] = ctx_raw
             persist_state()
         else:
             return
 
     trigger_dir = None
-    if alert_type == 'zalt' and tf == '1m' and zalt_signal in ('trend_flip', 'flip'):
+    if alert_type == 'zalt' and tf == '3m' and zalt_signal in ('trend_flip', 'flip'):
         trigger_dir = parsed_dir
 
-    if alert_type in ('zalt', 'rpz', 'st_context'):
-        evaluate_scalp_v3(
+    if alert_type in ('zalt', 'st_context'):
+        evaluate_scalp(
             symbol,
             trigger_dir=trigger_dir,
             price=price,
-            event_id=f"scalp_v3_{symbol}_{tf}_{alert_type}_{event_id}",
-            trigger_label=f"{alert_type}_{tf}",
-        )
-        evaluate_scalp_v3_secondary(
-            symbol,
-            trigger_dir=trigger_dir,
-            price=price,
-            event_id=f"scalp_v3_secondary_{symbol}_{tf}_{alert_type}_{event_id}",
+            event_id=f"scalp_{symbol}_{tf}_{alert_type}_{event_id}",
             trigger_label=f"{alert_type}_{tf}",
         )
 
@@ -745,60 +669,40 @@ def debug_symbol():
     with STATE_LOCK:
         init_symbol(symbol)
         m = dict(MOMENTUM_STATE.get(symbol, {}))
-        zalt1 = m.get('zalt_1m')
-        direction = 'LONG' if zalt1 == 'buy' else 'SHORT' if zalt1 == 'sell' else None
+        zalt3 = m.get('zalt_3m')
+        direction = 'LONG' if zalt3 == 'buy' else 'SHORT' if zalt3 == 'sell' else None
         exp = 'buy' if direction == 'LONG' else 'sell' if direction == 'SHORT' else None
-        zalt1h = signal_debug_payload(m, 'zalt_1h', 3 * 3600)
-        rpz1h = signal_debug_payload(m, 'rpz_1h', 3 * 3600)
         zalt30 = signal_debug_payload(m, 'zalt_30m', 90 * 60)
-        zalt1_sig = signal_debug_payload(m, 'zalt_1m', 5 * 60)
-        ctx30m = signal_debug_payload(m, 'st_context_30m', 90 * 60)
-        ctx3m = signal_debug_payload(m, 'st_context_3m', 10 * 60)
-        flip_fresh = is_fresh(m.get('last_zalt_1m_signal_ts'), 5 * 60)
+        zalt3_sig = signal_debug_payload(m, 'zalt_3m', 15 * 60)
+        ctx15m = signal_debug_payload(m, 'st_context_15m', 45 * 60)
+        flip_fresh = is_fresh(m.get('last_zalt_3m_signal_ts'), 15 * 60)
         if direction:
-            zalt1h_ok = zalt1h['fresh'] and zalt1h['value'] == exp
-            rpz1h_ok = rpz1h['fresh'] and rpz1h['value'] == exp
+            opp = 'sell' if exp == 'buy' else 'buy'
             zalt30_ok = zalt30['fresh'] and zalt30['value'] == exp
-            zalt1_ok = zalt1_sig['fresh'] and zalt1_sig['value'] == exp
-            ctx30_ok = ctx30m['fresh'] and ctx30m['value'] == exp
-            ctx3_ok = ctx3m['fresh'] and ctx3m['value'] == exp
-            trend_ok = zalt1h_ok or (rpz1h_ok and zalt30_ok)
-            primary_ok = trend_ok and ctx30_ok and ctx3_ok and zalt1_ok and flip_fresh
-            secondary_path_a = zalt1h_ok and zalt30_ok and ctx3_ok and zalt1_ok and flip_fresh
-            secondary_path_b = rpz1h_ok and zalt30_ok and ctx3_ok and zalt1_ok and flip_fresh
-            secondary_ok = secondary_path_a or secondary_path_b
+            zalt3_ok = zalt3_sig['fresh'] and zalt3_sig['value'] == exp
+            ctx15_veto = ctx15m['fresh'] and ctx15m['value'] == opp
+            entry_ok = zalt30_ok and zalt3_ok and flip_fresh and not ctx15_veto
         else:
-            zalt1h_ok = rpz1h_ok = zalt30_ok = zalt1_ok = ctx30_ok = ctx3_ok = trend_ok = primary_ok = False
-            secondary_path_a = secondary_path_b = secondary_ok = False
+            zalt30_ok = zalt3_ok = ctx15_veto = entry_ok = False
         return jsonify({
             'status': 'ok',
             'symbol': symbol,
             'enabled': SCALP_ENABLED,
             'now_shanghai': datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S'),
-            'scalp_v3_1': {
-                'direction_from_zalt_1m': direction,
+            'scalp': {
+                'direction_from_zalt_3m': direction,
                 'expected': exp,
-                'flip_1m_fresh': flip_fresh,
-                'trend_ok': trend_ok,
-                'principale_ok': primary_ok,
-                'secondaire_ok': secondary_ok,
-                'secondaire_path_a_zalt1h': secondary_path_a,
-                'secondaire_path_b_rpz1h': secondary_path_b,
-                'zalt1h_ok': zalt1h_ok,
-                'rpz1h_ok': rpz1h_ok,
+                'flip_3m_fresh': flip_fresh,
                 'zalt30_ok': zalt30_ok,
-                'zalt1m_ok': zalt1_ok,
-                'ctx30m_ok': ctx30_ok,
-                'ctx3m_ok': ctx3_ok,
+                'zalt3_ok': zalt3_ok,
+                'ctx15m_veto': ctx15_veto,
+                'entry_ok': entry_ok,
             },
             'signals': {
-                'zalt_1h': zalt1h,
-                'rpz_1h': rpz1h,
                 'zalt_30m': zalt30,
-                'zalt_1m': zalt1_sig,
-                'last_zalt_1m_signal_ts': m.get('last_zalt_1m_signal_ts'),
-                'st_context_30m': ctx30m,
-                'st_context_3m': ctx3m,
+                'zalt_3m': zalt3_sig,
+                'last_zalt_3m_signal_ts': m.get('last_zalt_3m_signal_ts'),
+                'st_context_15m': ctx15m,
             },
         })
 
@@ -878,20 +782,15 @@ def reset():
 
 def scalp_required_tv_signals():
     return [
-        {'label': 'ZALT 1H', 'field': 'zalt_1h_ts', 'max_age': 3 * 3600, 'warmup': 4 * 3600},
         {'label': 'ZALT 30m', 'field': 'zalt_30m_ts', 'max_age': 90 * 60, 'warmup': 2 * 3600},
-        {'label': 'ZALT 1m', 'field': 'zalt_1m_ts', 'max_age': 5 * 60, 'warmup': 10 * 60},
-        {'label': 'RPZ 1H', 'field': 'rpz_1h_ts', 'max_age': 3 * 3600, 'warmup': 4 * 3600},
-        {'label': 'ST Context 30m', 'field': 'st_context_30m_ts', 'max_age': 90 * 60, 'warmup': 2 * 3600},
-        {'label': 'ST Context 3m', 'field': 'st_context_3m_ts', 'max_age': 10 * 60, 'warmup': 20 * 60},
+        {'label': 'ZALT 3m', 'field': 'zalt_3m_ts', 'max_age': 15 * 60, 'warmup': 30 * 60},
+        {'label': 'ST Context 15m', 'field': 'st_context_15m_ts', 'max_age': 45 * 60, 'warmup': 90 * 60},
     ]
 
 
 def scalp_watchdog_max_age(symbol, req):
     if symbol == 'CVX/USDT':
         return 24 * 60 * 60
-    if req.get('field') == 'zalt_1m_ts':
-        return 60 * 60
     return req['max_age']
 
 
@@ -992,9 +891,8 @@ def startup():
         "<b>Scalping Bot demarre</b>\n"
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
-        "Strategie active: SCALP V3.1\n"
-        "Principale: tendance (ZALT1H ou RPZ1H+ZALT30) + CTX30 + CTX3 + flip ZALT1m\n"
-        "Secondaire: (ZALT1H+ZALT30 ou RPZ1H+ZALT30) + CTX3 + flip ZALT1m\n"
+        "Strategie active: SCALP (simplifiee)\n"
+        "Tendance: ZALT 30m | Trigger: flip ZALT 3m | Veto: ST Context 15m oppose\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
     )
