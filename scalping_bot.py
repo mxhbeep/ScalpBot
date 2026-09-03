@@ -471,11 +471,8 @@ def process_webhook(data):
     event_id = data.get('event_id') or data.get('time') or str(time.time())
 
     tf_aliases = {
-        '1': '1m', '1min': '1m', '1minute': '1m',
         '5': '5m', '5min': '5m', '5minute': '5m',
-        '10': '10m', '10min': '10m', '10minute': '10m',
         '30': '30m', '30min': '30m', '30minute': '30m',
-        '60': '1h', '1hr': '1h', '1hour': '1h',
     }
     tf = tf_aliases.get(tf, tf)
     alert_type_aliases = {
@@ -825,10 +822,6 @@ def scalp_required_tv_signals():
     ]
 
 
-def scalp_watchdog_max_age(symbol, req):
-    return req['max_age']
-
-
 def scalp_tv_signal_watchdog():
     bot_start_time = time.time()
     time.sleep(10 * 60)
@@ -850,7 +843,7 @@ def scalp_tv_signal_watchdog():
             stale = []
             for symbol in symbols:
                 ts = state_copy.get(symbol, {}).get(req['field'])
-                max_age = scalp_watchdog_max_age(symbol, req)
+                max_age = req['max_age']
                 if ts is None:
                     missing.append(symbol.replace('/USDT', ''))
                 elif now - float(ts) > max_age:
