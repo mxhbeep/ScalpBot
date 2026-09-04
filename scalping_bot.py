@@ -36,7 +36,10 @@ CONFIG = {
         'DOGE/USDT': {'exchange': 'okx'},
         'ETH/USDT': {'exchange': 'okx'},
         'LINK/USDT': {'exchange': 'okx'},
+        'SOL/USDT': {'exchange': 'okx'},
+        'UNI/USDT': {'exchange': 'okx'},
         'XRP/USDT': {'exchange': 'okx'},
+        'ZEC/USDT': {'exchange': 'okx'},
     },
 }
 
