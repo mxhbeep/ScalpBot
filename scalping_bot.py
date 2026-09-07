@@ -415,7 +415,8 @@ def evaluate_scalp(symbol, trigger_dir=None, price=0, event_id=None, trigger_lab
             entry_a_ok = armed and trigger_ok
 
             bias30 = m.get('bias_30m')
-            bias30_ok = bias30 == exp
+            bias30_fresh = is_fresh(m.get('bias_30m_ts'), 90 * 60)
+            bias30_ok = bias30_fresh and bias30 == exp
             entry_b_ok = bias30_ok and trigger_ok
 
             entry_ok = entry_a_ok or entry_b_ok
@@ -736,7 +737,8 @@ def debug_symbol():
             trigger_ok = ctx1_ok and zalt1_ok and flip_fresh and not ctx5_veto
             armed = bool(armed_fresh and armed_dir == exp)
             entry_a_ok = armed and trigger_ok
-            bias30_ok = bias30m == exp
+            bias30_fresh = is_fresh(m.get('bias_30m_ts'), 90 * 60)
+            bias30_ok = bias30_fresh and bias30m == exp
             entry_b_ok = bias30_ok and trigger_ok
             entry_ok = entry_a_ok or entry_b_ok
         else:
