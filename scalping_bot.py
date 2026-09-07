@@ -3,7 +3,7 @@
 # Scalping Bot — porte A/B
 # A : arme quand CTX 10m passe buy/sell -> neutre (desarme sur zone opposee ou 8h), + trigger
 # B : Bias 30m (OKX interne) buy/sell aligne + trigger
-# Trigger commun : CTX 1m aligne + flip ZALT 1m + veto CTX 5m frais oppose
+# Trigger commun : CTX 1m aligne + flip ZALT 1m + veto CTX 10m frais oppose
 
 import json
 import time
@@ -108,7 +108,6 @@ def init_symbol(symbol):
         MOMENTUM_STATE[symbol] = {
             'zalt_1m': None, 'zalt_1m_ts': None, 'last_zalt_1m_signal_ts': None,
             'st_context_1m': None, 'st_context_1m_ts': None, 'st_context_1m_raw': None,
-            'st_context_5m': None, 'st_context_5m_ts': None, 'st_context_5m_raw': None,
             'st_context_10m': None, 'st_context_10m_ts': None, 'st_context_10m_raw': None,
             'bias_30m': None, 'bias_30m_ts': None,
             'armed_dir': None, 'armed_ts': None,
@@ -384,10 +383,11 @@ def _ctx_veto(m, field, exp, max_age):
 
 
 def evaluate_scalp(symbol, trigger_dir=None, price=0, event_id=None, trigger_label="state_refresh"):
-    """Scalp porte A/B: trigger commun = CTX 1m aligne + flip ZALT 1m + veto CTX 5m oppose frais.
+    """Scalp porte A/B: trigger commun = CTX 1m aligne + flip ZALT 1m + veto CTX 10m oppose frais.
     A: arme quand CTX 10m passe buy/sell -> neutre (armed_dir/armed_ts), desarme sur zone
-    opposee ou apres 8h. Bias 30m non bloquant sur cette voie (ligne [ATTENTION] si pas aligne).
-    B: Bias 30m buy/sell aligne (pas neutre), pas d'armement 10m."""
+    opposee ou apres 8h — le desarmement (10m passe oppose) vaut aussi veto naturellement,
+    meme source. Bias 30m non bloquant sur cette voie (ligne [ATTENTION] si pas aligne).
+    B: Bias 30m buy/sell aligne et frais (pas neutre), + veto CTX 10m, pas d'armement 10m."""
     if trigger_dir not in (None, 'buy', 'sell'):
         return False
     ARM_TIMEOUT = 8 * 3600
@@ -407,8 +407,8 @@ def evaluate_scalp(symbol, trigger_dir=None, price=0, event_id=None, trigger_lab
             ctx1_ok = is_fresh(m.get('st_context_1m_ts'), 10 * 60) and m.get('st_context_1m') == exp
             zalt1_ok = is_fresh(m.get('zalt_1m_ts'), 10 * 60) and m.get('zalt_1m') == exp
             flip_ok = is_fresh(m.get('last_zalt_1m_signal_ts'), 10 * 60)
-            ctx5, ctx5_fresh, ctx5_veto = _ctx_veto(m, 'st_context_5m', exp, 22 * 60)
-            trigger_ok = ctx1_ok and zalt1_ok and flip_ok and not ctx5_veto
+            ctx10, ctx10_fresh, ctx10_veto = _ctx_veto(m, 'st_context_10m', exp, 45 * 60)
+            trigger_ok = ctx1_ok and zalt1_ok and flip_ok and not ctx10_veto
 
             armed_fresh = is_fresh(m.get('armed_ts'), ARM_TIMEOUT)
             armed = bool(armed_fresh and m.get('armed_dir') == exp)
@@ -424,7 +424,7 @@ def evaluate_scalp(symbol, trigger_dir=None, price=0, event_id=None, trigger_lab
             logger.info(
                 f"[SCALP CHECK] {symbol} {direction} src={trigger_label} "
                 f"ctx1={ctx1_ok} zalt1={zalt1_ok} flip={flip_ok} "
-                f"ctx5={ctx5} veto={ctx5_veto} "
+                f"ctx10={ctx10} veto={ctx10_veto} "
                 f"armed={armed} armed_dir={m.get('armed_dir')} bias30={bias30} "
                 f"A={entry_a_ok} B={entry_b_ok} entry={entry_ok}"
             )
@@ -492,7 +492,6 @@ def process_webhook(data):
 
     tf_aliases = {
         '1': '1m', '1min': '1m', '1minute': '1m',
-        '5': '5m', '5min': '5m', '5minute': '5m',
         '10': '10m', '10min': '10m', '10minute': '10m',
         '30': '30m', '30min': '30m', '30minute': '30m',
     }
@@ -541,7 +540,7 @@ def process_webhook(data):
                 logger.info(f"[ZALT] {symbol} tf={tf} ignore: timeframe non utilise par SCALP")
                 return
 
-        elif alert_type == 'st_context' and tf in ('1m', '5m', '10m'):
+        elif alert_type == 'st_context' and tf in ('1m', '10m'):
             ctx_parsed, ctx_raw = parse_st_context_value(val)
             if tf == '10m':
                 old_ctx10 = m.get('st_context_10m')
@@ -723,7 +722,6 @@ def debug_symbol():
         exp = 'buy' if direction == 'LONG' else 'sell' if direction == 'SHORT' else None
         zalt1_sig = signal_debug_payload(m, 'zalt_1m', 10 * 60)
         ctx1m = signal_debug_payload(m, 'st_context_1m', 10 * 60)
-        ctx5m = signal_debug_payload(m, 'st_context_5m', 22 * 60)
         ctx10m = signal_debug_payload(m, 'st_context_10m', 45 * 60)
         bias30m = m.get('bias_30m')
         flip_fresh = is_fresh(m.get('last_zalt_1m_signal_ts'), 10 * 60)
@@ -733,8 +731,8 @@ def debug_symbol():
             opp = 'sell' if exp == 'buy' else 'buy'
             ctx1_ok = ctx1m['fresh'] and ctx1m['value'] == exp
             zalt1_ok = zalt1_sig['fresh'] and zalt1_sig['value'] == exp
-            ctx5_veto = ctx5m['fresh'] and ctx5m['value'] == opp
-            trigger_ok = ctx1_ok and zalt1_ok and flip_fresh and not ctx5_veto
+            ctx10_veto = ctx10m['fresh'] and ctx10m['value'] == opp
+            trigger_ok = ctx1_ok and zalt1_ok and flip_fresh and not ctx10_veto
             armed = bool(armed_fresh and armed_dir == exp)
             entry_a_ok = armed and trigger_ok
             bias30_fresh = is_fresh(m.get('bias_30m_ts'), 90 * 60)
@@ -742,7 +740,7 @@ def debug_symbol():
             entry_b_ok = bias30_ok and trigger_ok
             entry_ok = entry_a_ok or entry_b_ok
         else:
-            ctx1_ok = zalt1_ok = ctx5_veto = trigger_ok = armed = entry_a_ok = bias30_ok = entry_b_ok = entry_ok = False
+            ctx1_ok = zalt1_ok = ctx10_veto = trigger_ok = armed = entry_a_ok = bias30_ok = entry_b_ok = entry_ok = False
         return jsonify({
             'status': 'ok',
             'symbol': symbol,
@@ -761,13 +759,12 @@ def debug_symbol():
                 'entry_ok': entry_ok,
                 'ctx1m_ok': ctx1_ok,
                 'zalt1m_ok': zalt1_ok,
-                'ctx5m_veto': ctx5_veto,
+                'ctx10m_veto': ctx10_veto,
             },
             'signals': {
                 'zalt_1m': zalt1_sig,
                 'last_zalt_1m_signal_ts': m.get('last_zalt_1m_signal_ts'),
                 'st_context_1m': ctx1m,
-                'st_context_5m': ctx5m,
                 'st_context_10m': ctx10m,
                 'bias_30m': {'value': bias30m, 'ts': m.get('bias_30m_ts')},
                 'armed_dir': armed_dir,
@@ -853,7 +850,6 @@ def scalp_required_tv_signals():
     return [
         {'label': 'ZALT 1m', 'field': 'zalt_1m_ts', 'max_age': 10 * 60, 'warmup': 15 * 60},
         {'label': 'ST Context 1m', 'field': 'st_context_1m_ts', 'max_age': 10 * 60, 'warmup': 15 * 60},
-        {'label': 'ST Context 5m', 'field': 'st_context_5m_ts', 'max_age': 22 * 60, 'warmup': 30 * 60},
         {'label': 'ST Context 10m', 'field': 'st_context_10m_ts', 'max_age': 45 * 60, 'warmup': 90 * 60},
     ]
 
@@ -982,7 +978,7 @@ def startup():
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         "Strategie active: SCALP (porte A/B)\n"
         "A: arme sur CTX 10m -> neutre (desarme zone opposee/8h) | B: Bias 30m aligne\n"
-        "Trigger commun: CTX 1m aligne + flip ZALT 1m (veto si CTX 5m frais oppose)\n"
+        "Trigger commun: CTX 1m aligne + flip ZALT 1m (veto si CTX 10m frais oppose)\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
     )
