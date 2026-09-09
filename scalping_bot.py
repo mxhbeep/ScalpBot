@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot — DEUX portes en parallele (test comparatif, une seule gardee plus tard)
-# B (ancienne, inchangee) : Bias 30m + CTX 1m + flip ZALT 1m. Pas d'armement, pas de RCI.
-# 5.0 (test) : arme CTX 30m + flip ZALT 30m -> RCI 30m (pas chop/pas extended) + CTX 1m
-# + RCI 5m + flip ZALT 1m. Pyramidage RCI 5m, max 1 add. Notifs et cooldown separes.
+# Scalping Bot — SCALP SIMPLE
+# Entree : Bias 30m 17/40 + RCI 10m extreme (+/-75) + ST Context 1m.
+# ZALT 30m reste une info de qualite non bloquante.
 
 import json
 import time
@@ -118,6 +117,8 @@ def init_symbol(symbol):
             'bias_30m': None, 'bias_30m_ts': None,  # Porte B (ancienne, restauree en parallele)
             'rci_30m_10': None, 'rci_30m_30': None, 'rci_30m_50': None,
             'rci_30m_dir': None, 'rci_30m_chop': None, 'rci_30m_extended': None, 'rci_30m_ts': None,
+            'rci_10m_10': None, 'rci_10m_30': None, 'rci_10m_50': None,
+            'rci_10m_dir': None, 'rci_10m_chop': None, 'rci_10m_ts': None,
             'rci_5m_10': None, 'rci_5m_30': None, 'rci_5m_50': None,
             'rci_5m_dir': None, 'rci_5m_chop': None, 'rci_5m_ts': None,
             'armed_dir': None, 'armed_ts': None,
@@ -385,156 +386,113 @@ def send_telegram_with_buttons(msg):
     return bool(result.get('telegram_scalp'))
 
 
-def check_arming(symbol, m):
-    """Verifie/maj l'armement Scalp 5.0 : CTX 30m en zone + flip ZALT 30m meme sens et
-    frais -> arme (armed_dir/armed_ts). Desarme si CTX 30m devient oppose a armed_dir.
-    Appelee a chaque reception de webhook CTX 30m ou ZALT 30m (etat ou flip)."""
-    ctx30 = m.get('st_context_30m')
-    zalt30 = m.get('zalt_30m')
-    flip_fresh = is_fresh(m.get('last_zalt_30m_signal_ts'), 2 * 3600)
-    armed_dir = m.get('armed_dir')
+def evaluate_context30_zalt30_info(symbol, price=0, event_id=None):
+    """Alerte info non bloquante : zone ST Context 30m + flip ZALT 30m alignes."""
+    notify = None
+    with STATE_LOCK:
+        init_symbol(symbol)
+        m = MOMENTUM_STATE[symbol]
+        if not SCALP_ENABLED:
+            return False
+        ctx30 = m.get('st_context_30m')
+        zalt30 = m.get('zalt_30m')
+        flip_fresh = is_fresh(m.get('last_zalt_30m_signal_ts'), 45 * 60)
+        ctx_fresh = is_fresh(m.get('st_context_30m_ts'), 90 * 60)
+        if ctx30 in ('buy', 'sell') and ctx_fresh and zalt30 == ctx30 and flip_fresh:
+            if should_send(symbol, f"scalp_info_ctx30_zalt30_{ctx30}", event_id=event_id, cooldown=45 * 60):
+                direction = 'LONG' if ctx30 == 'buy' else 'SHORT'
+                notify = (direction, symbol, price, ctx30)
 
-    if armed_dir and ctx30 == ('sell' if armed_dir == 'buy' else 'buy'):
-        logger.info(f"[SCALP DISARM] {symbol} armed_dir etait {armed_dir} (CTX 30m zone opposee)")
-        m['armed_dir'] = None
-        m['armed_ts'] = None
-        return
-
-    if ctx30 in ('buy', 'sell') and zalt30 == ctx30 and flip_fresh:
-        if m.get('armed_dir') != ctx30:
-            logger.info(f"[SCALP ARM] {symbol} armed_dir={ctx30} (CTX 30m + flip ZALT 30m alignes)")
-        m['armed_dir'] = ctx30
-        m['armed_ts'] = time.time()
-
-
-def check_pyramid(symbol, m, old_rci5_dir):
-    """Pyramidage Scalp 5.0 : position deja ouverte, RCI 5m entre dans une NOUVELLE zone
-    (transition depuis old_rci5_dir) dans le meme sens que la position, direction claire
-    (pas chop) et pas extended (RCI 30m). Max 1 add par position. Appelee sur reception
-    RCI 5m, apres mise a jour de l'etat (donc m['rci_5m_dir'] = la nouvelle valeur)."""
-    position_5_dir = m.get('position_5_dir')
-    if not position_5_dir or m.get('position_5_adds', 0) >= 1:
-        return None
-    rci5_dir = m.get('rci_5m_dir')
-    rci5_fresh = is_fresh(m.get('rci_5m_ts'), 22 * 60)
-    if not (rci5_fresh and rci5_dir == position_5_dir):
-        return None
-    if old_rci5_dir == position_5_dir:
-        return None  # deja dans cette zone, pas une NOUVELLE zone
-    rci30_extended = bool(m.get('rci_30m_extended')) and m.get('rci_30m_dir') == position_5_dir
-    if rci30_extended:
-        logger.info(f"[SCALP] {symbol} skip pyra chasse RCI50")
-        return None
-    m['position_5_adds'] = m.get('position_5_adds', 0) + 1
-    m['last_pyra_rci5_ts'] = time.time()
-    direction = 'LONG' if position_5_dir == 'buy' else 'SHORT'
-    logger.info(f"[SCALP PYRA] {symbol} {direction} nouvelle zone RCI 5m ({m.get('rci_5m_30')}/{m.get('rci_5m_50')})")
-    return direction
-
-
-
-def evaluate_scalp(symbol, trigger_dir=None, price=0, event_id=None, trigger_label="state_refresh"):
-    """Scalp — DEUX portes en parallele (test comparatif, on n'en gardera qu'une plus tard).
-    B (ancienne, inchangee) : Bias 30m + CTX 1m + flip ZALT 1m. Pas d'armement, pas de RCI.
-    5.0 (test) : arme CTX 30m + flip ZALT 30m -> RCI 30m (pas chop/pas extended) + CTX 1m
-    + RCI 5m + flip ZALT 1m. Pyramidage RCI 5m (voir check_pyramid).
-    entry = B or 5.0, mais DEUX notifs distinctes si les deux matchent ([SCALP B] et
-    [SCALP 5.0]), cooldown/dedup separes (scalp_b_* vs scalp_5_*) pour pouvoir comparer."""
-    if trigger_dir not in (None, 'buy', 'sell'):
+    if not notify:
         return False
-    notify_b = None
-    notify_5 = None
+
+    direction, symbol, price, ctx30 = notify
+    emoji = "🟢" if direction == "LONG" else "🔴"
+    send_telegram(
+        f"{emoji} <b>SCALP INFO 30m {direction}</b> {symbol}\n"
+        f"--------------------\n"
+        f"Price: ${format_price(price)}\n"
+        f"[OK] ST Context 30m: {ctx30.upper()}\n"
+        f"[OK] Flip ZALT 30m: {ctx30.upper()}\n"
+        f"\nInfo seulement : pas une entree automatique.",
+        ntfy=True,
+    )
+    return True
+
+
+def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"):
+    """Scalp simple : Bias 30m + RCI 10m extreme (+/-75) + ST Context 1m.
+    ZALT 30m reste une info de qualite non bloquante."""
+    notify = None
     with STATE_LOCK:
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
         if not SCALP_ENABLED:
             logger.info(f"[SCALP OFF] ignore {symbol}")
             return False
-        directions = [trigger_dir] if trigger_dir in ('buy', 'sell') else ['buy', 'sell']
-        for exp in directions:
+
+        for exp in ('buy', 'sell'):
             direction = 'LONG' if exp == 'buy' else 'SHORT'
-            zalt1_ok = is_fresh(m.get('zalt_1m_ts'), 10 * 60) and m.get('zalt_1m') == exp
-            flip_ok = is_fresh(m.get('last_zalt_1m_signal_ts'), 10 * 60)
-            trigger_ok = zalt1_ok and flip_ok and (trigger_dir is None or trigger_dir == exp)
-
-            ctx1 = m.get('st_context_1m')
-            ctx1_ok = is_fresh(m.get('st_context_1m_ts'), 10 * 60) and ctx1 == exp
-
-            # --- Porte B (ancienne, inchangee) ---
             bias30 = m.get('bias_30m')
             bias30_ok = is_fresh(m.get('bias_30m_ts'), 90 * 60) and bias30 == exp
-            entry_b_ok = bias30_ok and ctx1_ok and trigger_ok
 
-            # --- Porte 5.0 (test) ---
-            armed_fresh = is_fresh(m.get('armed_ts'), 4 * 3600)
-            armed_ok = bool(armed_fresh and m.get('armed_dir') == exp)
+            ctx1 = m.get('st_context_1m')
+            ctx1_ok = is_fresh(m.get('st_context_1m_ts'), 12 * 60) and ctx1 == exp
 
-            rci30_dir = m.get('rci_30m_dir')
-            rci30_fresh = is_fresh(m.get('rci_30m_ts'), 90 * 60)
-            rci30_chop = bool(m.get('rci_30m_chop'))
-            rci30_extended = bool(m.get('rci_30m_extended'))
-            rci30_ok = bool(rci30_fresh and rci30_dir == exp and not rci30_chop and not rci30_extended)
-            if rci30_fresh and rci30_dir == exp and rci30_extended:
-                logger.info(f"[SCALP] {symbol} skip chasse RCI50 ({direction})")
+            rci10 = m.get('rci_10m_10')
+            rci10_fresh = is_fresh(m.get('rci_10m_ts'), 30 * 60)
+            if exp == 'buy':
+                rci10_ok = rci10_fresh and rci10 is not None and float(rci10) <= -75
+                rci_zone = "OS <= -75"
+            else:
+                rci10_ok = rci10_fresh and rci10 is not None and float(rci10) >= 75
+                rci_zone = "OB >= +75"
 
-            rci5_dir = m.get('rci_5m_dir')
-            rci5_fresh = is_fresh(m.get('rci_5m_ts'), 22 * 60)
-            rci5_ok = bool(rci5_fresh and rci5_dir == exp)
+            zalt30 = m.get('zalt_30m')
+            zalt30_fresh = is_fresh(m.get('zalt_30m_ts'), 90 * 60)
+            zalt30_status = 'missing'
+            if zalt30_fresh and zalt30 == exp:
+                zalt30_status = 'aligned'
+            elif zalt30_fresh and zalt30 in ('buy', 'sell'):
+                zalt30_status = 'opposite'
+            elif zalt30_fresh:
+                zalt30_status = 'neutral'
 
-            entry_5_ok = armed_ok and rci30_ok and ctx1_ok and rci5_ok and trigger_ok
-
+            entry_ok = bias30_ok and rci10_ok and ctx1_ok
             logger.info(
                 f"[SCALP CHECK] {symbol} {direction} src={trigger_label} "
-                f"B: bias30={bias30} ok={bias30_ok} entry_b={entry_b_ok} | "
-                f"5.0: armed={armed_ok} armed_dir={m.get('armed_dir')} rci30={rci30_dir} chop={rci30_chop} extended={rci30_extended} ok={rci30_ok} rci5={rci5_dir} ok={rci5_ok} entry_5={entry_5_ok} | "
-                f"ctx1={ctx1} ok={ctx1_ok} zalt1={zalt1_ok} flip={flip_ok}"
+                f"entry={entry_ok} bias30={bias30} ok={bias30_ok} "
+                f"rci10={rci10} fresh={rci10_fresh} ok={rci10_ok} "
+                f"ctx1={ctx1} ok={ctx1_ok} zalt30={zalt30} status={zalt30_status}"
             )
-
-            if entry_b_ok and should_send(symbol, f"scalp_b_entry_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
-                notify_b = (direction, symbol, price, bias30, ctx1)
-
-            if entry_5_ok and should_send(symbol, f"scalp_5_entry_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
-                m['position_5_dir'] = exp
-                m['position_5_adds'] = 0
-                notify_5 = (direction, symbol, price, m.get('rci_30m_30'), m.get('rci_30m_50'), m.get('rci_5m_30'), m.get('rci_5m_50'), ctx1)
-
-            if notify_b or notify_5:
+            if entry_ok and should_send(symbol, f"scalp_simple_entry_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
+                notify = (direction, symbol, price, bias30, rci10, rci_zone, ctx1, zalt30, zalt30_status)
                 break
 
-    sent_any = False
-    if notify_b:
-        direction, symbol, price, bias30, ctx1 = notify_b
-        emoji = "🟢" if direction == "LONG" else "🔴"
-        send_telegram_with_buttons(
-            f"{emoji} <b>SCALP B</b> {symbol}\n"
-            f"--------------------\n"
-            f"Price: ${format_price(price)}\n"
-            f"Bias 30m: {bias30}\n"
-            f"CTX 1m: {ctx1}\n"
-            f"Trigger: flip ZALT 1m"
-        )
-        sent_any = True
-    if notify_5:
-        direction, symbol, price, rci30_30, rci30_50, rci5_30, rci5_50, ctx1 = notify_5
-        emoji = "🟢" if direction == "LONG" else "🔴"
+    if not notify:
+        return False
 
-        def _rci_fmt(v30, v50):
-            if v30 is None or v50 is None:
-                return "n/a"
-            return f"{v30:.1f} / {v50:.1f}"
+    direction, symbol, price, bias30, rci10, rci_zone, ctx1, zalt30, zalt30_status = notify
+    emoji = "🟢" if direction == "LONG" else "🔴"
+    if zalt30_status == 'aligned':
+        zalt_line = "[QUALITE] ZALT 30m aligne"
+    elif zalt30_status == 'opposite':
+        zalt_line = "[ATTENTION] ZALT 30m oppose (non bloquant)"
+    else:
+        zalt_line = "[INFO] ZALT 30m absent/neutre/perime (non bloquant)"
 
-        send_telegram_with_buttons(
-            f"{emoji} <b>SCALP 5.0</b> {symbol}\n"
-            f"--------------------\n"
-            f"Price: ${format_price(price)}\n"
-            f"Arme: CTX 30m + flip ZALT 30m\n"
-            f"RCI 30m: {_rci_fmt(rci30_30, rci30_50)}\n"
-            f"RCI 5m: {_rci_fmt(rci5_30, rci5_50)}\n"
-            f"CTX 1m: {ctx1}\n"
-            f"Trigger: flip ZALT 1m"
-        )
-        sent_any = True
-    return sent_any
+    rci_txt = f"{float(rci10):.1f}" if rci10 is not None else "n/a"
+    send_telegram_with_buttons(
+        f"{emoji} <b>SCALP SIMPLE {direction}</b> {symbol}\n"
+        f"--------------------\n"
+        f"Price: ${format_price(price)}\n"
+        f"[OK] Bias 30m: {bias30.upper()} (EMA17/SMA40)\n"
+        f"[OK] RCI 10m: {rci_txt} ({rci_zone})\n"
+        f"[OK] ST Context 1m: {ctx1.upper()}\n"
+        f"{zalt_line}\n"
+        f"Trigger: confluence simple, sans ZALT obligatoire"
+    )
+    return True
 
 
 @app.route('/webhook', methods=['POST'])
@@ -601,7 +559,6 @@ def process_webhook(data):
     zalt_signal = str(data.get('signal') or data.get('event') or '').strip().lower()
     parsed_dir = parse_dir_value(val) if alert_type == 'zalt' else None
 
-    pyra_direction = None
     with STATE_LOCK:
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
@@ -622,9 +579,8 @@ def process_webhook(data):
                 m['zalt_30m_ts'] = time.time()
                 if zalt_signal in ('trend_flip', 'flip'):
                     m['last_zalt_30m_signal_ts'] = time.time()
-                check_arming(symbol, m)
                 persist_state()
-                return  # etat/armement seulement, jamais un trigger d'entree direct
+                info_event_id = f"ctx30_zalt30_{symbol}_{event_id}"
             else:
                 logger.info(f"[ZALT] {symbol} tf={tf} ignore: timeframe non utilise par SCALP")
                 return
@@ -641,16 +597,14 @@ def process_webhook(data):
             m['st_context_30m'] = ctx_parsed
             m['st_context_30m_ts'] = time.time()
             m['st_context_30m_raw'] = ctx_raw
-            check_arming(symbol, m)
             persist_state()
-            return  # etat/armement seulement, jamais un trigger d'entree direct
+            info_event_id = f"ctx30_zalt30_{symbol}_{event_id}"
 
-        elif alert_type == 'rci' and tf in ('30m', '5m'):
+        elif alert_type == 'rci' and tf in ('30m', '10m', '5m'):
             value = val if val in ('buy', 'sell') else 'chop'
             direction = value if value in ('buy', 'sell') else None
             is_chop = bool(data.get('chop', value == 'chop'))
             is_extended = bool(data.get('extended', False))
-            old_rci5_dir = m.get('rci_5m_dir') if tf == '5m' else None
             m[f'rci_{tf}_10'] = data.get('rci10')
             m[f'rci_{tf}_30'] = data.get('rci30')
             m[f'rci_{tf}_50'] = data.get('rci50')
@@ -660,43 +614,30 @@ def process_webhook(data):
             if tf == '30m':
                 m['rci_30m_extended'] = is_extended
             persist_state()
-            if tf == '5m':
-                pyra_direction = check_pyramid(symbol, m, old_rci5_dir)
-            if pyra_direction is None:
-                return  # etat seulement (sauf pyramidage detecte ci-dessous)
-            pyra_price = price
-            pyra_rci5_30, pyra_rci5_50 = m.get('rci_5m_30'), m.get('rci_5m_50')
 
         elif alert_type == 'bias' and tf == '30m':
             bias_val = val if val in ('buy', 'sell') else None
             m['bias_30m'] = bias_val
             m['bias_30m_ts'] = time.time()
             persist_state()
-            return  # etat seulement, pas un flip : jamais d'evaluate sur ce webhook
 
         else:
             return
 
-    if pyra_direction:
-        emoji = "🟢" if pyra_direction == "LONG" else "🔴"
-        rci5_txt = f"{pyra_rci5_30:.1f} / {pyra_rci5_50:.1f}" if pyra_rci5_30 is not None and pyra_rci5_50 is not None else "n/a"
-        send_telegram_with_buttons(
-            f"{emoji} <b>SCALP PYRA {pyra_direction}</b> {symbol}\n"
-            f"--------------------\n"
-            f"Price: ${format_price(pyra_price)}\n"
-            f"Nouvelle zone RCI 5m: {rci5_txt}\n"
-            f"Add 1/1"
+    if alert_type in ('zalt', 'st_context') and tf == '30m':
+        evaluate_context30_zalt30_info(
+            symbol,
+            price=price,
+            event_id=info_event_id,
         )
-        return
 
-    trigger_dir = None
-    if alert_type == 'zalt' and tf == '1m' and zalt_signal in ('trend_flip', 'flip'):
-        trigger_dir = parsed_dir
-
-    if alert_type in ('zalt', 'st_context'):
+    if (
+        (alert_type == 'st_context' and tf == '1m')
+        or (alert_type == 'rci' and tf == '10m')
+        or (alert_type == 'bias' and tf == '30m')
+    ):
         evaluate_scalp(
             symbol,
-            trigger_dir=trigger_dir,
             price=price,
             event_id=f"scalp_{symbol}_{tf}_{alert_type}_{event_id}",
             trigger_label=f"{alert_type}_{tf}",
@@ -839,73 +780,42 @@ def debug_symbol():
     with STATE_LOCK:
         init_symbol(symbol)
         m = dict(MOMENTUM_STATE.get(symbol, {}))
-        zalt1 = m.get('zalt_1m')
-        direction = 'LONG' if zalt1 == 'buy' else 'SHORT' if zalt1 == 'sell' else None
-        exp = 'buy' if direction == 'LONG' else 'sell' if direction == 'SHORT' else None
-        zalt1_sig = signal_debug_payload(m, 'zalt_1m', 10 * 60)
-        ctx1m = signal_debug_payload(m, 'st_context_1m', 10 * 60)
-        flip_fresh = is_fresh(m.get('last_zalt_1m_signal_ts'), 10 * 60)
-        armed_dir = m.get('armed_dir')
-        armed_fresh = is_fresh(m.get('armed_ts'), 4 * 3600)
-        rci30_fresh = is_fresh(m.get('rci_30m_ts'), 90 * 60)
-        rci5_fresh = is_fresh(m.get('rci_5m_ts'), 22 * 60)
+        ctx1m = signal_debug_payload(m, 'st_context_1m', 12 * 60)
+        rci10_fresh = is_fresh(m.get('rci_10m_ts'), 30 * 60)
         bias30_fresh = is_fresh(m.get('bias_30m_ts'), 90 * 60)
-        if direction:
-            trigger_ok = zalt1_sig['fresh'] and zalt1_sig['value'] == exp and flip_fresh
+        checks = {}
+        for exp in ('buy', 'sell'):
             ctx1_ok = ctx1m['fresh'] and ctx1m['value'] == exp
             bias30_ok = bool(bias30_fresh and m.get('bias_30m') == exp)
-            entry_b_ok = bias30_ok and ctx1_ok and trigger_ok
-            armed_ok = bool(armed_fresh and armed_dir == exp)
-            rci30_ok = bool(rci30_fresh and m.get('rci_30m_dir') == exp and not m.get('rci_30m_chop') and not m.get('rci_30m_extended'))
-            rci5_ok = bool(rci5_fresh and m.get('rci_5m_dir') == exp)
-            entry_5_ok = armed_ok and rci30_ok and ctx1_ok and rci5_ok and trigger_ok
-        else:
-            trigger_ok = ctx1_ok = bias30_ok = entry_b_ok = armed_ok = rci30_ok = rci5_ok = entry_5_ok = False
+            rci10 = m.get('rci_10m_10')
+            rci10_ok = (
+                rci10_fresh and rci10 is not None and
+                ((exp == 'buy' and float(rci10) <= -75) or (exp == 'sell' and float(rci10) >= 75))
+            )
+            checks[exp] = {
+                'bias30m_ok': bias30_ok,
+                'rci10m_ok': rci10_ok,
+                'ctx1m_ok': ctx1_ok,
+                'entry_ok': bias30_ok and rci10_ok and ctx1_ok,
+            }
         return jsonify({
             'status': 'ok',
             'symbol': symbol,
             'enabled': SCALP_ENABLED,
             'now_shanghai': datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S'),
-            'scalp_b': {
-                'direction_from_zalt_1m': direction,
-                'expected': exp,
-                'trigger_ok': trigger_ok,
-                'bias_30m': m.get('bias_30m'),
-                'bias30m_ok': bias30_ok,
-                'ctx1m_ok': ctx1_ok,
-                'entry_ok': entry_b_ok,
-            },
-            'scalp_5': {
-                'direction_from_zalt_1m': direction,
-                'expected': exp,
-                'flip_1m_fresh': flip_fresh,
-                'trigger_ok': trigger_ok,
-                'armed_dir': armed_dir,
-                'armed_fresh': armed_fresh,
-                'armed_ok': armed_ok,
-                'rci30m_ok': rci30_ok,
-                'ctx1m_ok': ctx1_ok,
-                'rci5m_ok': rci5_ok,
-                'entry_ok': entry_5_ok,
-                'position_5_dir': m.get('position_5_dir'),
-                'position_5_adds': m.get('position_5_adds', 0),
+            'scalp_simple': {
+                'long': checks['buy'],
+                'short': checks['sell'],
             },
             'signals': {
-                'zalt_1m': zalt1_sig,
-                'last_zalt_1m_signal_ts': m.get('last_zalt_1m_signal_ts'),
                 'zalt_30m': {'value': m.get('zalt_30m'), 'ts': m.get('zalt_30m_ts')},
                 'last_zalt_30m_signal_ts': m.get('last_zalt_30m_signal_ts'),
                 'st_context_1m': ctx1m,
                 'st_context_30m': {'value': m.get('st_context_30m'), 'ts': m.get('st_context_30m_ts')},
                 'bias_30m': {'value': m.get('bias_30m'), 'ts': m.get('bias_30m_ts')},
-                'rci_30m': {
-                    '10': m.get('rci_30m_10'), '30': m.get('rci_30m_30'), '50': m.get('rci_30m_50'),
-                    'dir': m.get('rci_30m_dir'), 'chop': m.get('rci_30m_chop'),
-                    'extended': m.get('rci_30m_extended'), 'ts': m.get('rci_30m_ts'),
-                },
-                'rci_5m': {
-                    '10': m.get('rci_5m_10'), '30': m.get('rci_5m_30'), '50': m.get('rci_5m_50'),
-                    'dir': m.get('rci_5m_dir'), 'chop': m.get('rci_5m_chop'), 'ts': m.get('rci_5m_ts'),
+                'rci_10m': {
+                    '10': m.get('rci_10m_10'), '30': m.get('rci_10m_30'), '50': m.get('rci_10m_50'),
+                    'dir': m.get('rci_10m_dir'), 'chop': m.get('rci_10m_chop'), 'ts': m.get('rci_10m_ts'),
                 },
             },
         })
@@ -986,8 +896,7 @@ def reset():
 
 def scalp_required_tv_signals():
     return [
-        {'label': 'ZALT 1m', 'field': 'zalt_1m_ts', 'max_age': 10 * 60, 'warmup': 15 * 60},
-        {'label': 'ST Context 1m', 'field': 'st_context_1m_ts', 'max_age': 10 * 60, 'warmup': 15 * 60},
+        {'label': 'ST Context 1m', 'field': 'st_context_1m_ts', 'max_age': 12 * 60, 'warmup': 20 * 60},
         {'label': 'ST Context 30m', 'field': 'st_context_30m_ts', 'max_age': 90 * 60, 'warmup': 2 * 3600},
     ]
 
@@ -1052,16 +961,15 @@ def scalp_tv_signal_watchdog():
                 if zalt30_stale:
                     details.append("perime: " + ", ".join(f"{sym} {age:.0f}m" for sym, age in zalt30_stale))
                 send_telegram(
-                    "<b>[ALERTE] Relais ZALT 30m (OKX) interrompu — armement Scalp mort</b>\n"
+                    "<b>[ALERTE] Relais ZALT 30m (OKX) interrompu</b>\n"
                     "--------------------\n"
                     + " | ".join(details)
-                    + "\n\nVerifier le cycle indicateurs / relay du bot principal (pas une alerte TradingView).",
+                    + "\n\nZALT 30m est une info non bloquante, mais elle doit rester alimentee par le bot principal.",
                     ntfy=True,
                 )
                 logger.warning(f"[ZALT 30m WATCHDOG] missing={zalt30_missing} stale={zalt30_stale}")
 
-        # Bias 30m: source interne relayee (bot principal calcule via OKX et relaie) —
-        # armement de la porte B (ancienne). Check separe, message distinct.
+        # Bias 30m: source interne relayee (bot principal calcule via OKX et relaie).
         if uptime >= 45 * 60:
             bias_missing, bias_stale = [], []
             for symbol in symbols:
@@ -1077,7 +985,7 @@ def scalp_tv_signal_watchdog():
                 if bias_stale:
                     details.append("perime: " + ", ".join(f"{sym} {age:.0f}m" for sym, age in bias_stale))
                 send_telegram(
-                    "<b>[ALERTE] Relais Bias 30m (OKX) interrompu — porte B morte</b>\n"
+                    "<b>[ALERTE] Relais Bias 30m (OKX) interrompu — scalp simple bloque</b>\n"
                     "--------------------\n"
                     + " | ".join(details)
                     + "\n\nVerifier le cycle indicateurs / relay du bot principal (pas une alerte TradingView).",
@@ -1085,7 +993,7 @@ def scalp_tv_signal_watchdog():
                 )
                 logger.warning(f"[BIAS 30m WATCHDOG] missing={bias_missing} stale={bias_stale}")
 
-        # RCI 30m/5m: source interne relayee (bot principal calcule via OKX et relaie).
+        # RCI 10m: source interne relayee (bot principal calcule via OKX et relaie).
         # Check separe, message distinct.
         if uptime >= 45 * 60:
             rci_missing, rci_stale = [], []
@@ -1094,13 +1002,12 @@ def scalp_tv_signal_watchdog():
                 if not cfg.get('scalp'):
                     continue
                 sm = state_copy.get(symbol, {})
-                for tf, max_age in (('30m', 45 * 60), ('5m', 22 * 60)):
-                    ts = sm.get(f'rci_{tf}_ts')
-                    label = f"{symbol.replace('/USDT', '')}({tf})"
-                    if ts is None:
-                        rci_missing.append(label)
-                    elif now - float(ts) > max_age:
-                        rci_stale.append((label, (now - float(ts)) / 60))
+                ts = sm.get('rci_10m_ts')
+                label = f"{symbol.replace('/USDT', '')}(10m)"
+                if ts is None:
+                    rci_missing.append(label)
+                elif now - float(ts) > 30 * 60:
+                    rci_stale.append((label, (now - float(ts)) / 60))
             if (rci_missing or rci_stale) and should_send('GLOBAL', 'scalp_rci_watchdog', cooldown=1800):
                 details = []
                 if rci_missing:
@@ -1108,7 +1015,7 @@ def scalp_tv_signal_watchdog():
                 if rci_stale:
                     details.append("perime: " + ", ".join(f"{sym} {age:.0f}m" for sym, age in rci_stale))
                 send_telegram(
-                    "<b>[ALERTE] Relais RCI (OKX) interrompu</b>\n"
+                    "<b>[ALERTE] Relais RCI 10m (OKX) interrompu — scalp simple bloque</b>\n"
                     "--------------------\n"
                     + " | ".join(details)
                     + "\n\nVerifier le cycle indicateurs / relay du bot principal (pas une alerte TradingView).",
@@ -1170,9 +1077,10 @@ def startup():
         "<b>Scalping Bot demarre</b>\n"
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
-        "Strategie active: SCALP B + 5.0 (deux portes en parallele, test comparatif)\n"
-        "B: Bias 30m + CTX 1m + flip ZALT 1m\n"
-        "5.0: Armement CTX 30m + ZALT 30m -> RCI 30m + CTX 1m + RCI 5m + flip ZALT 1m\n"
+        "Strategie active: SCALP SIMPLE\n"
+        "Entree: Bias 30m 17/40 + RCI 10m extreme (+/-75) + ST Context 1m\n"
+        "ZALT 30m: info qualite non bloquante\n"
+        "Alerte info: ST Context 30m + flip ZALT 30m alignes\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
     )
