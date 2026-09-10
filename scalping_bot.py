@@ -423,9 +423,10 @@ def evaluate_context30_zalt30_info(symbol, price=0, event_id=None):
 def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"):
     """Scalp simple : Bias 30m + ST Context 1m. Anti-chop : ST Context 10m oppose au
     sens teste bloque l'entree (neutre/absent/perime ne bloque pas). RCI 10m n'est plus
-    une condition bloquante : sa valeur est affichee dans l'alerte comme rappel a
-    verifier manuellement avant d'entrer en position. ZALT 30m reste une info de
-    qualite non bloquante."""
+    une condition bloquante et son webhook (s'il arrive un jour) n'appelle plus cette
+    fonction : sa derniere valeur connue est simplement affichee dans l'alerte comme
+    rappel a verifier manuellement avant d'entrer en position. ZALT 30m reste une info
+    de qualite non bloquante."""
     notify = None
     with STATE_LOCK:
         init_symbol(symbol)
@@ -719,7 +720,6 @@ def process_webhook(data):
 
     if (
         (alert_type == 'st_context' and tf in ('1m', '10m'))
-        or (alert_type == 'rci' and tf == '10m')
         or (alert_type == 'bias' and tf == '30m')
     ):
         evaluate_scalp(
@@ -1120,36 +1120,6 @@ def scalp_tv_signal_watchdog():
                     ntfy=True,
                 )
                 logger.warning(f"[BIAS 30m WATCHDOG] missing={bias_missing} stale={bias_stale}")
-
-        # RCI 10m: source interne relayee (bot principal calcule via OKX et relaie).
-        # Check separe, message distinct.
-        if uptime >= 45 * 60:
-            rci_missing, rci_stale = [], []
-            for symbol in symbols:
-                cfg = CONFIG['SYMBOLS'].get(symbol, {})
-                if not cfg.get('scalp'):
-                    continue
-                sm = state_copy.get(symbol, {})
-                ts = sm.get('rci_10m_ts')
-                label = f"{symbol.replace('/USDT', '')}(10m)"
-                if ts is None:
-                    rci_missing.append(label)
-                elif now - float(ts) > 30 * 60:
-                    rci_stale.append((label, (now - float(ts)) / 60))
-            if (rci_missing or rci_stale) and should_send('GLOBAL', 'scalp_rci_watchdog', cooldown=1800):
-                details = []
-                if rci_missing:
-                    details.append("jamais recu: " + ", ".join(rci_missing))
-                if rci_stale:
-                    details.append("perime: " + ", ".join(f"{sym} {age:.0f}m" for sym, age in rci_stale))
-                send_telegram(
-                    "<b>[ALERTE] Relais RCI 10m (OKX) interrompu — scalp simple bloque</b>\n"
-                    "--------------------\n"
-                    + " | ".join(details)
-                    + "\n\nVerifier le cycle indicateurs / relay du bot principal (pas une alerte TradingView).",
-                    ntfy=True,
-                )
-                logger.warning(f"[RCI WATCHDOG] missing={rci_missing} stale={rci_stale}")
 
         # Bias 2H: source interne relayee (bot principal calcule via OKX et relaie) —
         # entree scalp SECONDAIRE. Check separe, message distinct.
