@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot — SCALP SIMPLE
-# Entree : Bias 30m 17/40 + RCI 10m extreme (+/-75) + ST Context 1m.
+# Scalping Bot — deux entrees independantes
+# Principale : Bias 30m 17/40 + ST Context 1m + anti-chop CTX 10m oppose.
+# RCI 10m n'est plus bloquant : affiche en rappel manuel dans l'alerte.
 # ZALT 30m reste une info de qualite non bloquante.
+# Secondaire : Bias 2H + ST Context 10m + RCI court (10) en zone extreme +/-80.
+# Anti-chop CTX 10m oppose. Notifications et cooldown separes de l'entree principale.
 
 import json
 import time
@@ -418,9 +421,11 @@ def evaluate_context30_zalt30_info(symbol, price=0, event_id=None):
 
 
 def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"):
-    """Scalp simple : Bias 30m + RCI 10m extreme (+/-75) + ST Context 1m.
-    Anti-chop : ST Context 10m oppose au sens teste bloque l'entree (neutre/absent/
-    perime ne bloque pas). ZALT 30m reste une info de qualite non bloquante."""
+    """Scalp simple : Bias 30m + ST Context 1m. Anti-chop : ST Context 10m oppose au
+    sens teste bloque l'entree (neutre/absent/perime ne bloque pas). RCI 10m n'est plus
+    une condition bloquante : sa valeur est affichee dans l'alerte comme rappel a
+    verifier manuellement avant d'entrer en position. ZALT 30m reste une info de
+    qualite non bloquante."""
     notify = None
     with STATE_LOCK:
         init_symbol(symbol)
@@ -439,12 +444,6 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
 
             rci10 = m.get('rci_10m_10')
             rci10_fresh = is_fresh(m.get('rci_10m_ts'), 30 * 60)
-            if exp == 'buy':
-                rci10_ok = rci10_fresh and rci10 is not None and float(rci10) <= -75
-                rci_zone = "OS <= -75"
-            else:
-                rci10_ok = rci10_fresh and rci10 is not None and float(rci10) >= 75
-                rci_zone = "OB >= +75"
 
             ctx10 = m.get('st_context_10m')
             ctx10_fresh = is_fresh(m.get('st_context_10m_ts'), 45 * 60)
@@ -461,22 +460,22 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
             elif zalt30_fresh:
                 zalt30_status = 'neutral'
 
-            entry_ok = bias30_ok and rci10_ok and ctx1_ok and not ctx10_chop_veto
+            entry_ok = bias30_ok and ctx1_ok and not ctx10_chop_veto
             logger.info(
                 f"[SCALP CHECK] {symbol} {direction} src={trigger_label} "
                 f"entry={entry_ok} bias30={bias30} ok={bias30_ok} "
-                f"rci10={rci10} fresh={rci10_fresh} ok={rci10_ok} "
+                f"rci10={rci10} fresh={rci10_fresh} (info, non bloquant) "
                 f"ctx1={ctx1} ok={ctx1_ok} ctx10={ctx10} anti_chop_veto={ctx10_chop_veto} "
                 f"zalt30={zalt30} status={zalt30_status}"
             )
             if entry_ok and should_send(symbol, f"scalp_simple_entry_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
-                notify = (direction, symbol, price, bias30, rci10, rci_zone, ctx1, ctx10, zalt30, zalt30_status)
+                notify = (direction, symbol, price, bias30, rci10, ctx1, ctx10, zalt30, zalt30_status)
                 break
 
     if not notify:
         return False
 
-    direction, symbol, price, bias30, rci10, rci_zone, ctx1, ctx10, zalt30, zalt30_status = notify
+    direction, symbol, price, bias30, rci10, ctx1, ctx10, zalt30, zalt30_status = notify
     emoji = "🟢" if direction == "LONG" else "🔴"
     if zalt30_status == 'aligned':
         zalt_line = "[QUALITE] ZALT 30m aligne"
@@ -492,10 +491,10 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
         f"--------------------\n"
         f"Price: ${format_price(price)}\n"
         f"[OK] Bias 30m: {bias30.upper()} (EMA17/SMA40)\n"
-        f"[OK] RCI 10m: {rci_txt} ({rci_zone})\n"
         f"[OK] ST Context 1m: {ctx1.upper()}\n"
         f"[ANTI-CHOP] ST Context 10m non oppose ({ctx10_txt})\n"
         f"{zalt_line}\n"
+        f"[MANUEL] RCI 10m: {rci_txt} — verifier avant d'entrer en position\n"
         f"Trigger: confluence simple, sans ZALT obligatoire"
     )
     return True
@@ -503,10 +502,12 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
 
 def evaluate_scalp_secondary(symbol, price=0, event_id=None, trigger_label="state_refresh"):
     """Scalp entree SECONDAIRE (voie separee de l'entree actuelle, laquelle reste
-    inchangee) : Bias 2H aligne + ST Context 10m aligne + RCI 30m en zone, tous dans le
-    meme sens. Anti-chop : CTX 10m oppose au sens teste bloque l'entree — deja garanti
-    par la condition d'alignement elle-meme (CTX10m doit valoir exp, donc oppose ou
-    neutre bloquent tous les deux), mais precise explicitement dans le log/message."""
+    inchangee) : Bias 2H aligne + ST Context 10m aligne + RCI court (longueur 10, sur
+    bougies 30m) en zone extreme de retournement — Bias BUY -> RCI10 <= -80 (survente),
+    Bias SELL -> RCI10 >= +80 (surachat), meme pattern que l'entree principale.
+    Anti-chop : CTX 10m oppose au sens teste bloque l'entree — deja garanti par la
+    condition d'alignement elle-meme (CTX10m doit valoir exp), mais precise
+    explicitement dans le log/message."""
     notify = None
     with STATE_LOCK:
         init_symbol(symbol)
@@ -526,35 +527,38 @@ def evaluate_scalp_secondary(symbol, price=0, event_id=None, trigger_label="stat
             ctx10_chop_veto = bool(ctx10_fresh and ctx10 == opp)
             ctx10_ok = ctx10_fresh and ctx10 == exp
 
-            rci30 = m.get('rci_30m_30')
-            rci30_dir = m.get('rci_30m_dir')
+            rci30_short = m.get('rci_30m_10')
             rci30_fresh = is_fresh(m.get('rci_30m_ts'), 90 * 60)
-            rci30_ok = bool(rci30_fresh and rci30_dir == exp and not m.get('rci_30m_chop'))
+            if exp == 'buy':
+                rci30_ok = rci30_fresh and rci30_short is not None and float(rci30_short) <= -80
+            else:
+                rci30_ok = rci30_fresh and rci30_short is not None and float(rci30_short) >= 80
 
             entry_ok = bias2h_ok and ctx10_ok and rci30_ok and not ctx10_chop_veto
             logger.info(
                 f"[SCALP2 CHECK] {symbol} {direction} src={trigger_label} "
                 f"entry={entry_ok} bias2h={bias2h} ok={bias2h_ok} "
                 f"ctx10={ctx10} ok={ctx10_ok} anti_chop_veto={ctx10_chop_veto} "
-                f"rci30={rci30} dir={rci30_dir} ok={rci30_ok}"
+                f"rci10={rci30_short} ok={rci30_ok}"
             )
             if entry_ok and should_send(symbol, f"scalp_secondary_entry_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
-                notify = (direction, symbol, price, bias2h, ctx10, rci30, rci30_dir)
+                notify = (direction, symbol, price, bias2h, ctx10, rci30_short)
                 break
 
     if not notify:
         return False
 
-    direction, symbol, price, bias2h, ctx10, rci30, rci30_dir = notify
+    direction, symbol, price, bias2h, ctx10, rci30_short = notify
     emoji = "🟢" if direction == "LONG" else "🔴"
-    rci30_txt = f"{float(rci30):.1f}" if rci30 is not None else "n/a"
+    rci30_txt = f"{float(rci30_short):.1f}" if rci30_short is not None else "n/a"
+    zone_label = "OS <= -80" if direction == "LONG" else "OB >= +80"
     send_telegram_with_buttons(
         f"{emoji} <b>SCALP SECONDAIRE {direction}</b> {symbol}\n"
         f"--------------------\n"
         f"Price: ${format_price(price)}\n"
         f"[OK] Bias 2H: {bias2h.upper()}\n"
         f"[OK] ST Context 10m: {ctx10.upper()}\n"
-        f"[OK] RCI 30m: {rci30_txt} (zone {rci30_dir})\n"
+        f"[OK] RCI court (10): {rci30_txt} ({zone_label})\n"
         f"[ANTI-CHOP] CTX 10m non oppose\n"
         f"Voie: entree secondaire (independante de l'entree principale)"
     )
@@ -876,7 +880,6 @@ def debug_symbol():
         m = dict(MOMENTUM_STATE.get(symbol, {}))
         ctx1m = signal_debug_payload(m, 'st_context_1m', 12 * 60)
         ctx10m = signal_debug_payload(m, 'st_context_10m', 45 * 60)
-        rci10_fresh = is_fresh(m.get('rci_10m_ts'), 30 * 60)
         bias30_fresh = is_fresh(m.get('bias_30m_ts'), 90 * 60)
         bias2h_fresh = is_fresh(m.get('bias_2h_ts'), 5 * 3600)
         rci30_fresh = is_fresh(m.get('rci_30m_ts'), 90 * 60)
@@ -886,24 +889,24 @@ def debug_symbol():
             ctx1_ok = ctx1m['fresh'] and ctx1m['value'] == exp
             bias30_ok = bool(bias30_fresh and m.get('bias_30m') == exp)
             rci10 = m.get('rci_10m_10')
-            rci10_ok = (
-                rci10_fresh and rci10 is not None and
-                ((exp == 'buy' and float(rci10) <= -75) or (exp == 'sell' and float(rci10) >= 75))
-            )
             opp = 'sell' if exp == 'buy' else 'buy'
             ctx10_chop_veto_primary = bool(ctx10m['fresh'] and ctx10m['value'] == opp)
             checks[exp] = {
                 'bias30m_ok': bias30_ok,
-                'rci10m_ok': rci10_ok,
+                'rci10m_info': rci10,  # non bloquant, a verifier manuellement
                 'ctx1m_ok': ctx1_ok,
                 'anti_chop_veto': ctx10_chop_veto_primary,
-                'entry_ok': bias30_ok and rci10_ok and ctx1_ok and not ctx10_chop_veto_primary,
+                'entry_ok': bias30_ok and ctx1_ok and not ctx10_chop_veto_primary,
             }
 
             bias2h_ok = bool(bias2h_fresh and m.get('bias_2h') == exp)
             ctx10_ok = bool(ctx10m['fresh'] and ctx10m['value'] == exp)
             ctx10_chop_veto = bool(ctx10m['fresh'] and ctx10m['value'] == opp)
-            rci30_ok = bool(rci30_fresh and m.get('rci_30m_dir') == exp and not m.get('rci_30m_chop'))
+            rci30_short = m.get('rci_30m_10')
+            if exp == 'buy':
+                rci30_ok = bool(rci30_fresh and rci30_short is not None and float(rci30_short) <= -80)
+            else:
+                rci30_ok = bool(rci30_fresh and rci30_short is not None and float(rci30_short) >= 80)
             checks_secondary[exp] = {
                 'bias2h_ok': bias2h_ok,
                 'ctx10m_ok': ctx10_ok,
@@ -1261,7 +1264,7 @@ def startup():
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         "Strategie active: SCALP SIMPLE + SCALP SECONDAIRE (voies independantes)\n"
-        "Entree principale: Bias 30m 17/40 + RCI 10m extreme (+/-75) + ST Context 1m\n"
+        "Entree principale: Bias 30m 17/40 + ST Context 1m (RCI 10m: rappel manuel, non bloquant)\n"
         "Entree secondaire: Bias 2H + ST Context 10m + RCI 30m en zone (anti-chop CTX10m oppose)\n"
         "ZALT 30m: info qualite non bloquante\n"
         "Alerte info: ST Context 30m + flip ZALT 30m alignes\n"
