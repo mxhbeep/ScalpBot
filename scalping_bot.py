@@ -4,7 +4,7 @@
 # Principale : ZALT 30m + ST Context 30m + ZALT 10m + ST Context 1m.
 # RCI 10m n'est plus bloquant : affiche en rappel manuel dans l'alerte.
 # Info 30m : ST Context 30m + 10m + 1m alignes.
-# Secondaire : Bias 2H + ST Context 10m + RCI court (10) en zone extreme +/-80.
+# Secondaire : Bias 2H + ST Context 10m + RCI court (10) en zone extreme +/-75.
 # Anti-chop CTX 10m oppose. Notifications et cooldown separes de l'entree principale.
 
 import json
@@ -119,7 +119,6 @@ def init_symbol(symbol):
             'st_context_30m': None, 'st_context_30m_ts': None, 'st_context_30m_raw': None,
             'st_context_lt_30m': None, 'st_context_lt_30m_ts': None, 'st_context_lt_30m_raw': None,
             'st_context_10m': None, 'st_context_10m_ts': None, 'st_context_10m_raw': None,  # Entree secondaire
-            'bias_30m': None, 'bias_30m_ts': None,  # Scalp simple : condition d'entree
             'bias_2h': None, 'bias_2h_ts': None,    # Entree secondaire
             'rci_10m_10': None, 'rci_10m_30': None, 'rci_10m_50': None,
             'rci_10m_dir': None, 'rci_10m_chop': None, 'rci_10m_ts': None,
@@ -502,8 +501,8 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
 def evaluate_scalp_secondary(symbol, price=0, event_id=None, trigger_label="state_refresh"):
     """Scalp entree SECONDAIRE (voie separee de l'entree actuelle, laquelle reste
     inchangee) : Bias 2H aligne + ST Context 10m aligne + RCI court (longueur 10, sur
-    bougies 30m) en zone extreme de retournement — Bias BUY -> RCI10 <= -80 (survente),
-    Bias SELL -> RCI10 >= +80 (surachat), meme pattern que l'entree principale.
+    bougies 30m) en zone extreme de retournement — Bias BUY -> RCI10 <= -75 (survente),
+    Bias SELL -> RCI10 >= +75 (surachat), meme pattern que l'entree principale.
     Anti-chop : CTX 10m oppose au sens teste bloque l'entree — deja garanti par la
     condition d'alignement elle-meme (CTX10m doit valoir exp), mais precise
     explicitement dans le log/message."""
@@ -529,9 +528,9 @@ def evaluate_scalp_secondary(symbol, price=0, event_id=None, trigger_label="stat
             rci30_short = m.get('rci_30m_10')
             rci30_fresh = is_fresh(m.get('rci_30m_ts'), 90 * 60)
             if exp == 'buy':
-                rci30_ok = rci30_fresh and rci30_short is not None and float(rci30_short) <= -80
+                rci30_ok = rci30_fresh and rci30_short is not None and float(rci30_short) <= -75
             else:
-                rci30_ok = rci30_fresh and rci30_short is not None and float(rci30_short) >= 80
+                rci30_ok = rci30_fresh and rci30_short is not None and float(rci30_short) >= 75
 
             entry_ok = bias2h_ok and ctx10_ok and rci30_ok and not ctx10_chop_veto
             logger.info(
@@ -550,7 +549,7 @@ def evaluate_scalp_secondary(symbol, price=0, event_id=None, trigger_label="stat
     direction, symbol, price, bias2h, ctx10, rci30_short = notify
     emoji = "🟢" if direction == "LONG" else "🔴"
     rci30_txt = f"{float(rci30_short):.1f}" if rci30_short is not None else "n/a"
-    zone_label = "OS <= -80" if direction == "LONG" else "OB >= +80"
+    zone_label = "OS <= -75" if direction == "LONG" else "OB >= +75"
     send_telegram_with_buttons(
         f"{emoji} <b>SCALP SECONDAIRE {direction}</b> {symbol}\n"
         f"--------------------\n"
@@ -703,12 +702,6 @@ def process_webhook(data):
             m['rci_30m_dir'] = direction
             m['rci_30m_chop'] = is_chop
             m['rci_30m_ts'] = time.time()
-            persist_state()
-
-        elif alert_type == 'bias' and tf == '30m':
-            bias_val = val if val in ('buy', 'sell') else None
-            m['bias_30m'] = bias_val
-            m['bias_30m_ts'] = time.time()
             persist_state()
 
         elif alert_type == 'bias' and tf == '2h':
@@ -894,7 +887,6 @@ def debug_symbol():
         ctx30m = signal_debug_payload(m, 'st_context_30m', 90 * 60)
         zalt10m = signal_debug_payload(m, 'zalt_10m', 45 * 60)
         zalt30m = signal_debug_payload(m, 'zalt_30m', 90 * 60)
-        bias30_fresh = is_fresh(m.get('bias_30m_ts'), 90 * 60)
         bias2h_fresh = is_fresh(m.get('bias_2h_ts'), 5 * 3600)
         rci30_fresh = is_fresh(m.get('rci_30m_ts'), 90 * 60)
         checks = {}
@@ -920,9 +912,9 @@ def debug_symbol():
             ctx10_chop_veto = bool(ctx10m['fresh'] and ctx10m['value'] == opp)
             rci30_short = m.get('rci_30m_10')
             if exp == 'buy':
-                rci30_ok = bool(rci30_fresh and rci30_short is not None and float(rci30_short) <= -80)
+                rci30_ok = bool(rci30_fresh and rci30_short is not None and float(rci30_short) <= -75)
             else:
-                rci30_ok = bool(rci30_fresh and rci30_short is not None and float(rci30_short) >= 80)
+                rci30_ok = bool(rci30_fresh and rci30_short is not None and float(rci30_short) >= 75)
             checks_secondary[exp] = {
                 'bias2h_ok': bias2h_ok,
                 'ctx10m_ok': ctx10_ok,
@@ -951,7 +943,6 @@ def debug_symbol():
                 'st_context_1m': ctx1m,
                 'st_context_10m': ctx10m,
                 'st_context_30m': ctx30m,
-                'bias_30m': {'value': m.get('bias_30m'), 'ts': m.get('bias_30m_ts')},
                 'bias_2h': {'value': m.get('bias_2h'), 'ts': m.get('bias_2h_ts')},
                 'rci_10m': {
                     '10': m.get('rci_10m_10'), '30': m.get('rci_10m_30'), '50': m.get('rci_10m_50'),
@@ -1254,7 +1245,7 @@ def startup():
         "Strategie active: SCALP SIMPLE + SCALP SECONDAIRE (voies independantes)\n"
         "Entree principale: ZALT 30m + ST Context 30m + ZALT 10m + ST Context 1m\n"
         "Info entree principale: verifier le RCI 10m manuellement avant d'entrer\n"
-        "Entree secondaire: Bias 2H + ST Context 10m + RCI 30m en zone (anti-chop CTX10m oppose)\n"
+        "Entree secondaire: Bias 2H + ST Context 10m + RCI 30m en zone +/-75 (anti-chop CTX10m oppose)\n"
         "Alerte info 30m: ST Context 30m + 10m + 1m alignes; verifier RCI 30m et LT 30m manuellement\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
