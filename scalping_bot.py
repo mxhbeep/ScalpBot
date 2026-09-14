@@ -329,13 +329,22 @@ NOTIFICATIONS.register(
         label='Telegram scalpbot',
     ),
 )
+NOTIFICATIONS.register(
+    'telegram_priority_scalp',
+    TelegramChannel(
+        lambda: os.environ.get('PRIORITY_SCALP_BOT_TOKEN', ''),
+        lambda: os.environ.get('PRIORITY_SCALP_CHAT_ID', '-1003706862644'),
+        label='Telegram scalpbot priority',
+    ),
+)
 NOTIFICATIONS.register('ntfy', NtfyChannel(lambda: CONFIG.get('NTFY_TOPIC', '')))
 
 
-def send_notification(title: str, message: str, priority=5, tags=None, telegram=True, ntfy=True, reply_markup=None):
+def send_notification(title: str, message: str, priority=5, tags=None, telegram=True, ntfy=True,
+                      reply_markup=None, telegram_channel='telegram_scalp'):
     channels = []
     if telegram:
-        channels.append('telegram_scalp')
+        channels.append(telegram_channel)
     if ntfy:
         channels.append('ntfy')
     if tags is None:
@@ -359,35 +368,62 @@ def sanitize_scalp_notification(msg: str) -> str:
     return '\n'.join(lines)
 
 
-def send_telegram(msg, ntfy=True):
+def send_telegram(msg, ntfy=False, priority=False):
     msg = sanitize_scalp_notification(msg)
+    telegram_channel = 'telegram_priority_scalp' if priority else 'telegram_scalp'
     result = send_notification(
         notification_title_from_message(msg),
         msg,
         priority=5,
         telegram=True,
         ntfy=ntfy,
+        telegram_channel=telegram_channel,
     )
-    return bool(result.get('telegram_scalp'))
+    if priority and not result.get('telegram_priority_scalp'):
+        logger.warning("alerte prioritaire scalp creee sans notification Telegram dediee, fallback Telegram scalpbot")
+        fallback = send_notification(
+            notification_title_from_message(msg),
+            msg,
+            priority=5,
+            telegram=True,
+            ntfy=False,
+            telegram_channel='telegram_scalp',
+        )
+        return bool(fallback.get('telegram_scalp') or result.get('ntfy'))
+    return bool(result.get(telegram_channel))
 
 
-def send_telegram_with_buttons(msg):
+def send_telegram_with_buttons(msg, ntfy=False, priority=False):
     msg = sanitize_scalp_notification(msg)
     keyboard = {"inline_keyboard": [[
         {"text": "Scalp ON", "callback_data": "scalp_on"},
         {"text": "Scalp OFF", "callback_data": "scalp_off"},
     ]]}
+    telegram_channel = 'telegram_priority_scalp' if priority else 'telegram_scalp'
     result = send_notification(
         notification_title_from_message(msg),
         msg,
         priority=5,
         telegram=True,
-        ntfy=True,
+        ntfy=ntfy,
         reply_markup=keyboard,
+        telegram_channel=telegram_channel,
     )
-    if not result.get('telegram_scalp'):
+    if priority and not result.get('telegram_priority_scalp'):
+        logger.warning("alerte prioritaire scalp creee sans notification Telegram dediee, fallback Telegram scalpbot")
+        fallback = send_notification(
+            notification_title_from_message(msg),
+            msg,
+            priority=5,
+            telegram=True,
+            ntfy=False,
+            reply_markup=keyboard,
+            telegram_channel='telegram_scalp',
+        )
+        return bool(fallback.get('telegram_scalp') or result.get('ntfy'))
+    if not result.get(telegram_channel):
         logger.warning("alerte creee sans notification Telegram")
-    return bool(result.get('telegram_scalp'))
+    return bool(result.get(telegram_channel))
 
 
 def evaluate_scalp_info_30m(symbol, price=0, event_id=None):
@@ -438,7 +474,7 @@ def evaluate_scalp_info_30m(symbol, price=0, event_id=None):
         f"[MANUEL] Verifier que le ST Context LT 30m soit neutre ou oppose. Ne pas entrer si le LT 30m est dans le meme sens.\n"
         f"[INFO] ST Context LT 30m actuel: {lt30_txt}\n"
         f"\nInfo seulement : pas une entree automatique.",
-        ntfy=True,
+        ntfy=False,
     )
     return True
 
@@ -575,7 +611,9 @@ def evaluate_scalp_secondary(symbol, price=0, event_id=None, trigger_label="stat
         f"[OK] ST Context 10m: {ctx10.upper()}\n"
         f"[OK] RCI court (10): {rci30_txt} ({zone_label})\n"
         f"[ANTI-CHOP] CTX 10m non oppose\n"
-        f"Voie: entree secondaire (independante de l'entree principale)"
+        f"Voie: entree secondaire (independante de l'entree principale)",
+        ntfy=True,
+        priority=True,
     )
     return True
 
@@ -634,6 +672,7 @@ def evaluate_scalp_secondary_prep(symbol, price=0, event_id=None, trigger_label=
         f"[ATTENTE] ST Context 10m aligne pour entree reelle\n"
         f"[INFO] ST Context 10m actuel: {ctx10_txt}",
         ntfy=True,
+        priority=True,
     )
     return True
 
@@ -1202,7 +1241,7 @@ def scalp_tv_signal_watchdog():
                 "--------------------\n"
                 + "\n".join(issues)
                 + "\n\nVerifier les alertes TradingView / relay bot principal.",
-                ntfy=True,
+                ntfy=False,
             )
             logger.warning(f"[TV SIGNAL WATCHDOG] Scalp issues: {issues}")
 
@@ -1230,7 +1269,7 @@ def scalp_tv_signal_watchdog():
                     "--------------------\n"
                     + " | ".join(details)
                     + "\n\nVerifier le cycle indicateurs / relay du bot principal (pas une alerte TradingView).",
-                    ntfy=True,
+                    ntfy=False,
                 )
                 logger.warning(f"[BIAS 30m WATCHDOG] missing={bias30_missing} stale={bias30_stale}")
 
@@ -1258,7 +1297,7 @@ def scalp_tv_signal_watchdog():
                     "--------------------\n"
                     + " | ".join(details)
                     + "\n\nVerifier le cycle indicateurs / relay du bot principal (pas une alerte TradingView).",
-                    ntfy=True,
+                    ntfy=False,
                 )
                 logger.warning(f"[BIAS 2H WATCHDOG] missing={bias2h_missing} stale={bias2h_stale}")
 
@@ -1288,7 +1327,7 @@ def scalp_tv_signal_watchdog():
                     "--------------------\n"
                     + " | ".join(details)
                     + "\n\nVerifier le cycle indicateurs / relay du bot principal (pas une alerte TradingView).",
-                    ntfy=True,
+                    ntfy=False,
                 )
                 logger.warning(f"[RCI 30m WATCHDOG] missing={rci30_missing} stale={rci30_stale}")
 
@@ -1317,7 +1356,7 @@ def scalp_tv_signal_watchdog():
                     "--------------------\n"
                     + " | ".join(details)
                     + "\n\nVerifier le cycle indicateurs / relay du bot principal (pas une alerte TradingView).",
-                    ntfy=True,
+                    ntfy=False,
                 )
                 logger.warning(f"[RCI 2H WATCHDOG] missing={rci2h_missing} stale={rci2h_stale}")
 
