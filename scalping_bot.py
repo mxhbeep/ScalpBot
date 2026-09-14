@@ -31,7 +31,7 @@ CONFIG = {
     'TELEGRAM_CHAT_ID': os.environ.get('TELEGRAM_CHAT_ID', ''),
     'REDIS_URL': os.environ.get('REDIS_URL', ''),
     'NTFY_TOPIC': os.environ.get('NTFY_TOPIC', ''),
-    'MIN_COOLDOWN': 900,
+    'MIN_COOLDOWN': 1800,
     'SYMBOLS': {
         'AAVE/USDT': {'exchange': 'okx'},
         'APT/USDT': {'exchange': 'okx'},
@@ -175,7 +175,7 @@ def is_fresh(ts, max_age_seconds):
         return False
 
 
-def should_send(symbol, key, cooldown=900, event_id=None):
+def should_send(symbol, key, cooldown=1800, event_id=None):
     now = time.time()
     k = f"{symbol}:{key}"
     with STATE_LOCK:
@@ -445,7 +445,7 @@ def evaluate_scalp_info_30m(symbol, price=0, event_id=None):
             rci30_fresh = is_fresh(m.get('rci_30m_ts'), 90 * 60)
 
             if ctx30_ok and rci2h_ok and ctx1_ok:
-                if should_send(symbol, f"scalp_info_ctx30_rci2h_ctx1_{exp}", event_id=event_id, cooldown=45 * 60):
+                if should_send(symbol, f"scalp_info_ctx30_rci2h_ctx1_{exp}", event_id=event_id, cooldown=2 * 3600):
                     direction = 'LONG' if exp == 'buy' else 'SHORT'
                     notify = (
                         direction, symbol, price, ctx30, rci2h, ctx1, rci30,
@@ -651,7 +651,7 @@ def evaluate_scalp_secondary_prep(symbol, price=0, event_id=None, trigger_label=
                 f"prep={prep_ok} bias2h={bias2h} ok={bias2h_ok} "
                 f"rci10={rci30_short} ok={rci30_ok} ctx10={ctx10} aligned={ctx10_ok}"
             )
-            if prep_ok and should_send(symbol, f"scalp_secondary_prep_{exp}", event_id=event_id, cooldown=60 * 60):
+            if prep_ok and should_send(symbol, f"scalp_secondary_prep_{exp}", event_id=event_id, cooldown=2 * 3600):
                 notify = (direction, symbol, price, bias2h, rci30_short, ctx10, ctx10_fresh)
                 break
 
@@ -1235,7 +1235,7 @@ def scalp_tv_signal_watchdog():
                 if stale:
                     details.append("perime: " + ", ".join(f"{sym} {age:.0f}m" for sym, age in stale))
                 issues.append(f"- {req['label']}: " + " | ".join(details))
-        if issues and should_send('GLOBAL', 'scalp_tv_signal_watchdog', cooldown=1800):
+        if issues and should_send('GLOBAL', 'scalp_tv_signal_watchdog', cooldown=3600):
             send_telegram(
                 "<b>[ALERTE] Signaux TradingView scalp manquants</b>\n"
                 "--------------------\n"
@@ -1258,7 +1258,7 @@ def scalp_tv_signal_watchdog():
                     bias30_missing.append(symbol.replace('/USDT', ''))
                 elif now - float(ts) > 90 * 60:
                     bias30_stale.append((symbol.replace('/USDT', ''), (now - float(ts)) / 60))
-            if (bias30_missing or bias30_stale) and should_send('GLOBAL', 'scalp_bias30m_watchdog', cooldown=1800):
+            if (bias30_missing or bias30_stale) and should_send('GLOBAL', 'scalp_bias30m_watchdog', cooldown=3600):
                 details = []
                 if bias30_missing:
                     details.append("jamais recu: " + ", ".join(bias30_missing))
@@ -1286,7 +1286,7 @@ def scalp_tv_signal_watchdog():
                     bias2h_missing.append(symbol.replace('/USDT', ''))
                 elif now - float(ts) > 5 * 3600:
                     bias2h_stale.append((symbol.replace('/USDT', ''), (now - float(ts)) / 60))
-            if (bias2h_missing or bias2h_stale) and should_send('GLOBAL', 'scalp_bias2h_watchdog', cooldown=1800):
+            if (bias2h_missing or bias2h_stale) and should_send('GLOBAL', 'scalp_bias2h_watchdog', cooldown=3600):
                 details = []
                 if bias2h_missing:
                     details.append("jamais recu: " + ", ".join(bias2h_missing))
@@ -1316,7 +1316,7 @@ def scalp_tv_signal_watchdog():
                     rci30_missing.append(label)
                 elif now - float(ts) > 45 * 60:
                     rci30_stale.append((label, (now - float(ts)) / 60))
-            if (rci30_missing or rci30_stale) and should_send('GLOBAL', 'scalp_rci30m_watchdog', cooldown=1800):
+            if (rci30_missing or rci30_stale) and should_send('GLOBAL', 'scalp_rci30m_watchdog', cooldown=3600):
                 details = []
                 if rci30_missing:
                     details.append("jamais recu: " + ", ".join(rci30_missing))
@@ -1345,7 +1345,7 @@ def scalp_tv_signal_watchdog():
                     rci2h_missing.append(symbol.replace('/USDT', ''))
                 elif now - float(ts) > 6 * 3600:
                     rci2h_stale.append((symbol.replace('/USDT', ''), (now - float(ts)) / 60))
-            if (rci2h_missing or rci2h_stale) and should_send('GLOBAL', 'scalp_rci2h_watchdog', cooldown=1800):
+            if (rci2h_missing or rci2h_stale) and should_send('GLOBAL', 'scalp_rci2h_watchdog', cooldown=3600):
                 details = []
                 if rci2h_missing:
                     details.append("jamais recu: " + ", ".join(rci2h_missing))
