@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Scalping Bot — deux entrees independantes
-# Principale : Bias 30m + ST Context 1m.
+# Principale : Bias 30m + ST Context 1m (en pause).
 # RCI 10m n'est plus bloquant : affiche en rappel manuel dans l'alerte.
 # Info 30m : ST Context 30m + RCI 2H + ST Context 1m.
 # Secondaire : Bias 2H + ST Context 10m + RCI court (10) en zone extreme +/-75.
@@ -56,6 +56,7 @@ MOMENTUM_STATE = {}
 LAST_SIGNALS = {}
 LAST_SIGNAL_EVENTS = {}
 SCALP_ENABLED = True
+SCALP_SIMPLE_ENABLED = False
 REDIS_CLIENT = None
 
 
@@ -487,6 +488,9 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
     with STATE_LOCK:
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
+        if not SCALP_SIMPLE_ENABLED:
+            logger.info(f"[SCALP SIMPLE OFF] ignore {symbol}")
+            return False
         if not SCALP_ENABLED:
             logger.info(f"[SCALP OFF] ignore {symbol}")
             return False
@@ -1414,9 +1418,8 @@ def startup():
         "<b>Scalping Bot demarre</b>\n"
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
-        "Strategie active: SCALP SIMPLE + SCALP SECONDAIRE (voies independantes)\n"
-        "Entree principale: Bias 30m + ST Context 1m (anti-chop CTX10m oppose)\n"
-        "Info entree principale: verifier RCI 10m, ST Context 30m et RCI 30m manuellement\n"
+        "Strategie active: SCALP SECONDAIRE + infos scalp\n"
+        "SCALP SIMPLE: en pause\n"
         "Entree secondaire: Bias 2H + ST Context 10m + RCI 30m en zone +/-75 (anti-chop CTX10m oppose)\n"
         "PREP secondaire: Bias 2H + RCI 30m en zone +/-75, en attente du ST Context 10m\n"
         "Alerte info 30m: ST Context 30m + RCI 2H + ST Context 1m alignes\n"
