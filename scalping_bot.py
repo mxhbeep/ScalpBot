@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Scalping Bot — deux entrees independantes
-# Principale : Bias 30m + ST Context 1m + RCI court 10m extreme +/-75.
+# Principale : Bias 30m + ST Context 1m.
 # Anti-chop : ST Context 30m oppose.
+# RCI 10m : verification manuelle non bloquante (OKX ne fournit pas de bougies 10m).
 # Info 30m : ST Context 30m + RCI 2H + ST Context 1m.
 # Secondaire : Bias 2H + ST Context 10m + RCI court (10) en zone extreme +/-75.
 # Anti-chop CTX 10m oppose. Notifications et cooldown separes de l'entree principale.
@@ -500,8 +501,8 @@ def evaluate_scalp_info_30m(symbol, price=0, event_id=None):
 
 
 def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"):
-    """Scalp simple : Bias 30m + ST Context 1m + RCI court 10m extreme.
-    Anti-chop bloquant : ST Context 30m oppose."""
+    """Scalp simple : Bias 30m + ST Context 1m.
+    Anti-chop bloquant : ST Context 30m oppose. RCI 10m manuel."""
     notify = None
     with STATE_LOCK:
         init_symbol(symbol)
@@ -525,10 +526,6 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
 
             rci10 = m.get('rci_10m_10')
             rci10_fresh = is_fresh(m.get('rci_10m_ts'), 30 * 60)
-            if exp == 'buy':
-                rci10_ok = bool(rci10_fresh and rci10 is not None and float(rci10) <= -75)
-            else:
-                rci10_ok = bool(rci10_fresh and rci10 is not None and float(rci10) >= 75)
 
             ctx30 = m.get('st_context_30m')
             ctx30_fresh = is_fresh(m.get('st_context_30m_ts'), 90 * 60)
@@ -536,11 +533,11 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
             rci30 = m.get('rci_30m_dir')
             rci30_fresh = is_fresh(m.get('rci_30m_ts'), 90 * 60)
 
-            entry_ok = bias30_ok and ctx1_ok and rci10_ok and not ctx30_chop_veto
+            entry_ok = bias30_ok and ctx1_ok and not ctx30_chop_veto
             logger.info(
                 f"[SCALP CHECK] {symbol} {direction} src={trigger_label} "
                 f"entry={entry_ok} bias30={bias30} ok={bias30_ok} "
-                f"ctx1={ctx1} ok={ctx1_ok} rci10={rci10} fresh={rci10_fresh} ok={rci10_ok} "
+                f"ctx1={ctx1} ok={ctx1_ok} rci10={rci10} fresh={rci10_fresh} (manuel) "
                 f"ctx30={ctx30} fresh={ctx30_fresh} anti_chop_veto={ctx30_chop_veto} "
                 f"rci30={rci30} fresh={rci30_fresh}"
             )
@@ -566,12 +563,12 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
         f"Price: ${format_price(price)}\n"
         f"[OK] Bias 30m: {bias30.upper()}\n"
         f"[OK] ST Context 1m: {ctx1.upper()}\n"
-        f"[OK] RCI court 10m extreme: {rci_txt}\n"
+        f"[MANUEL] Verifier que le RCI court 10m est en zone extreme: {rci_txt}\n"
         f"[ANTI-CHOP] ST Context 30m non oppose: {ctx30_txt}\n"
         f"[IMPORTANT] Bien verifier que le mouvement commence apres une zone ST Context 30m, sinon ne pas prendre le trade.\n"
         f"[MANUEL] Regarder le RCI 30m: {rci30_txt} "
         f"(10={rci30_10}, 30={rci30_30}, 50={rci30_50}) pour confirmation\n"
-        f"Trigger: Bias 30m + ST Context 1m + RCI court 10m extreme"
+        f"Trigger: Bias 30m + ST Context 1m"
     )
     return True
 
@@ -1065,16 +1062,11 @@ def debug_symbol():
             bias30_ok = bool(bias30m_fresh and m.get('bias_30m') == exp)
             rci10 = m.get('rci_10m_10')
             rci10_fresh = is_fresh(m.get('rci_10m_ts'), 30 * 60)
-            if exp == 'buy':
-                rci10_ok = bool(rci10_fresh and rci10 is not None and float(rci10) <= -75)
-            else:
-                rci10_ok = bool(rci10_fresh and rci10 is not None and float(rci10) >= 75)
             ctx30_chop_veto_primary = bool(ctx30m['fresh'] and ctx30m['value'] == opp)
             checks[exp] = {
                 'bias30m_ok': bias30_ok,
                 'ctx1m_ok': ctx1_ok,
-                'rci10m_ok': rci10_ok,
-                'rci10m_value': rci10,
+                'rci10m_manual': {'value': rci10, 'fresh': rci10_fresh},
                 'anti_chop_ctx30m_veto': ctx30_chop_veto_primary,
                 'ctx30m_confirmation': ctx30m,
                 'rci30m_confirmation': {
@@ -1082,7 +1074,7 @@ def debug_symbol():
                     'dir': m.get('rci_30m_dir'), 'chop': m.get('rci_30m_chop'), 'ts': m.get('rci_30m_ts'),
                     'fresh': rci30_fresh,
                 },
-                'entry_ok': bias30_ok and ctx1_ok and rci10_ok and not ctx30_chop_veto_primary,
+                'entry_ok': bias30_ok and ctx1_ok and not ctx30_chop_veto_primary,
             }
 
             ctx30_ok = ctx30m['fresh'] and ctx30m['value'] == exp
@@ -1231,7 +1223,6 @@ def scalp_required_tv_signals():
         {'label': 'ST Context 1m', 'field': 'st_context_1m_ts', 'max_age': 12 * 60, 'warmup': 20 * 60},
         {'label': 'ST Context 10m', 'field': 'st_context_10m_ts', 'max_age': 45 * 60, 'warmup': 90 * 60},
         {'label': 'ST Context 30m', 'field': 'st_context_30m_ts', 'max_age': 90 * 60, 'warmup': 2 * 3600},
-        {'label': 'RCI 10m', 'field': 'rci_10m_ts', 'max_age': 30 * 60, 'warmup': 60 * 60},
     ]
 
 
@@ -1448,7 +1439,7 @@ def startup():
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         "Strategies actives: SCALP SIMPLE + SCALP SECONDAIRE + infos scalp\n"
-        "SCALP SIMPLE: Bias 30m + ST Context 1m + RCI court 10m extreme +/-75 (anti-chop CTX30m oppose)\n"
+        "SCALP SIMPLE: Bias 30m + ST Context 1m (anti-chop CTX30m oppose, RCI 10m manuel)\n"
         "Entree secondaire: Bias 2H + ST Context 10m + RCI 30m en zone +/-75 (anti-chop CTX10m oppose)\n"
         "PREP secondaire: Bias 2H + RCI 30m en zone +/-75, en attente du ST Context 10m\n"
         "Alerte info 30m: ST Context 30m + RCI 2H + ST Context 1m alignes\n"
