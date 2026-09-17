@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Scalping Bot — deux entrees independantes
-# Principale : Bias 30m + ST Context 1m (en pause).
-# RCI 10m n'est plus bloquant : affiche en rappel manuel dans l'alerte.
+# Principale : Bias 30m + ST Context 1m + RCI court 10m extreme +/-75.
+# Anti-chop : ST Context 30m oppose.
 # Info 30m : ST Context 30m + RCI 2H + ST Context 1m.
 # Secondaire : Bias 2H + ST Context 10m + RCI court (10) en zone extreme +/-75.
 # Anti-chop CTX 10m oppose. Notifications et cooldown separes de l'entree principale.
@@ -34,18 +34,37 @@ CONFIG = {
     'MIN_COOLDOWN': 1800,
     'SYMBOLS': {
         'AAVE/USDT': {'exchange': 'okx'},
+        'ADA/USDT': {'exchange': 'okx'},
         'APT/USDT': {'exchange': 'okx'},
+        'ARB/USDT': {'exchange': 'okx'},
         'AVAX/USDT': {'exchange': 'okx'},
+        'BNB/USDT': {'exchange': 'okx'},
+        'BONK/USDT': {'exchange': 'okx'},
         'BTC/USDT': {'exchange': 'okx'},
+        'COMP/USDT': {'exchange': 'okx'},
         'CRV/USDT': {'exchange': 'okx'},
+        'CVX/USDT': {'exchange': 'okx'},
+        'DASH/USDT': {'exchange': 'okx'},
         'DOGE/USDT': {'exchange': 'okx'},
+        'ENA/USDT': {'exchange': 'okx'},
         'ETH/USDT': {'exchange': 'okx'},
+        'FARTCOIN/USDT': {'exchange': 'okx'},
+        'HBAR/USDT': {'exchange': 'okx'},
+        'HYPE/USDT': {'exchange': 'okx'},
+        'INJ/USDT': {'exchange': 'okx'},
         'LINK/USDT': {'exchange': 'okx'},
+        'LTC/USDT': {'exchange': 'okx'},
         'NEAR/USDT': {'exchange': 'okx'},
+        'ONDO/USDT': {'exchange': 'okx'},
+        'PENGU/USDT': {'exchange': 'okx'},
         'PEPE/USDT': {'exchange': 'okx'},
+        'RENDER/USDT': {'exchange': 'okx'},
         'SOL/USDT': {'exchange': 'okx'},
         'SUI/USDT': {'exchange': 'okx'},
+        'TAO/USDT': {'exchange': 'okx'},
         'UNI/USDT': {'exchange': 'okx'},
+        'USELESS/USDT': {'exchange': 'okx'},
+        'XPL/USDT': {'exchange': 'okx'},
         'XRP/USDT': {'exchange': 'okx'},
         'ZEC/USDT': {'exchange': 'okx'},
     },
@@ -56,7 +75,7 @@ MOMENTUM_STATE = {}
 LAST_SIGNALS = {}
 LAST_SIGNAL_EVENTS = {}
 SCALP_ENABLED = True
-SCALP_SIMPLE_ENABLED = False
+SCALP_SIMPLE_ENABLED = True
 REDIS_CLIENT = None
 
 
@@ -481,9 +500,8 @@ def evaluate_scalp_info_30m(symbol, price=0, event_id=None):
 
 
 def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"):
-    """Scalp simple : Bias 30m + ST Context 1m.
-    Anti-chop bloquant : ST Context 10m oppose.
-    RCI 10m, ST Context 30m et RCI 30m restent des confirmations manuelles."""
+    """Scalp simple : Bias 30m + ST Context 1m + RCI court 10m extreme.
+    Anti-chop bloquant : ST Context 30m oppose."""
     notify = None
     with STATE_LOCK:
         init_symbol(symbol)
@@ -503,30 +521,32 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
             ctx1 = m.get('st_context_1m')
             ctx1_ok = is_fresh(m.get('st_context_1m_ts'), 12 * 60) and ctx1 == exp
 
-            ctx10 = m.get('st_context_10m')
-            ctx10_fresh = is_fresh(m.get('st_context_10m_ts'), 45 * 60)
             opp = 'sell' if exp == 'buy' else 'buy'
-            ctx10_chop_veto = bool(ctx10_fresh and ctx10 == opp)
 
             rci10 = m.get('rci_10m_10')
             rci10_fresh = is_fresh(m.get('rci_10m_ts'), 30 * 60)
+            if exp == 'buy':
+                rci10_ok = bool(rci10_fresh and rci10 is not None and float(rci10) <= -75)
+            else:
+                rci10_ok = bool(rci10_fresh and rci10 is not None and float(rci10) >= 75)
 
             ctx30 = m.get('st_context_30m')
             ctx30_fresh = is_fresh(m.get('st_context_30m_ts'), 90 * 60)
+            ctx30_chop_veto = bool(ctx30_fresh and ctx30 == opp)
             rci30 = m.get('rci_30m_dir')
             rci30_fresh = is_fresh(m.get('rci_30m_ts'), 90 * 60)
 
-            entry_ok = bias30_ok and ctx1_ok and not ctx10_chop_veto
+            entry_ok = bias30_ok and ctx1_ok and rci10_ok and not ctx30_chop_veto
             logger.info(
                 f"[SCALP CHECK] {symbol} {direction} src={trigger_label} "
                 f"entry={entry_ok} bias30={bias30} ok={bias30_ok} "
-                f"ctx1={ctx1} ok={ctx1_ok} ctx10={ctx10} anti_chop_veto={ctx10_chop_veto} "
-                f"rci10={rci10} fresh={rci10_fresh} (info, non bloquant) "
-                f"ctx30={ctx30} fresh={ctx30_fresh} rci30={rci30} fresh={rci30_fresh}"
+                f"ctx1={ctx1} ok={ctx1_ok} rci10={rci10} fresh={rci10_fresh} ok={rci10_ok} "
+                f"ctx30={ctx30} fresh={ctx30_fresh} anti_chop_veto={ctx30_chop_veto} "
+                f"rci30={rci30} fresh={rci30_fresh}"
             )
             if entry_ok and should_send(symbol, f"scalp_simple_entry_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
                 notify = (
-                    direction, symbol, price, bias30, ctx1, ctx10,
+                    direction, symbol, price, bias30, ctx1,
                     rci10, ctx30, ctx30_fresh, rci30, rci30_fresh,
                     m.get('rci_30m_10'), m.get('rci_30m_30'), m.get('rci_30m_50'),
                 )
@@ -535,7 +555,7 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
     if not notify:
         return False
 
-    direction, symbol, price, bias30, ctx1, ctx10, rci10, ctx30, ctx30_fresh, rci30, rci30_fresh, rci30_10, rci30_30, rci30_50 = notify
+    direction, symbol, price, bias30, ctx1, rci10, ctx30, ctx30_fresh, rci30, rci30_fresh, rci30_10, rci30_30, rci30_50 = notify
     emoji = "🟢" if direction == "LONG" else "🔴"
     rci_txt = f"{float(rci10):.1f}" if rci10 is not None else "n/a"
     ctx30_txt = ctx30.upper() if ctx30_fresh and ctx30 else "NEUTRE/NON FRAIS"
@@ -546,11 +566,12 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
         f"Price: ${format_price(price)}\n"
         f"[OK] Bias 30m: {bias30.upper()}\n"
         f"[OK] ST Context 1m: {ctx1.upper()}\n"
-        f"[ANTI-CHOP] ST Context 10m non oppose: {ctx10.upper() if ctx10 else 'NEUTRE/NON FRAIS'}\n"
-        f"[MANUEL] RCI 10m: {rci_txt} - verifier avant d'entrer en position\n"
-        f"[MANUEL] Regarder ST Context 30m: {ctx30_txt} et RCI 30m: {rci30_txt} "
+        f"[OK] RCI court 10m extreme: {rci_txt}\n"
+        f"[ANTI-CHOP] ST Context 30m non oppose: {ctx30_txt}\n"
+        f"[IMPORTANT] Bien verifier que le mouvement commence apres une zone ST Context 30m, sinon ne pas prendre le trade.\n"
+        f"[MANUEL] Regarder le RCI 30m: {rci30_txt} "
         f"(10={rci30_10}, 30={rci30_30}, 50={rci30_50}) pour confirmation\n"
-        f"Trigger: Bias 30m + ST Context 1m"
+        f"Trigger: Bias 30m + ST Context 1m + RCI court 10m extreme"
     )
     return True
 
@@ -860,8 +881,9 @@ def process_webhook(data):
         )
 
     if (
-        (alert_type == 'st_context' and tf in ('1m', '10m'))
+        (alert_type == 'st_context' and tf in ('1m', '10m', '30m'))
         or (alert_type == 'bias' and tf == '30m')
+        or (alert_type == 'rci' and tf == '10m')
     ):
         evaluate_scalp(
             symbol,
@@ -1041,20 +1063,26 @@ def debug_symbol():
             ctx1_ok = ctx1m['fresh'] and ctx1m['value'] == exp
             opp = 'sell' if exp == 'buy' else 'buy'
             bias30_ok = bool(bias30m_fresh and m.get('bias_30m') == exp)
-            ctx10_chop_veto_primary = bool(ctx10m['fresh'] and ctx10m['value'] == opp)
             rci10 = m.get('rci_10m_10')
+            rci10_fresh = is_fresh(m.get('rci_10m_ts'), 30 * 60)
+            if exp == 'buy':
+                rci10_ok = bool(rci10_fresh and rci10 is not None and float(rci10) <= -75)
+            else:
+                rci10_ok = bool(rci10_fresh and rci10 is not None and float(rci10) >= 75)
+            ctx30_chop_veto_primary = bool(ctx30m['fresh'] and ctx30m['value'] == opp)
             checks[exp] = {
                 'bias30m_ok': bias30_ok,
                 'ctx1m_ok': ctx1_ok,
-                'anti_chop_ctx10m_veto': ctx10_chop_veto_primary,
-                'rci10m_info': rci10,  # non bloquant, a verifier manuellement
+                'rci10m_ok': rci10_ok,
+                'rci10m_value': rci10,
+                'anti_chop_ctx30m_veto': ctx30_chop_veto_primary,
                 'ctx30m_confirmation': ctx30m,
                 'rci30m_confirmation': {
                     '10': m.get('rci_30m_10'), '30': m.get('rci_30m_30'), '50': m.get('rci_30m_50'),
                     'dir': m.get('rci_30m_dir'), 'chop': m.get('rci_30m_chop'), 'ts': m.get('rci_30m_ts'),
                     'fresh': rci30_fresh,
                 },
-                'entry_ok': bias30_ok and ctx1_ok and not ctx10_chop_veto_primary,
+                'entry_ok': bias30_ok and ctx1_ok and rci10_ok and not ctx30_chop_veto_primary,
             }
 
             ctx30_ok = ctx30m['fresh'] and ctx30m['value'] == exp
@@ -1203,6 +1231,7 @@ def scalp_required_tv_signals():
         {'label': 'ST Context 1m', 'field': 'st_context_1m_ts', 'max_age': 12 * 60, 'warmup': 20 * 60},
         {'label': 'ST Context 10m', 'field': 'st_context_10m_ts', 'max_age': 45 * 60, 'warmup': 90 * 60},
         {'label': 'ST Context 30m', 'field': 'st_context_30m_ts', 'max_age': 90 * 60, 'warmup': 2 * 3600},
+        {'label': 'RCI 10m', 'field': 'rci_10m_ts', 'max_age': 30 * 60, 'warmup': 60 * 60},
     ]
 
 
@@ -1418,8 +1447,8 @@ def startup():
         "<b>Scalping Bot demarre</b>\n"
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
-        "Strategie active: SCALP SECONDAIRE + infos scalp\n"
-        "SCALP SIMPLE: en pause\n"
+        "Strategies actives: SCALP SIMPLE + SCALP SECONDAIRE + infos scalp\n"
+        "SCALP SIMPLE: Bias 30m + ST Context 1m + RCI court 10m extreme +/-75 (anti-chop CTX30m oppose)\n"
         "Entree secondaire: Bias 2H + ST Context 10m + RCI 30m en zone +/-75 (anti-chop CTX10m oppose)\n"
         "PREP secondaire: Bias 2H + RCI 30m en zone +/-75, en attente du ST Context 10m\n"
         "Alerte info 30m: ST Context 30m + RCI 2H + ST Context 1m alignes\n"
