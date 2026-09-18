@@ -77,6 +77,7 @@ LAST_SIGNALS = {}
 LAST_SIGNAL_EVENTS = {}
 SCALP_ENABLED = True
 SCALP_SIMPLE_ENABLED = True
+WATCHDOG_EXCLUDED_SYMBOLS = {'CVX/USDT'}
 REDIS_CLIENT = None
 
 
@@ -1238,7 +1239,10 @@ def scalp_tv_signal_watchdog():
         uptime = now - bot_start_time
         issues = []
         with STATE_LOCK:
-            symbols = list(CONFIG['SYMBOLS'].keys())
+            symbols = [
+                symbol for symbol in CONFIG['SYMBOLS']
+                if symbol not in WATCHDOG_EXCLUDED_SYMBOLS
+            ]
             state_copy = {s: dict(MOMENTUM_STATE.get(s, {})) for s in symbols}
         for req in scalp_required_tv_signals():
             if uptime < req['warmup']:
