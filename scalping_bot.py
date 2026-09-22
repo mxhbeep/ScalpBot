@@ -147,8 +147,6 @@ def init_symbol(symbol):
             'st_context_10m': None, 'st_context_10m_ts': None, 'st_context_10m_raw': None,  # Entree secondaire
             'bias_30m': None, 'bias_30m_ts': None,  # Scalp simple
             'bias_2h': None, 'bias_2h_ts': None,    # Entree secondaire
-            'rci_10m_10': None, 'rci_10m_30': None, 'rci_10m_50': None,
-            'rci_10m_dir': None, 'rci_10m_chop': None, 'rci_10m_ts': None,
             'rci_2h_10': None, 'rci_2h_30': None, 'rci_2h_50': None,
             'rci_2h_dir': None, 'rci_2h_chop': None, 'rci_2h_ts': None,
             'rci_30m_10': None, 'rci_30m_30': None, 'rci_30m_50': None,  # Entree secondaire
@@ -527,9 +525,6 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
             ctx1 = m.get('st_context_1m')
             ctx1_ok = is_fresh(m.get('st_context_1m_ts'), 12 * 60) and ctx1 == exp
 
-            rci10 = m.get('rci_10m_10')
-            rci10_fresh = is_fresh(m.get('rci_10m_ts'), 30 * 60)
-
             ctx30 = m.get('st_context_30m')
             ctx30_fresh = is_fresh(m.get('st_context_30m_ts'), 90 * 60)
             rci30 = m.get('rci_30m_dir')
@@ -539,14 +534,14 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
             logger.info(
                 f"[SCALP CHECK] {symbol} {direction} src={trigger_label} "
                 f"entry={entry_ok} bias30={bias30} ok={bias30_ok} "
-                f"ctx1={ctx1} ok={ctx1_ok} rci10={rci10} fresh={rci10_fresh} (manuel) "
+                f"ctx1={ctx1} ok={ctx1_ok} rci10=verification_manuelle "
                 f"ctx30={ctx30} fresh={ctx30_fresh} (manuel, non bloquant) "
                 f"rci30={rci30} fresh={rci30_fresh}"
             )
             if entry_ok and should_send(symbol, f"scalp_simple_entry_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
                 notify = (
                     direction, symbol, price, bias30, ctx1,
-                    rci10, ctx30, ctx30_fresh, rci30, rci30_fresh,
+                    ctx30, ctx30_fresh, rci30, rci30_fresh,
                     m.get('rci_30m_10'), m.get('rci_30m_30'), m.get('rci_30m_50'),
                 )
                 break
@@ -554,9 +549,8 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
     if not notify:
         return False
 
-    direction, symbol, price, bias30, ctx1, rci10, ctx30, ctx30_fresh, rci30, rci30_fresh, rci30_10, rci30_30, rci30_50 = notify
+    direction, symbol, price, bias30, ctx1, ctx30, ctx30_fresh, rci30, rci30_fresh, rci30_10, rci30_30, rci30_50 = notify
     emoji = "🟢" if direction == "LONG" else "🔴"
-    rci_txt = f"{float(rci10):.1f}" if rci10 is not None else "n/a"
     ctx30_txt = ctx30.upper() if ctx30_fresh and ctx30 else "NEUTRE/NON FRAIS"
     rci30_txt = rci30.upper() if rci30_fresh and rci30 else "NEUTRE/NON FRAIS"
     expected = 'buy' if direction == 'LONG' else 'sell'
@@ -573,7 +567,7 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
         f"Price: ${format_price(price)}\n"
         f"[OK] Bias 30m: {bias30.upper()}\n"
         f"[OK] ST Context 1m: {ctx1.upper()}\n"
-        f"[MANUEL] Verifier que le RCI court 10m est en zone extreme: {rci_txt}\n"
+        f"[MANUEL] Verifier que le RCI court 10m est en zone extreme.\n"
         f"{ctx30_line}\n"
         f"[IMPORTANT] Bien verifier que le mouvement commence apres une zone ST Context 30m, sinon ne pas prendre le trade.\n"
         f"[MANUEL] Regarder le RCI 30m: {rci30_txt} "
@@ -826,18 +820,6 @@ def process_webhook(data):
             m['st_context_lt_30m_raw'] = ctx_raw
             persist_state()
 
-        elif alert_type == 'rci' and tf == '10m':
-            value = val if val in ('buy', 'sell') else 'chop'
-            direction = value if value in ('buy', 'sell') else None
-            is_chop = bool(data.get('chop', value == 'chop'))
-            m['rci_10m_10'] = data.get('rci10')
-            m['rci_10m_30'] = data.get('rci30')
-            m['rci_10m_50'] = data.get('rci50')
-            m['rci_10m_dir'] = direction
-            m['rci_10m_chop'] = is_chop
-            m['rci_10m_ts'] = time.time()
-            persist_state()
-
         elif alert_type == 'rci' and tf == '30m':
             value = val if val in ('buy', 'sell') else 'chop'
             direction = value if value in ('buy', 'sell') else None
@@ -1069,12 +1051,10 @@ def debug_symbol():
         for exp in ('buy', 'sell'):
             ctx1_ok = ctx1m['fresh'] and ctx1m['value'] == exp
             bias30_ok = bool(bias30m_fresh and m.get('bias_30m') == exp)
-            rci10 = m.get('rci_10m_10')
-            rci10_fresh = is_fresh(m.get('rci_10m_ts'), 30 * 60)
             checks[exp] = {
                 'bias30m_ok': bias30_ok,
                 'ctx1m_ok': ctx1_ok,
-                'rci10m_manual': {'value': rci10, 'fresh': rci10_fresh},
+                'rci10m_manual': True,
                 'ctx30m_manual_non_blocking': ctx30m,
                 'rci30m_confirmation': {
                     '10': m.get('rci_30m_10'), '30': m.get('rci_30m_30'), '50': m.get('rci_30m_50'),
@@ -1136,10 +1116,6 @@ def debug_symbol():
                 'st_context_30m': ctx30m,
                 'bias_30m': {'value': m.get('bias_30m'), 'ts': m.get('bias_30m_ts'), 'fresh': bias30m_fresh},
                 'bias_2h': {'value': m.get('bias_2h'), 'ts': m.get('bias_2h_ts')},
-                'rci_10m': {
-                    '10': m.get('rci_10m_10'), '30': m.get('rci_10m_30'), '50': m.get('rci_10m_50'),
-                    'dir': m.get('rci_10m_dir'), 'chop': m.get('rci_10m_chop'), 'ts': m.get('rci_10m_ts'),
-                },
                 'rci_30m': {
                     '10': m.get('rci_30m_10'), '30': m.get('rci_30m_30'), '50': m.get('rci_30m_50'),
                     'dir': m.get('rci_30m_dir'), 'chop': m.get('rci_30m_chop'), 'ts': m.get('rci_30m_ts'),
@@ -1453,7 +1429,7 @@ def startup():
         "SCALP SIMPLE: Bias 30m + ST Context 1m (CTX30m et RCI 10m manuels, non bloquants)\n"
         "Entree secondaire: Bias 2H + ST Context 10m + RCI 30m en zone +/-75 (anti-chop CTX10m oppose)\n"
         "PREP secondaire: Bias 2H + RCI 30m en zone +/-75, en attente du ST Context 10m\n"
-        "Alerte info 30m: ST Context 30m + RCI 2H + ST Context 1m alignes\n"
+        "Alerte info 30m: ST Context 30m + RCI 2H + ST Context 10m alignes\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
     )
