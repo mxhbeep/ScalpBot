@@ -75,6 +75,20 @@ CONFIG = {
     },
 }
 
+SCALP_PRIMARY_SYMBOLS = {
+    'AAVE/USDT', 'ADA/USDT', 'AVAX/USDT', 'BTC/USDT', 'CRV/USDT',
+    'DOGE/USDT', 'ENA/USDT', 'ETH/USDT', 'HYPE/USDT', 'LINK/USDT',
+    'LTC/USDT', 'NEAR/USDT', 'SOL/USDT', 'SUI/USDT', 'TAO/USDT',
+    'UNI/USDT', 'XRP/USDT', 'ZEC/USDT',
+}
+
+PULSE_SCALP_SYMBOLS = {
+    'APT/USDT', 'ARB/USDT', 'BNB/USDT', 'BONK/USDT', 'COMP/USDT',
+    'CVX/USDT', 'DASH/USDT', 'ETHFI/USDT', 'FARTCOIN/USDT', 'FET/USDT',
+    'FIL/USDT', 'HBAR/USDT', 'INJ/USDT', 'ONDO/USDT', 'PENGU/USDT',
+    'PEPE/USDT', 'RENDER/USDT', 'USELESS/USDT', 'XPL/USDT', 'ZEN/USDT',
+}
+
 STATE_LOCK = threading.RLock()
 MOMENTUM_STATE = {}
 LAST_SIGNALS = {}
@@ -361,6 +375,14 @@ NOTIFICATIONS.register(
         label='Telegram scalpbot priority',
     ),
 )
+NOTIFICATIONS.register(
+    'telegram_secondary_scalp',
+    TelegramChannel(
+        lambda: os.environ.get('SCALP_SECONDARY_BOT_TOKEN', ''),
+        lambda: os.environ.get('SCALP_SECONDARY_CHAT_ID', ''),
+        label='Telegram ScalpSecondaire',
+    ),
+)
 NOTIFICATIONS.register('ntfy', NtfyChannel(lambda: CONFIG.get('NTFY_TOPIC', '')))
 
 
@@ -392,9 +414,15 @@ def sanitize_scalp_notification(msg: str) -> str:
     return '\n'.join(lines)
 
 
-def send_telegram(msg, ntfy=False, priority=False):
+def telegram_channel_for_symbol(symbol=None, priority=False):
+    if symbol in PULSE_SCALP_SYMBOLS:
+        return 'telegram_secondary_scalp'
+    return 'telegram_priority_scalp' if priority else 'telegram_scalp'
+
+
+def send_telegram(msg, ntfy=False, priority=False, symbol=None):
     msg = sanitize_scalp_notification(msg)
-    telegram_channel = 'telegram_priority_scalp' if priority else 'telegram_scalp'
+    telegram_channel = telegram_channel_for_symbol(symbol, priority)
     result = send_notification(
         notification_title_from_message(msg),
         msg,
@@ -403,8 +431,8 @@ def send_telegram(msg, ntfy=False, priority=False):
         ntfy=ntfy,
         telegram_channel=telegram_channel,
     )
-    if priority and not result.get('telegram_priority_scalp'):
-        logger.warning("alerte prioritaire scalp creee sans notification Telegram dediee, fallback Telegram scalpbot")
+    if not result.get(telegram_channel) and telegram_channel != 'telegram_scalp':
+        logger.warning(f"alerte scalp non envoyee sur {telegram_channel}, fallback Telegram scalpbot")
         fallback = send_notification(
             notification_title_from_message(msg),
             msg,
@@ -417,24 +445,25 @@ def send_telegram(msg, ntfy=False, priority=False):
     return bool(result.get(telegram_channel))
 
 
-def send_telegram_with_buttons(msg, ntfy=False, priority=False):
+def send_telegram_with_buttons(msg, ntfy=False, priority=False, symbol=None):
     msg = sanitize_scalp_notification(msg)
     keyboard = {"inline_keyboard": [[
         {"text": "Scalp ON", "callback_data": "scalp_on"},
         {"text": "Scalp OFF", "callback_data": "scalp_off"},
     ]]}
-    telegram_channel = 'telegram_priority_scalp' if priority else 'telegram_scalp'
+    telegram_channel = telegram_channel_for_symbol(symbol, priority)
+    reply_markup = None if telegram_channel == 'telegram_secondary_scalp' else keyboard
     result = send_notification(
         notification_title_from_message(msg),
         msg,
         priority=5,
         telegram=True,
         ntfy=ntfy,
-        reply_markup=keyboard,
+        reply_markup=reply_markup,
         telegram_channel=telegram_channel,
     )
-    if priority and not result.get('telegram_priority_scalp'):
-        logger.warning("alerte prioritaire scalp creee sans notification Telegram dediee, fallback Telegram scalpbot")
+    if not result.get(telegram_channel) and telegram_channel != 'telegram_scalp':
+        logger.warning(f"alerte scalp non envoyee sur {telegram_channel}, fallback Telegram scalpbot")
         fallback = send_notification(
             notification_title_from_message(msg),
             msg,
@@ -499,6 +528,7 @@ def evaluate_scalp_info_30m(symbol, price=0, event_id=None):
         f"[INFO] ST Context LT 30m actuel: {lt30_txt}\n"
         f"\nInfo seulement : pas une entree automatique.",
         ntfy=False,
+        symbol=symbol,
     )
     return True
 
@@ -572,7 +602,8 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
         f"[IMPORTANT] Bien verifier que le mouvement commence apres une zone ST Context 30m, sinon ne pas prendre le trade.\n"
         f"[MANUEL] Regarder le RCI 30m: {rci30_txt} "
         f"(10={rci30_10}, 30={rci30_30}, 50={rci30_50}) pour confirmation\n"
-        f"Trigger: Bias 30m + ST Context 1m"
+        f"Trigger: Bias 30m + ST Context 1m",
+        symbol=symbol,
     )
     return True
 
@@ -640,6 +671,7 @@ def evaluate_scalp_secondary(symbol, price=0, event_id=None, trigger_label="stat
         f"Voie: entree secondaire (independante de l'entree principale)",
         ntfy=True,
         priority=True,
+        symbol=symbol,
     )
     return True
 
@@ -699,6 +731,7 @@ def evaluate_scalp_secondary_prep(symbol, price=0, event_id=None, trigger_label=
         f"[INFO] ST Context 10m actuel: {ctx10_txt}",
         ntfy=True,
         priority=True,
+        symbol=symbol,
     )
     return True
 
@@ -1433,6 +1466,18 @@ def startup():
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
     )
+
+    if os.environ.get('SCALP_SECONDARY_BOT_TOKEN') and os.environ.get('SCALP_SECONDARY_CHAT_ID'):
+        send_notification(
+            'ScalpSecondaire connecte',
+            "<b>ScalpSecondaire connecte</b>\n"
+            "--------------------\n"
+            f"Watchlist PULSE: {len(PULSE_SCALP_SYMBOLS)} assets\n"
+            "Les alertes scalp de cette watchlist arrivent maintenant ici.",
+            telegram=True,
+            ntfy=False,
+            telegram_channel='telegram_secondary_scalp',
+        )
 
 
 if os.environ.get('ENABLE_SCALP_BOT', '1') == '1':
