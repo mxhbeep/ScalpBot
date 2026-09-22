@@ -4,7 +4,7 @@
 # Principale : Bias 30m + ST Context 1m.
 # ST Context 30m et RCI 10m : verifications manuelles non bloquantes.
 # OKX ne fournit pas de bougies 10m pour calculer le RCI 10m en interne.
-# Info 30m : ST Context 30m + RCI 2H + ST Context 1m.
+# Info 30m : ST Context 30m + RCI 2H + ST Context 10m.
 # Secondaire : Bias 2H + ST Context 10m + RCI court (10) en zone extreme +/-75.
 # Anti-chop CTX 10m oppose. Notifications et cooldown separes de l'entree principale.
 
@@ -49,7 +49,10 @@ CONFIG = {
         'DOGE/USDT': {'exchange': 'okx'},
         'ENA/USDT': {'exchange': 'okx'},
         'ETH/USDT': {'exchange': 'okx'},
+        'ETHFI/USDT': {'exchange': 'okx'},
         'FARTCOIN/USDT': {'exchange': 'okx'},
+        'FET/USDT': {'exchange': 'okx'},
+        'FIL/USDT': {'exchange': 'okx'},
         'HBAR/USDT': {'exchange': 'okx'},
         'HYPE/USDT': {'exchange': 'okx'},
         'INJ/USDT': {'exchange': 'okx'},
@@ -68,6 +71,7 @@ CONFIG = {
         'XPL/USDT': {'exchange': 'okx'},
         'XRP/USDT': {'exchange': 'okx'},
         'ZEC/USDT': {'exchange': 'okx'},
+        'ZEN/USDT': {'exchange': 'okx'},
     },
 }
 
@@ -449,7 +453,7 @@ def send_telegram_with_buttons(msg, ntfy=False, priority=False):
 
 
 def evaluate_scalp_info_30m(symbol, price=0, event_id=None):
-    """Alerte info non bloquante : CTX 30m + RCI 2H + CTX 1m alignes."""
+    """Alerte info non bloquante : CTX 30m + RCI 2H + CTX 10m alignes."""
     notify = None
     with STATE_LOCK:
         init_symbol(symbol)
@@ -459,18 +463,18 @@ def evaluate_scalp_info_30m(symbol, price=0, event_id=None):
         for exp in ('buy', 'sell'):
             ctx30 = m.get('st_context_30m')
             ctx30_ok = is_fresh(m.get('st_context_30m_ts'), 90 * 60) and ctx30 == exp
-            ctx1 = m.get('st_context_1m')
-            ctx1_ok = is_fresh(m.get('st_context_1m_ts'), 12 * 60) and ctx1 == exp
+            ctx10 = m.get('st_context_10m')
+            ctx10_ok = is_fresh(m.get('st_context_10m_ts'), 45 * 60) and ctx10 == exp
             rci2h = m.get('rci_2h_dir')
             rci2h_ok = is_fresh(m.get('rci_2h_ts'), 6 * 3600) and rci2h == exp
             rci30 = m.get('rci_30m_dir')
             rci30_fresh = is_fresh(m.get('rci_30m_ts'), 90 * 60)
 
-            if ctx30_ok and rci2h_ok and ctx1_ok:
-                if should_send(symbol, f"scalp_info_ctx30_rci2h_ctx1_{exp}", event_id=event_id, cooldown=2 * 3600):
+            if ctx30_ok and rci2h_ok and ctx10_ok:
+                if should_send(symbol, f"scalp_info_ctx30_rci2h_ctx10_{exp}", event_id=event_id, cooldown=2 * 3600):
                     direction = 'LONG' if exp == 'buy' else 'SHORT'
                     notify = (
-                        direction, symbol, price, ctx30, rci2h, ctx1, rci30,
+                        direction, symbol, price, ctx30, rci2h, ctx10, rci30,
                         m.get('rci_2h_10'), m.get('rci_2h_30'), m.get('rci_2h_50'),
                         m.get('rci_30m_10'), m.get('rci_30m_30'), m.get('rci_30m_50'),
                         rci30_fresh,
@@ -481,7 +485,7 @@ def evaluate_scalp_info_30m(symbol, price=0, event_id=None):
     if not notify:
         return False
 
-    direction, symbol, price, ctx30, rci2h, ctx1, rci30, rci2h10, rci2h30, rci2h50, rci10v, rci30v, rci50v, rci30_fresh, lt30, lt30_fresh = notify
+    direction, symbol, price, ctx30, rci2h, ctx10, rci30, rci2h10, rci2h30, rci2h50, rci10v, rci30v, rci50v, rci30_fresh, lt30, lt30_fresh = notify
     emoji = "🟢" if direction == "LONG" else "🔴"
     lt30_txt = lt30.upper() if lt30_fresh and lt30 else "NEUTRE/NON FRAIS"
     rci30_txt = rci30.upper() if rci30_fresh and rci30 else "NEUTRE/NON FRAIS"
@@ -491,7 +495,7 @@ def evaluate_scalp_info_30m(symbol, price=0, event_id=None):
         f"Price: ${format_price(price)}\n"
         f"[OK] ST Context 30m: {ctx30.upper()}\n"
         f"[OK] RCI 2H: {rci2h.upper()} (10={rci2h10}, 30={rci2h30}, 50={rci2h50})\n"
-        f"[OK] ST Context 1m: {ctx1.upper()}\n"
+        f"[OK] ST Context 10m: {ctx10.upper()}\n"
         f"[MANUEL] Verifier le RCI 30m: {rci30_txt} (10={rci10v}, 30={rci30v}, 50={rci50v})\n"
         f"[MANUEL] Verifier que le ST Context LT 30m soit neutre ou oppose. Ne pas entrer si le LT 30m est dans le meme sens.\n"
         f"[INFO] ST Context LT 30m actuel: {lt30_txt}\n"
@@ -874,7 +878,7 @@ def process_webhook(data):
             return
 
     if (
-        (alert_type == 'st_context' and tf in ('1m', '30m'))
+        (alert_type == 'st_context' and tf in ('10m', '30m'))
         or (alert_type == 'rci' and tf == '2h')
     ):
         evaluate_scalp_info_30m(
