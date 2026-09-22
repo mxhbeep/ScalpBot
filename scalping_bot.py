@@ -417,6 +417,9 @@ def sanitize_scalp_notification(msg: str) -> str:
 def telegram_channel_for_symbol(symbol=None, priority=False):
     if symbol in PULSE_SCALP_SYMBOLS:
         return 'telegram_secondary_scalp'
+    if symbol in SCALP_PRIMARY_SYMBOLS or symbol is None:
+        return 'telegram_priority_scalp' if priority else 'telegram_scalp'
+    logger.warning(f"symbole sans groupe Telegram scalp: {symbol}; fallback principal")
     return 'telegram_priority_scalp' if priority else 'telegram_scalp'
 
 
