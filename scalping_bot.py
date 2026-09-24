@@ -150,7 +150,11 @@ def init_symbol(symbol):
         MOMENTUM_STATE[symbol] = {
             'st_context_30m': None, 'st_context_30m_ts': None, 'st_context_30m_raw': None,
             'st_context_10m': None, 'st_context_10m_ts': None, 'st_context_10m_raw': None,
+            'st_context_1m': None, 'st_context_1m_ts': None, 'st_context_1m_raw': None,
             'bias_4h': None, 'bias_4h_ts': None,
+            'bias_1h': None, 'bias_1h_ts': None,
+            'rci_10m_10': None, 'rci_10m_30': None, 'rci_10m_50': None,
+            'rci_10m_dir': None, 'rci_10m_ts': None,
             'rci_30m_10': None, 'rci_30m_30': None, 'rci_30m_50': None,
             'rci_30m_dir': None, 'rci_30m_chop': None, 'rci_30m_ts': None,
         }
@@ -541,6 +545,74 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
     return True
 
 
+def evaluate_scalp_1h(symbol, price=0, event_id=None, trigger_label="state_refresh"):
+    """Scalp 1H, uniquement watchlist SCALP : Bias 1H + RCI 10m extreme + CTX 1m."""
+    if symbol not in SCALP_PRIMARY_SYMBOLS:
+        return False
+
+    notify = None
+    with STATE_LOCK:
+        init_symbol(symbol)
+        m = MOMENTUM_STATE[symbol]
+        if not SCALP_ENABLED:
+            return False
+
+        for exp in ('buy', 'sell'):
+            direction = 'LONG' if exp == 'buy' else 'SHORT'
+            bias1h = m.get('bias_1h')
+            bias1h_ok = is_fresh(m.get('bias_1h_ts'), 3 * 3600) and bias1h == exp
+
+            ctx1 = m.get('st_context_1m')
+            ctx1_ok = is_fresh(m.get('st_context_1m_ts'), 12 * 60) and ctx1 == exp
+
+            rci10 = m.get('rci_10m_10')
+            rci10_fresh = is_fresh(m.get('rci_10m_ts'), 45 * 60)
+            try:
+                rci10_value = float(rci10)
+            except (TypeError, ValueError):
+                rci10_value = None
+            rci10_ok = bool(
+                rci10_fresh
+                and rci10_value is not None
+                and ((exp == 'buy' and rci10_value <= -80) or (exp == 'sell' and rci10_value >= 80))
+            )
+
+            entry_ok = bias1h_ok and rci10_ok and ctx1_ok
+            logger.info(
+                f"[SCALP1H CHECK] {symbol} {direction} src={trigger_label} entry={entry_ok} "
+                f"bias1h={bias1h} ok={bias1h_ok} rci10m={rci10_value} ok={rci10_ok} "
+                f"ctx1={ctx1} ok={ctx1_ok}"
+            )
+            if entry_ok and should_send(
+                symbol,
+                f"scalp_1h_entry_{exp}",
+                event_id=event_id,
+                cooldown=CONFIG['MIN_COOLDOWN'],
+            ):
+                notify = (direction, symbol, price, bias1h, ctx1, rci10_value)
+                break
+
+    if not notify:
+        return False
+
+    direction, symbol, price, bias1h, ctx1, rci10_value = notify
+    emoji = "🟢" if direction == "LONG" else "🔴"
+    zone_label = "SURVENTE <= -80" if direction == "LONG" else "SURACHAT >= +80"
+    send_telegram_with_buttons(
+        f"{emoji} <b>SCALP 1H {direction}</b> {symbol}\n"
+        f"--------------------\n"
+        f"Price: ${format_price(price)}\n"
+        f"[OK] Bias 1H: {bias1h.upper()}\n"
+        f"[OK] RCI court 10m: {rci10_value:.1f} ({zone_label})\n"
+        f"[OK] ST Context 1m: {ctx1.upper()}\n"
+        f"Trigger: Bias 1H + RCI 10m extreme +/-80 + ST Context 1m",
+        ntfy=False,
+        priority=True,
+        symbol=symbol,
+    )
+    return True
+
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json(silent=True)
@@ -573,6 +645,7 @@ def process_webhook(data):
 
     tf_aliases = {
         '1': '1m', '1min': '1m', '1minute': '1m',
+        '60': '1h', '60m': '1h', '1hour': '1h',
         '5': '5m', '5min': '5m', '5minute': '5m',
         '10': '10m', '10min': '10m', '10minute': '10m',
         '30': '30m', '30min': '30m', '30minute': '30m',
@@ -614,6 +687,13 @@ def process_webhook(data):
             m['st_context_10m_raw'] = ctx_raw
             persist_state()
 
+        elif alert_type == 'st_context' and tf == '1m':
+            ctx_parsed, ctx_raw = parse_st_context_value(val)
+            m['st_context_1m'] = ctx_parsed
+            m['st_context_1m_ts'] = time.time()
+            m['st_context_1m_raw'] = ctx_raw
+            persist_state()
+
         elif alert_type == 'st_context' and tf == '30m':
             ctx_parsed, ctx_raw = parse_st_context_value(val)
             m['st_context_30m'] = ctx_parsed
@@ -633,10 +713,30 @@ def process_webhook(data):
             m['rci_30m_ts'] = time.time()
             persist_state()
 
+        elif alert_type == 'rci' and tf == '10m':
+            rci10 = data.get('rci10')
+            try:
+                rci10_value = float(rci10)
+            except (TypeError, ValueError):
+                logger.warning(f"[WEBHOOK] RCI 10m invalide: {symbol} rci10={rci10!r}")
+                return
+            m['rci_10m_10'] = rci10_value
+            m['rci_10m_30'] = data.get('rci30')
+            m['rci_10m_50'] = data.get('rci50')
+            m['rci_10m_dir'] = 'buy' if rci10_value <= -80 else 'sell' if rci10_value >= 80 else None
+            m['rci_10m_ts'] = time.time()
+            persist_state()
+
         elif alert_type == 'bias' and tf == '4h':
             bias_val = val if val in ('buy', 'sell') else None
             m['bias_4h'] = bias_val
             m['bias_4h_ts'] = time.time()
+            persist_state()
+
+        elif alert_type == 'bias' and tf == '1h':
+            bias_val = val if val in ('buy', 'sell') else None
+            m['bias_1h'] = bias_val
+            m['bias_1h_ts'] = time.time()
             persist_state()
 
         else:
@@ -651,6 +751,18 @@ def process_webhook(data):
             symbol,
             price=price,
             event_id=f"scalp_{symbol}_{tf}_{alert_type}_{event_id}",
+            trigger_label=f"{alert_type}_{tf}",
+        )
+
+    if symbol in SCALP_PRIMARY_SYMBOLS and (
+        (alert_type == 'st_context' and tf == '1m')
+        or (alert_type == 'bias' and tf == '1h')
+        or (alert_type == 'rci' and tf == '10m')
+    ):
+        evaluate_scalp_1h(
+            symbol,
+            price=price,
+            event_id=f"scalp1h_{symbol}_{tf}_{alert_type}_{event_id}",
             trigger_label=f"{alert_type}_{tf}",
         )
 
@@ -960,6 +1072,8 @@ def scalp_required_tv_signals():
     return [
         {'label': 'ST Context 10m', 'field': 'st_context_10m_ts', 'max_age': 45 * 60, 'warmup': 90 * 60},
         {'label': 'ST Context 30m', 'field': 'st_context_30m_ts', 'max_age': 90 * 60, 'warmup': 2 * 3600},
+        {'label': 'ST Context 1m (Scalp 1H)', 'field': 'st_context_1m_ts', 'max_age': 12 * 60, 'warmup': 20 * 60, 'scope': 'primary'},
+        {'label': 'RCI 10m (Scalp 1H)', 'field': 'rci_10m_ts', 'max_age': 45 * 60, 'warmup': 90 * 60, 'scope': 'primary'},
     ]
 
 
@@ -985,7 +1099,8 @@ def scalp_tv_signal_watchdog():
                 continue
             missing = []
             stale = []
-            for symbol in symbols:
+            req_symbols = [s for s in symbols if req.get('scope') != 'primary' or s in SCALP_PRIMARY_SYMBOLS]
+            for symbol in req_symbols:
                 ts = state_copy.get(symbol, {}).get(req['field'])
                 max_age = req['max_age']
                 if ts is None:
@@ -1032,6 +1147,32 @@ def scalp_tv_signal_watchdog():
                     ntfy=False,
                 )
                 logger.warning(f"[BIAS 4H WATCHDOG] missing={bias4h_missing} stale={bias4h_stale}")
+
+        # Bias 1H: requis uniquement par la strategie Scalp 1H sur la watchlist primaire.
+        if uptime >= 45 * 60:
+            bias1h_missing, bias1h_stale = [], []
+            for symbol in symbols:
+                if symbol not in SCALP_PRIMARY_SYMBOLS:
+                    continue
+                ts = state_copy.get(symbol, {}).get('bias_1h_ts')
+                if ts is None:
+                    bias1h_missing.append(symbol.replace('/USDT', ''))
+                elif now - float(ts) > 3 * 3600:
+                    bias1h_stale.append((symbol.replace('/USDT', ''), (now - float(ts)) / 60))
+            if (bias1h_missing or bias1h_stale) and should_send('GLOBAL', 'scalp_bias1h_watchdog', cooldown=3600):
+                details = []
+                if bias1h_missing:
+                    details.append("jamais recu: " + ", ".join(bias1h_missing))
+                if bias1h_stale:
+                    details.append("perime: " + ", ".join(f"{sym} {age:.0f}m" for sym, age in bias1h_stale))
+                send_telegram(
+                    "<b>[ALERTE] Relais Bias 1H (OKX) interrompu — Scalp 1H bloque</b>\n"
+                    "--------------------\n"
+                    + " | ".join(details)
+                    + "\n\nVerifier le cycle indicateurs / relay du bot principal.",
+                    ntfy=False,
+                )
+                logger.warning(f"[BIAS 1H WATCHDOG] missing={bias1h_missing} stale={bias1h_stale}")
 
 
 def startup():
@@ -1087,13 +1228,26 @@ def startup():
         "<b>Scalping Bot demarre</b>\n"
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
-        "Strategie unique: Bias 4H + ST Context 10m\n"
+        "SCALP: Bias 4H + ST Context 10m\n"
         "CTX 30m oppose: avertissement non bloquant\n"
         "CTX 30m aligne: alerte JACKPOT\n"
         "RCI 30m: confirmation manuelle\n"
+        "SCALP 1H (watchlist SCALP): Bias 1H + RCI 10m extreme +/-80 + CTX 1m\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
     )
+
+    if os.environ.get('PRIORITY_SCALP_BOT_TOKEN') and os.environ.get('PRIORITY_SCALP_CHAT_ID'):
+        send_notification(
+            'Scalp2H connecte',
+            "<b>Scalp2H connecte</b>\n"
+            "--------------------\n"
+            f"Strategie Scalp 1H active sur {len(SCALP_PRIMARY_SYMBOLS)} assets.\n"
+            "Bias 1H + RCI 10m extreme +/-80 + ST Context 1m.",
+            telegram=True,
+            ntfy=False,
+            telegram_channel='telegram_priority_scalp',
+        )
 
     if os.environ.get('SCALP_SECONDARY_BOT_TOKEN') and os.environ.get('SCALP_SECONDARY_CHAT_ID'):
         send_notification(
