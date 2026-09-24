@@ -548,7 +548,7 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
 
 def evaluate_scalp_1h(symbol, price=0, event_id=None, trigger_label="state_refresh"):
     """Scalp 1H, watchlist SCALP : Bias 1H + confirmation Bias 30m/CTX 10m,
-    RCI 10m extreme et CTX 1m. CTX 10m oppose bloque toujours."""
+    RCI 10m extreme et CTX 1m. CTX 10m oppose est non bloquant."""
     if symbol not in SCALP_PRIMARY_SYMBOLS:
         return False
 
@@ -573,7 +573,7 @@ def evaluate_scalp_1h(symbol, price=0, event_id=None, trigger_label="state_refre
             opposite = 'sell' if exp == 'buy' else 'buy'
             ctx10_aligned = bool(ctx10_fresh and ctx10 == exp)
             ctx10_opposite = bool(ctx10_fresh and ctx10 == opposite)
-            confirmation_ok = bool(not ctx10_opposite and (bias30_aligned or ctx10_aligned))
+            confirmation_ok = bool(bias30_aligned or ctx10_aligned)
 
             ctx1 = m.get('st_context_1m')
             ctx1_ok = is_fresh(m.get('st_context_1m_ts'), 12 * 60) and ctx1 == exp
@@ -615,15 +615,25 @@ def evaluate_scalp_1h(symbol, price=0, event_id=None, trigger_label="state_refre
     direction, symbol, price, bias1h, bias30, bias30_aligned, ctx10, ctx10_aligned, ctx1, rci10_value = notify
     emoji = "🟢" if direction == "LONG" else "🔴"
     zone_label = "SURVENTE <= -80" if direction == "LONG" else "SURACHAT >= +80"
+    confirmation_line = (
+        f"[OK] Bias 30m aligne: {bias30.upper()}"
+        if bias30_aligned
+        else f"[CONFIRMATION] Bias 30m non aligne; ST Context 10m aligne: {ctx10.upper()}"
+    )
+    ctx10_status = (
+        f"[INFO NON BLOQUANTE] ST Context 10m: {(ctx10 or 'NEUTRE').upper()}"
+    )
     send_telegram_with_buttons(
         f"{emoji} <b>SCALP 1H {direction}</b> {symbol}\n"
         f"--------------------\n"
         f"Price: ${format_price(price)}\n"
         f"[OK] Bias 1H: {bias1h.upper()}\n"
-        f"{'[OK] Bias 30m aligne: ' + bias30.upper() if bias30_aligned else '[CONFIRMATION] Bias 30m non aligne; ST Context 10m aligne: ' + ctx10.upper()}\n"
+        f"{confirmation_line}\n"
+        f"{ctx10_status}\n"
         f"[OK] RCI court 10m: {rci10_value:.1f} ({zone_label})\n"
         f"[OK] ST Context 1m: {ctx1.upper()}\n"
-        f"Trigger: Bias 1H + (Bias 30m ou CTX 10m aligne) + RCI 10m extreme +/-80 + CTX 1m",
+        f"Trigger: Bias 1H + (Bias 30m ou CTX 10m aligne) + RCI 10m extreme +/-80 + CTX 1m\n"
+        f"ST Context 10m oppose: information uniquement, jamais bloquante.",
         ntfy=False,
         priority=True,
         symbol=symbol,
@@ -1285,6 +1295,7 @@ def startup():
         "CTX 30m aligne: alerte JACKPOT\n"
         "RCI 30m: confirmation manuelle\n"
         "SCALP 1H: Bias 1H + (Bias 30m ou CTX 10m aligne) + RCI 10m +/-80 + CTX 1m\n"
+        "CTX 10m oppose: information non bloquante\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
     )
@@ -1295,7 +1306,8 @@ def startup():
             "<b>Scalp2H connecte</b>\n"
             "--------------------\n"
             f"Strategie Scalp 1H active sur {len(SCALP_PRIMARY_SYMBOLS)} assets.\n"
-            "Bias 1H + (Bias 30m ou CTX 10m aligne) + RCI 10m +/-80 + CTX 1m.",
+            "Bias 1H + (Bias 30m ou CTX 10m aligne) + RCI 10m +/-80 + CTX 1m.\n"
+            "CTX 10m oppose: information non bloquante.",
             telegram=True,
             ntfy=False,
             telegram_channel='telegram_priority_scalp',
