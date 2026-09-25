@@ -72,7 +72,7 @@ CONFIG = {
 }
 
 SCALP_PRIMARY_SYMBOLS = {
-    'BTC/USDT',
+    'BTC/USDT', 'LTC/USDT', 'LINK/USDT', 'CRV/USDT', 'HBAR/USDT',
 }
 
 PULSE_SCALP_SYMBOLS = {
@@ -147,12 +147,17 @@ def init_symbol(symbol):
         MOMENTUM_STATE[symbol] = {
             'st_context_30m': None, 'st_context_30m_ts': None, 'st_context_30m_raw': None,
             'st_context_10m': None, 'st_context_10m_ts': None, 'st_context_10m_raw': None,
+            'st_context_lt_10m': None, 'st_context_lt_10m_ts': None, 'st_context_lt_10m_raw': None,
             'st_context_1m': None, 'st_context_1m_ts': None, 'st_context_1m_raw': None,
+            'st_context_2h': None, 'st_context_2h_ts': None, 'st_context_2h_raw': None,
             'bias_4h': None, 'bias_4h_ts': None,
+            'bias_2h': None, 'bias_2h_ts': None,
             'bias_1h': None, 'bias_1h_ts': None,
             'bias_30m': None, 'bias_30m_ts': None,
             'rci_10m_10': None, 'rci_10m_30': None, 'rci_10m_50': None,
             'rci_10m_dir': None, 'rci_10m_ts': None,
+            'rci_2h_10': None, 'rci_2h_30': None, 'rci_2h_50': None,
+            'rci_2h_dir': None, 'rci_2h_chop': None, 'rci_2h_ts': None,
             'rci_30m_10': None, 'rci_30m_30': None, 'rci_30m_50': None,
             'rci_30m_dir': None, 'rci_30m_chop': None, 'rci_30m_ts': None,
         }
@@ -543,13 +548,12 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
     return True
 
 
-def evaluate_scalp_1h(symbol, price=0, event_id=None, trigger_label="state_refresh"):
-    """Scalp 1H, watchlist SCALP : Bias 1H + confirmation Bias 30m/CTX 10m,
-    RCI 10m extreme et CTX 1m. CTX 10m oppose est non bloquant."""
+def evaluate_scalp_2h(symbol, price=0, event_id=None, trigger_label="state_refresh"):
+    """Deux portes SCALP 2H, limitees a la watchlist primaire."""
     if symbol not in SCALP_PRIMARY_SYMBOLS:
         return False
 
-    notify = None
+    notifications = []
     with STATE_LOCK:
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
@@ -558,84 +562,103 @@ def evaluate_scalp_1h(symbol, price=0, event_id=None, trigger_label="state_refre
 
         for exp in ('buy', 'sell'):
             direction = 'LONG' if exp == 'buy' else 'SHORT'
-            bias1h = m.get('bias_1h')
-            bias1h_ok = is_fresh(m.get('bias_1h_ts'), 3 * 3600) and bias1h == exp
-
-            bias30 = m.get('bias_30m')
-            bias30_fresh = is_fresh(m.get('bias_30m_ts'), 90 * 60)
-            bias30_aligned = bool(bias30_fresh and bias30 == exp)
-
+            ctx2h = m.get('st_context_2h')
+            ctx2h_ok = is_fresh(m.get('st_context_2h_ts'), 6 * 3600) and ctx2h == exp
             ctx10 = m.get('st_context_10m')
-            ctx10_fresh = is_fresh(m.get('st_context_10m_ts'), 45 * 60)
-            opposite = 'sell' if exp == 'buy' else 'buy'
-            ctx10_aligned = bool(ctx10_fresh and ctx10 == exp)
-            ctx10_opposite = bool(ctx10_fresh and ctx10 == opposite)
-            confirmation_ok = bool(bias30_aligned or ctx10_aligned)
-
+            ctx10_ok = is_fresh(m.get('st_context_10m_ts'), 45 * 60) and ctx10 == exp
             ctx1 = m.get('st_context_1m')
             ctx1_ok = is_fresh(m.get('st_context_1m_ts'), 12 * 60) and ctx1 == exp
 
+            lt10 = m.get('st_context_lt_10m')
+            lt10_active = bool(
+                is_fresh(m.get('st_context_lt_10m_ts'), 45 * 60)
+                and lt10 in ('buy', 'sell')
+            )
+
+            rci2h = m.get('rci_2h_10')
             rci10 = m.get('rci_10m_10')
-            rci10_fresh = is_fresh(m.get('rci_10m_ts'), 45 * 60)
+            try:
+                rci2h_value = float(rci2h)
+            except (TypeError, ValueError):
+                rci2h_value = None
             try:
                 rci10_value = float(rci10)
             except (TypeError, ValueError):
                 rci10_value = None
+
+            rci2h_ok = bool(
+                is_fresh(m.get('rci_2h_ts'), 6 * 3600)
+                and rci2h_value is not None
+                and ((exp == 'buy' and rci2h_value <= -75) or (exp == 'sell' and rci2h_value >= 75))
+            )
             rci10_ok = bool(
-                rci10_fresh
+                is_fresh(m.get('rci_10m_ts'), 45 * 60)
                 and rci10_value is not None
-                and ((exp == 'buy' and rci10_value <= -80) or (exp == 'sell' and rci10_value >= 80))
+                and ((exp == 'buy' and rci10_value <= -75) or (exp == 'sell' and rci10_value >= 75))
             )
 
-            entry_ok = bias1h_ok and confirmation_ok and rci10_ok and ctx1_ok
+            bias2h = m.get('bias_2h')
+            bias2h_ok = is_fresh(m.get('bias_2h_ts'), 6 * 3600) and bias2h == exp
+            gate_b_ok = bool(bias2h_ok or ctx10_ok)
+
+            entry_a_ok = bool(ctx2h_ok and ctx10_ok and not lt10_active)
+            entry_b_ok = bool(gate_b_ok and rci10_ok and ctx1_ok)
             logger.info(
-                f"[SCALP1H CHECK] {symbol} {direction} src={trigger_label} entry={entry_ok} "
-                f"bias1h={bias1h} ok={bias1h_ok} bias30={bias30} aligned={bias30_aligned} "
-                f"ctx10={ctx10} aligned={ctx10_aligned} opposite={ctx10_opposite} "
-                f"confirmation={confirmation_ok} rci10m={rci10_value} ok={rci10_ok} ctx1={ctx1} ok={ctx1_ok}"
+                f"[SCALP2H CHECK] {symbol} {direction} src={trigger_label} "
+                f"A={entry_a_ok} ctx2h={ctx2h_ok} ctx10={ctx10_ok} "
+                f"rci2h_manual={rci2h_value} rci2h_aligned={rci2h_ok} lt10={lt10} "
+                f"B={entry_b_ok} bias2h={bias2h_ok} rci10={rci10_value} ctx1={ctx1_ok}"
             )
-            if entry_ok and should_send(
-                symbol,
-                f"scalp_1h_entry_{exp}",
-                event_id=event_id,
+
+            if entry_a_ok and should_send(
+                symbol, f"scalp_2h_a_{exp}", event_id=event_id,
                 cooldown=CONFIG['MIN_COOLDOWN'],
             ):
-                notify = (
-                    direction, symbol, price, bias1h, bias30, bias30_aligned,
-                    ctx10, ctx10_aligned, ctx1, rci10_value,
-                )
-                break
+                notifications.append(('A', direction, price, ctx2h, ctx10, rci2h_value, lt10, None))
 
-    if not notify:
-        return False
+            if entry_b_ok and should_send(
+                symbol, f"scalp_2h_b_{exp}", event_id=event_id,
+                cooldown=CONFIG['MIN_COOLDOWN'],
+            ):
+                notifications.append(('B', direction, price, ctx1, ctx10, rci10_value, bias2h, bias2h_ok))
 
-    direction, symbol, price, bias1h, bias30, bias30_aligned, ctx10, ctx10_aligned, ctx1, rci10_value = notify
-    emoji = "🟢" if direction == "LONG" else "🔴"
-    zone_label = "SURVENTE <= -80" if direction == "LONG" else "SURACHAT >= +80"
-    confirmation_line = (
-        f"[OK] Bias 30m aligne: {bias30.upper()}"
-        if bias30_aligned
-        else f"[CONFIRMATION] Bias 30m non aligne; ST Context 10m aligne: {ctx10.upper()}"
-    )
-    ctx10_status = (
-        f"[INFO NON BLOQUANTE] ST Context 10m: {(ctx10 or 'NEUTRE').upper()}"
-    )
-    send_telegram_with_buttons(
-        f"{emoji} <b>SCALP 1H {direction}</b> {symbol}\n"
-        f"--------------------\n"
-        f"Price: ${format_price(price)}\n"
-        f"[OK] Bias 1H: {bias1h.upper()}\n"
-        f"{confirmation_line}\n"
-        f"{ctx10_status}\n"
-        f"[OK] RCI court 10m: {rci10_value:.1f} ({zone_label})\n"
-        f"[OK] ST Context 1m: {ctx1.upper()}\n"
-        f"Trigger: Bias 1H + (Bias 30m ou CTX 10m aligne) + RCI 10m extreme +/-80 + CTX 1m\n"
-        f"ST Context 10m oppose: information uniquement, jamais bloquante.",
-        ntfy=False,
-        priority=True,
-        symbol=symbol,
-    )
-    return True
+    for gate, direction, alert_price, ctx_primary, ctx10, rci_value, extra, bias_ok in notifications:
+        emoji = "🟢" if direction == "LONG" else "🔴"
+        zone_label = "SURVENTE <= -75" if direction == "LONG" else "SURACHAT >= +75"
+        if gate == 'A':
+            rci_manual_line = (
+                f"[MANUEL NON BLOQUANT] RCI court 2H: {rci_value:.1f} - verifier la zone +/-75"
+                if rci_value is not None
+                else "[MANUEL NON BLOQUANT] RCI court 2H indisponible - verifier sur TradingView"
+            )
+            detail = (
+                f"[OK] ST Context 2H: {ctx_primary.upper()}\n"
+                f"[OK] ST Context 10m: {ctx10.upper()}\n"
+                f"{rci_manual_line}\n"
+                f"[OK] ST Context LT 10m: NEUTRE/ABSENT"
+            )
+        else:
+            gate_line = (
+                f"[OK] Bias 2H: {extra.upper()}"
+                if bias_ok
+                else f"[EXCEPTION] Bias 2H absent/non aligne; CTX 10m confirme: {ctx10.upper()}"
+            )
+            detail = (
+                f"{gate_line}\n"
+                f"[OK] RCI court 10m: {rci_value:.1f} ({zone_label})\n"
+                f"[OK] ST Context 1m: {ctx_primary.upper()}"
+            )
+        send_telegram_with_buttons(
+            f"{emoji} <b>SCALP 2H - ENTREE {gate} - {direction}</b> {symbol}\n"
+            f"--------------------\n"
+            f"Price: ${format_price(alert_price)}\n"
+            f"{detail}",
+            ntfy=False,
+            priority=True,
+            symbol=symbol,
+        )
+
+    return bool(notifications)
 
 
 @app.route('/webhook', methods=['POST'])
@@ -726,6 +749,20 @@ def process_webhook(data):
             m['st_context_30m_raw'] = ctx_raw
             persist_state()
 
+        elif alert_type == 'st_context' and tf == '2h':
+            ctx_parsed, ctx_raw = parse_st_context_value(val)
+            m['st_context_2h'] = ctx_parsed
+            m['st_context_2h_ts'] = time.time()
+            m['st_context_2h_raw'] = ctx_raw
+            persist_state()
+
+        elif alert_type == 'st_context_lt' and tf == '10m':
+            ctx_parsed, ctx_raw = parse_st_context_value(val)
+            m['st_context_lt_10m'] = ctx_parsed
+            m['st_context_lt_10m_ts'] = time.time()
+            m['st_context_lt_10m_raw'] = ctx_raw
+            persist_state()
+
         elif alert_type == 'rci' and tf == '30m':
             value = val if val in ('buy', 'sell') else 'chop'
             direction = value if value in ('buy', 'sell') else None
@@ -748,8 +785,23 @@ def process_webhook(data):
             m['rci_10m_10'] = rci10_value
             m['rci_10m_30'] = data.get('rci30')
             m['rci_10m_50'] = data.get('rci50')
-            m['rci_10m_dir'] = 'buy' if rci10_value <= -80 else 'sell' if rci10_value >= 80 else None
+            m['rci_10m_dir'] = 'buy' if rci10_value <= -75 else 'sell' if rci10_value >= 75 else None
             m['rci_10m_ts'] = time.time()
+            persist_state()
+
+        elif alert_type == 'rci' and tf == '2h':
+            rci10 = data.get('rci10')
+            try:
+                rci10_value = float(rci10)
+            except (TypeError, ValueError):
+                logger.warning(f"[WEBHOOK] RCI 2H invalide: {symbol} rci10={rci10!r}")
+                return
+            m['rci_2h_10'] = rci10_value
+            m['rci_2h_30'] = data.get('rci30')
+            m['rci_2h_50'] = data.get('rci50')
+            m['rci_2h_dir'] = 'buy' if rci10_value <= -75 else 'sell' if rci10_value >= 75 else None
+            m['rci_2h_chop'] = bool(data.get('chop', False))
+            m['rci_2h_ts'] = time.time()
             persist_state()
 
         elif alert_type == 'bias' and tf == '4h':
@@ -770,6 +822,12 @@ def process_webhook(data):
             m['bias_30m_ts'] = time.time()
             persist_state()
 
+        elif alert_type == 'bias' and tf == '2h':
+            bias_val = val if val in ('buy', 'sell') else None
+            m['bias_2h'] = bias_val
+            m['bias_2h_ts'] = time.time()
+            persist_state()
+
         else:
             return
 
@@ -788,14 +846,16 @@ def process_webhook(data):
     if symbol in SCALP_PRIMARY_SYMBOLS and (
         (alert_type == 'st_context' and tf == '1m')
         or (alert_type == 'st_context' and tf == '10m')
-        or (alert_type == 'bias' and tf == '1h')
-        or (alert_type == 'bias' and tf == '30m')
+        or (alert_type == 'st_context' and tf == '2h')
+        or (alert_type == 'st_context_lt' and tf == '10m')
+        or (alert_type == 'bias' and tf == '2h')
         or (alert_type == 'rci' and tf == '10m')
+        or (alert_type == 'rci' and tf == '2h')
     ):
-        evaluate_scalp_1h(
+        evaluate_scalp_2h(
             symbol,
             price=price,
-            event_id=f"scalp1h_{symbol}_{tf}_{alert_type}_{event_id}",
+            event_id=f"scalp2h_{symbol}_{tf}_{alert_type}_{event_id}",
             trigger_label=f"{alert_type}_{tf}",
         )
 
@@ -1105,8 +1165,10 @@ def scalp_required_tv_signals():
     return [
         {'label': 'ST Context 10m', 'field': 'st_context_10m_ts', 'max_age': 45 * 60, 'warmup': 90 * 60},
         {'label': 'ST Context 30m', 'field': 'st_context_30m_ts', 'max_age': 90 * 60, 'warmup': 2 * 3600},
-        {'label': 'ST Context 1m (Scalp 1H)', 'field': 'st_context_1m_ts', 'max_age': 12 * 60, 'warmup': 20 * 60, 'scope': 'primary'},
-        {'label': 'RCI 10m (Scalp 1H)', 'field': 'rci_10m_ts', 'max_age': 45 * 60, 'warmup': 90 * 60, 'scope': 'primary'},
+        {'label': 'ST Context 1m (Scalp 2H - entree B)', 'field': 'st_context_1m_ts', 'max_age': 12 * 60, 'warmup': 20 * 60, 'scope': 'primary'},
+        {'label': 'RCI 10m (Scalp 2H - entree B)', 'field': 'rci_10m_ts', 'max_age': 45 * 60, 'warmup': 90 * 60, 'scope': 'primary'},
+        {'label': 'ST Context 2H (Scalp 2H - entree A)', 'field': 'st_context_2h_ts', 'max_age': 6 * 3600, 'warmup': 7 * 3600, 'scope': 'primary'},
+        {'label': 'ST Context LT 10m (Scalp 2H - anti-chop)', 'field': 'st_context_lt_10m_ts', 'max_age': 45 * 60, 'warmup': 90 * 60, 'scope': 'primary'},
     ]
 
 
@@ -1181,57 +1243,34 @@ def scalp_tv_signal_watchdog():
                 )
                 logger.warning(f"[BIAS 4H WATCHDOG] missing={bias4h_missing} stale={bias4h_stale}")
 
-        # Bias 1H: requis uniquement par la strategie Scalp 1H sur la watchlist primaire.
+        # Etats 2H calcules en interne puis relayes par le bot principal.
         if uptime >= 45 * 60:
-            bias1h_missing, bias1h_stale = [], []
-            for symbol in symbols:
-                if symbol not in SCALP_PRIMARY_SYMBOLS:
-                    continue
-                ts = state_copy.get(symbol, {}).get('bias_1h_ts')
-                if ts is None:
-                    bias1h_missing.append(symbol.replace('/USDT', ''))
-                elif now - float(ts) > 3 * 3600:
-                    bias1h_stale.append((symbol.replace('/USDT', ''), (now - float(ts)) / 60))
-            if (bias1h_missing or bias1h_stale) and should_send('GLOBAL', 'scalp_bias1h_watchdog', cooldown=3600):
-                details = []
-                if bias1h_missing:
-                    details.append("jamais recu: " + ", ".join(bias1h_missing))
-                if bias1h_stale:
-                    details.append("perime: " + ", ".join(f"{sym} {age:.0f}m" for sym, age in bias1h_stale))
-                send_telegram(
-                    "<b>[ALERTE] Relais Bias 1H (OKX) interrompu — Scalp 1H bloque</b>\n"
-                    "--------------------\n"
-                    + " | ".join(details)
-                    + "\n\nVerifier le cycle indicateurs / relay du bot principal.",
-                    ntfy=False,
-                )
-                logger.warning(f"[BIAS 1H WATCHDOG] missing={bias1h_missing} stale={bias1h_stale}")
-
-        # Bias 30m: confirmation interne de la strategie Scalp 1H.
-        if uptime >= 45 * 60:
-            bias30_missing, bias30_stale = [], []
-            for symbol in symbols:
-                if symbol not in SCALP_PRIMARY_SYMBOLS:
-                    continue
-                ts = state_copy.get(symbol, {}).get('bias_30m_ts')
-                if ts is None:
-                    bias30_missing.append(symbol.replace('/USDT', ''))
-                elif now - float(ts) > 90 * 60:
-                    bias30_stale.append((symbol.replace('/USDT', ''), (now - float(ts)) / 60))
-            if (bias30_missing or bias30_stale) and should_send('GLOBAL', 'scalp_bias30m_watchdog', cooldown=3600):
-                details = []
-                if bias30_missing:
-                    details.append("jamais recu: " + ", ".join(bias30_missing))
-                if bias30_stale:
-                    details.append("perime: " + ", ".join(f"{sym} {age:.0f}m" for sym, age in bias30_stale))
-                send_telegram(
-                    "<b>[ALERTE] Relais Bias 30m (OKX) interrompu — Scalp 1H degrade</b>\n"
-                    "--------------------\n"
-                    + " | ".join(details)
-                    + "\n\nLe CTX 10m aligne peut toujours confirmer l'entree.",
-                    ntfy=False,
-                )
-                logger.warning(f"[BIAS 30m WATCHDOG] missing={bias30_missing} stale={bias30_stale}")
+            for label, field, max_age, alert_key in (
+                ('Bias 2H', 'bias_2h_ts', 6 * 3600, 'scalp_bias2h_watchdog'),
+            ):
+                missing, stale = [], []
+                for symbol in symbols:
+                    if symbol not in SCALP_PRIMARY_SYMBOLS:
+                        continue
+                    ts = state_copy.get(symbol, {}).get(field)
+                    if ts is None:
+                        missing.append(symbol.replace('/USDT', ''))
+                    elif now - float(ts) > max_age:
+                        stale.append((symbol.replace('/USDT', ''), (now - float(ts)) / 60))
+                if (missing or stale) and should_send('GLOBAL', alert_key, cooldown=3600):
+                    details = []
+                    if missing:
+                        details.append("jamais recu: " + ", ".join(missing))
+                    if stale:
+                        details.append("perime: " + ", ".join(f"{sym} {age:.0f}m" for sym, age in stale))
+                    send_telegram(
+                        f"<b>[ALERTE] Relais {label} (OKX) interrompu — Scalp 2H degrade</b>\n"
+                        "--------------------\n"
+                        + " | ".join(details)
+                        + "\n\nVerifier le cycle indicateurs / relay du bot principal.",
+                        ntfy=False,
+                    )
+                    logger.warning(f"[{label.upper()} WATCHDOG] missing={missing} stale={stale}")
 
 
 def startup():
@@ -1291,8 +1330,8 @@ def startup():
         "CTX 30m oppose: avertissement non bloquant\n"
         "CTX 30m aligne: alerte JACKPOT\n"
         "RCI 30m: confirmation manuelle\n"
-        "SCALP 1H: Bias 1H + (Bias 30m ou CTX 10m aligne) + RCI 10m +/-80 + CTX 1m\n"
-        "CTX 10m oppose: information non bloquante\n"
+        "SCALP 2H A: CTX 2H + CTX 10m; veto si CTX LT 10m actif; RCI 2H manuel\n"
+        "SCALP 2H B: (Bias 2H ou CTX 10m aligne) + RCI 10m +/-75 + CTX 1m\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
     )
@@ -1302,9 +1341,9 @@ def startup():
             'Scalp2H connecte',
             "<b>Scalp2H connecte</b>\n"
             "--------------------\n"
-            f"Strategie Scalp 1H active sur {len(SCALP_PRIMARY_SYMBOLS)} assets.\n"
-            "Bias 1H + (Bias 30m ou CTX 10m aligne) + RCI 10m +/-80 + CTX 1m.\n"
-            "CTX 10m oppose: information non bloquante.",
+            f"Strategie Scalp 2H active sur {len(SCALP_PRIMARY_SYMBOLS)} assets.\n"
+            "A: CTX 2H + CTX 10m; veto CTX LT 10m; RCI 2H manuel.\n"
+            "B: (Bias 2H ou CTX 10m aligne) + RCI 10m +/-75 + CTX 1m.",
             telegram=True,
             ntfy=False,
             telegram_channel='telegram_priority_scalp',
