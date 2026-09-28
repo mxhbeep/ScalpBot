@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot — strategie unique : Bias 4H + ST Context 10m.
-# ST Context 30m est non bloquant : oppose = avertissement, aligne = JACKPOT.
+# Scalping Bot : A=Bias 2H+CTX 10m, B=Bias 4H+CTX 30m.
+# JACKPOT=A avec CTX 30m aligne. ntfy est reserve a A et JACKPOT.
 # RCI 30m est affiche comme confirmation manuelle uniquement.
 
 import json
@@ -474,7 +474,7 @@ def send_telegram_with_buttons(msg, ntfy=False, priority=False, symbol=None):
 
 
 def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"):
-    """SCALP : A=Bias 2H+CTX 10m, B=Bias 4H+Bias 30m.
+    """SCALP : A=Bias 2H+CTX 10m, B=Bias 4H+CTX 30m.
     JACKPOT=A avec CTX 30m aligne. RCI 2H reste manuel et non bloquant."""
     notifications = []
     with STATE_LOCK:
@@ -490,8 +490,6 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
             bias2h_ok = is_fresh(m.get('bias_2h_ts'), 6 * 3600) and bias2h == exp
             bias4h = m.get('bias_4h')
             bias4h_ok = is_fresh(m.get('bias_4h_ts'), 10 * 3600) and bias4h == exp
-            bias30 = m.get('bias_30m')
-            bias30_ok = is_fresh(m.get('bias_30m_ts'), 90 * 60) and bias30 == exp
             ctx10 = m.get('st_context_10m')
             ctx10_ok = is_fresh(m.get('st_context_10m_ts'), 45 * 60) and ctx10 == exp
             ctx30 = m.get('st_context_30m')
@@ -510,12 +508,12 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
             )
 
             entry_a_ok = bool(bias2h_ok and ctx10_ok)
-            entry_b_ok = bool(bias4h_ok and bias30_ok)
+            entry_b_ok = bool(bias4h_ok and ctx30_aligned)
             jackpot = bool(entry_a_ok and ctx30_aligned)
             logger.info(
                 f"[SCALP CHECK] {symbol} {direction} src={trigger_label} "
                 f"A={entry_a_ok} bias2h={bias2h}/{bias2h_ok} ctx10={ctx10}/{ctx10_ok} "
-                f"B={entry_b_ok} bias4h={bias4h}/{bias4h_ok} bias30={bias30}/{bias30_ok} "
+                f"B={entry_b_ok} bias4h={bias4h}/{bias4h_ok} ctx30={ctx30}/{ctx30_aligned} "
                 f"jackpot={jackpot} ctx30={ctx30}/{ctx30_aligned} "
                 f"rci2h_manual={rci2h_value} aligned={rci2h_aligned}"
             )
@@ -524,7 +522,7 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
                 if should_send(symbol, f"scalp_{kind.lower()}_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
                     notifications.append((kind, direction, price, bias2h, ctx10, ctx30, rci2h_value, rci2h_fresh, rci2h_aligned))
             if entry_b_ok and should_send(symbol, f"scalp_b_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
-                notifications.append(('B', direction, price, bias4h, bias30, ctx30, rci2h_value, rci2h_fresh, rci2h_aligned))
+                notifications.append(('B', direction, price, bias4h, ctx30, ctx30, rci2h_value, rci2h_fresh, rci2h_aligned))
 
     for gate, direction, alert_price, primary, secondary, ctx30, rci_value, rci_fresh, rci_aligned in notifications:
         emoji = "🟢" if direction == "LONG" else "🔴"
@@ -543,14 +541,14 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
         else:
             detail = (
                 f"[OK] Bias 4H: {primary.upper()}\n"
-                f"[OK] Bias 30m: {secondary.upper()}\n"
+                f"[OK] ST Context 30m: {secondary.upper()}\n"
             )
         send_telegram_with_buttons(
             f"{emoji} <b>SCALP {'JACKPOT' if gate == 'JACKPOT' else 'ENTREE ' + gate} - {direction}</b> {symbol}\n"
             f"--------------------\n"
             f"Price: ${format_price(alert_price)}\n"
             f"{detail}{rci_line}",
-            ntfy=False,
+            ntfy=gate in ('A', 'JACKPOT'),
             symbol=symbol,
         )
 
@@ -877,13 +875,11 @@ def debug_symbol():
         m = dict(MOMENTUM_STATE.get(symbol, {}))
         ctx10m = signal_debug_payload(m, 'st_context_10m', 45 * 60)
         ctx30m = signal_debug_payload(m, 'st_context_30m', 90 * 60)
-        bias30m_fresh = is_fresh(m.get('bias_30m_ts'), 90 * 60)
         bias2h_fresh = is_fresh(m.get('bias_2h_ts'), 6 * 3600)
         bias4h_fresh = is_fresh(m.get('bias_4h_ts'), 10 * 3600)
         rci2h_fresh = is_fresh(m.get('rci_2h_ts'), 6 * 3600)
         checks = {}
         for exp in ('buy', 'sell'):
-            bias30_ok = bool(bias30m_fresh and m.get('bias_30m') == exp)
             bias2h_ok = bool(bias2h_fresh and m.get('bias_2h') == exp)
             bias4h_ok = bool(bias4h_fresh and m.get('bias_4h') == exp)
             ctx10_ok = bool(ctx10m['fresh'] and ctx10m['value'] == exp)
@@ -898,8 +894,7 @@ def debug_symbol():
                 'ctx10m_ok': ctx10_ok,
                 'entry_a_ok': bias2h_ok and ctx10_ok,
                 'bias4h_ok': bias4h_ok,
-                'bias30m_ok': bias30_ok,
-                'entry_b_ok': bias4h_ok and bias30_ok,
+                'entry_b_ok': bias4h_ok and ctx30_ok,
                 'ctx30m_ok': ctx30_ok,
                 'jackpot': bias2h_ok and ctx10_ok and ctx30_ok,
                 'rci2h_manual_aligned': rci2h_aligned,
@@ -917,7 +912,6 @@ def debug_symbol():
                 'st_context_10m': ctx10m,
                 'st_context_30m': ctx30m,
                 'bias_4h': {'value': m.get('bias_4h'), 'ts': m.get('bias_4h_ts'), 'fresh': bias4h_fresh},
-                'bias_30m': {'value': m.get('bias_30m'), 'ts': m.get('bias_30m_ts'), 'fresh': bias30m_fresh},
                 'bias_2h': {'value': m.get('bias_2h'), 'ts': m.get('bias_2h_ts'), 'fresh': bias2h_fresh},
                 'rci_2h': {
                     '10': m.get('rci_2h_10'), '30': m.get('rci_2h_30'), '50': m.get('rci_2h_50'),
@@ -1060,7 +1054,6 @@ def scalp_tv_signal_watchdog():
             for label, field, max_age, alert_key in (
                 ('Bias 2H', 'bias_2h_ts', 6 * 3600, 'scalp_bias2h_watchdog'),
                 ('Bias 4H', 'bias_4h_ts', 10 * 3600, 'scalp_bias4h_watchdog'),
-                ('Bias 30m', 'bias_30m_ts', 90 * 60, 'scalp_bias30m_watchdog'),
             ):
                 missing, stale = [], []
                 for symbol in symbols:
@@ -1139,7 +1132,7 @@ def startup():
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         "SCALP A: Bias 2H + ST Context 10m\n"
-        "SCALP B: Bias 4H + Bias 30m\n"
+        "SCALP B: Bias 4H + ST Context 30m\n"
         "JACKPOT: Bias 2H + ST Context 30m + ST Context 10m\n"
         "RCI 2H: confirmation manuelle non bloquante\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
