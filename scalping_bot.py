@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Scalping Bot : A=Bias 2H+CTX 10m, B=Bias 4H+CTX 30m.
-# JACKPOT=A avec CTX 30m aligne. ntfy est reserve a A et JACKPOT.
+# JACKPOT=Bias 4H+CTX 10m+CTX 30m. ntfy est reserve a A et JACKPOT.
 # RCI 30m est affiche comme confirmation manuelle uniquement.
 
 import json
@@ -475,7 +475,7 @@ def send_telegram_with_buttons(msg, ntfy=False, priority=False, symbol=None):
 
 def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"):
     """SCALP : A=Bias 2H+CTX 10m, B=Bias 4H+CTX 30m.
-    JACKPOT=A avec CTX 30m aligne. RCI 2H reste manuel et non bloquant."""
+    JACKPOT=Bias 4H+CTX 10m+CTX 30m. RCI 2H reste manuel et non bloquant."""
     notifications = []
     with STATE_LOCK:
         init_symbol(symbol)
@@ -509,7 +509,7 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
 
             entry_a_ok = bool(bias2h_ok and ctx10_ok)
             entry_b_ok = bool(bias4h_ok and ctx30_aligned)
-            jackpot = bool(entry_a_ok and ctx30_aligned)
+            jackpot = bool(bias4h_ok and ctx10_ok and ctx30_aligned)
             logger.info(
                 f"[SCALP CHECK] {symbol} {direction} src={trigger_label} "
                 f"A={entry_a_ok} bias2h={bias2h}/{bias2h_ok} ctx10={ctx10}/{ctx10_ok} "
@@ -517,11 +517,12 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
                 f"jackpot={jackpot} ctx30={ctx30}/{ctx30_aligned} "
                 f"rci2h_manual={rci2h_value} aligned={rci2h_aligned}"
             )
-            if entry_a_ok:
-                kind = 'JACKPOT' if jackpot else 'A'
-                if should_send(symbol, f"scalp_{kind.lower()}_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
-                    notifications.append((kind, direction, price, bias2h, ctx10, ctx30, rci2h_value, rci2h_fresh, rci2h_aligned))
-            if entry_b_ok and should_send(symbol, f"scalp_b_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
+            if jackpot:
+                if should_send(symbol, f"scalp_jackpot_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
+                    notifications.append(('JACKPOT', direction, price, bias4h, ctx10, ctx30, rci2h_value, rci2h_fresh, rci2h_aligned))
+            elif entry_a_ok and should_send(symbol, f"scalp_a_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
+                notifications.append(('A', direction, price, bias2h, ctx10, ctx30, rci2h_value, rci2h_fresh, rci2h_aligned))
+            if entry_b_ok and not jackpot and should_send(symbol, f"scalp_b_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
                 notifications.append(('B', direction, price, bias4h, ctx30, ctx30, rci2h_value, rci2h_fresh, rci2h_aligned))
 
     for gate, direction, alert_price, primary, secondary, ctx30, rci_value, rci_fresh, rci_aligned in notifications:
@@ -531,13 +532,17 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
             rci_line = f"[MANUEL NON BLOQUANT] RCI court 2H: {rci_value:.1f} ({rci_status}, seuil +/-75)"
         else:
             rci_line = "[MANUEL NON BLOQUANT] RCI court 2H indisponible/non frais"
-        if gate in ('A', 'JACKPOT'):
+        if gate == 'A':
             detail = (
                 f"[OK] Bias 2H: {primary.upper()}\n"
                 f"[OK] ST Context 10m: {secondary.upper()}\n"
             )
-            if gate == 'JACKPOT':
-                detail += f"[JACKPOT] ST Context 30m aligne: {ctx30.upper()}\n"
+        elif gate == 'JACKPOT':
+            detail = (
+                f"[JACKPOT] Bias 4H: {primary.upper()}\n"
+                f"[OK] ST Context 10m: {secondary.upper()}\n"
+                f"[OK] ST Context 30m: {ctx30.upper()}\n"
+            )
         else:
             detail = (
                 f"[OK] Bias 4H: {primary.upper()}\n"
@@ -896,7 +901,7 @@ def debug_symbol():
                 'bias4h_ok': bias4h_ok,
                 'entry_b_ok': bias4h_ok and ctx30_ok,
                 'ctx30m_ok': ctx30_ok,
-                'jackpot': bias2h_ok and ctx10_ok and ctx30_ok,
+                'jackpot': bias4h_ok and ctx10_ok and ctx30_ok,
                 'rci2h_manual_aligned': rci2h_aligned,
             }
         return jsonify({
@@ -1133,7 +1138,7 @@ def startup():
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         "SCALP A: Bias 2H + ST Context 10m\n"
         "SCALP B: Bias 4H + ST Context 30m\n"
-        "JACKPOT: Bias 2H + ST Context 30m + ST Context 10m\n"
+        "JACKPOT: Bias 4H + ST Context 30m + ST Context 10m\n"
         "RCI 2H: confirmation manuelle non bloquante\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
