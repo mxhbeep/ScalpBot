@@ -147,6 +147,7 @@ def init_symbol(symbol):
             'st_context_1m': None, 'st_context_1m_ts': None, 'st_context_1m_raw': None,
             'st_context_2h': None, 'st_context_2h_ts': None, 'st_context_2h_raw': None,
             'bias_4h': None, 'bias_4h_ts': None,
+            'bias_1d': None, 'bias_1d_ts': None,
             'bias_2h': None, 'bias_2h_ts': None,
             'bias_1h': None, 'bias_1h_ts': None,
             'bias_30m': None, 'bias_30m_ts': None,
@@ -474,7 +475,7 @@ def send_telegram_with_buttons(msg, ntfy=False, priority=False, symbol=None):
 
 
 def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"):
-    """SCALP : A=Bias 2H+CTX 10m, B=Bias 4H+CTX 30m.
+    """SCALP filtre par Bias 1D : A=Bias 2H+CTX 10m, B=Bias 4H+CTX 30m.
     JACKPOT=Bias 4H+CTX 10m+CTX 30m. RCI 2H reste manuel et non bloquant."""
     notifications = []
     with STATE_LOCK:
@@ -486,6 +487,8 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
 
         for exp in ('buy', 'sell'):
             direction = 'LONG' if exp == 'buy' else 'SHORT'
+            bias1d = m.get('bias_1d')
+            bias1d_ok = is_fresh(m.get('bias_1d_ts'), 3 * 24 * 3600) and bias1d == exp
             bias2h = m.get('bias_2h')
             bias2h_ok = is_fresh(m.get('bias_2h_ts'), 6 * 3600) and bias2h == exp
             bias4h = m.get('bias_4h')
@@ -507,11 +510,12 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
                 and ((exp == 'buy' and rci2h_value <= -75) or (exp == 'sell' and rci2h_value >= 75))
             )
 
-            entry_a_ok = bool(bias2h_ok and ctx10_ok)
-            entry_b_ok = bool(bias4h_ok and ctx30_aligned)
-            jackpot = bool(bias4h_ok and ctx10_ok and ctx30_aligned)
+            entry_a_ok = bool(bias1d_ok and bias2h_ok and ctx10_ok)
+            entry_b_ok = bool(bias1d_ok and bias4h_ok and ctx30_aligned)
+            jackpot = bool(bias1d_ok and bias4h_ok and ctx10_ok and ctx30_aligned)
             logger.info(
                 f"[SCALP CHECK] {symbol} {direction} src={trigger_label} "
+                f"bias1d={bias1d}/{bias1d_ok} "
                 f"A={entry_a_ok} bias2h={bias2h}/{bias2h_ok} ctx10={ctx10}/{ctx10_ok} "
                 f"B={entry_b_ok} bias4h={bias4h}/{bias4h_ok} ctx30={ctx30}/{ctx30_aligned} "
                 f"jackpot={jackpot} ctx30={ctx30}/{ctx30_aligned} "
@@ -534,17 +538,20 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
             rci_line = "[MANUEL NON BLOQUANT] RCI court 2H indisponible/non frais"
         if gate == 'A':
             detail = (
+                f"[FILTRE OK] Bias 1D: {direction}\n"
                 f"[OK] Bias 2H: {primary.upper()}\n"
                 f"[OK] ST Context 10m: {secondary.upper()}\n"
             )
         elif gate == 'JACKPOT':
             detail = (
+                f"[FILTRE OK] Bias 1D: {direction}\n"
                 f"[JACKPOT] Bias 4H: {primary.upper()}\n"
                 f"[OK] ST Context 10m: {secondary.upper()}\n"
                 f"[OK] ST Context 30m: {ctx30.upper()}\n"
             )
         else:
             detail = (
+                f"[FILTRE OK] Bias 1D: {direction}\n"
                 f"[OK] Bias 4H: {primary.upper()}\n"
                 f"[OK] ST Context 30m: {secondary.upper()}\n"
             )
@@ -709,6 +716,12 @@ def process_webhook(data):
             m['bias_4h_ts'] = time.time()
             persist_state()
 
+        elif alert_type == 'bias' and tf == '1d':
+            bias_val = val if val in ('buy', 'sell') else None
+            m['bias_1d'] = bias_val
+            m['bias_1d_ts'] = time.time()
+            persist_state()
+
         elif alert_type == 'bias' and tf == '1h':
             bias_val = val if val in ('buy', 'sell') else None
             m['bias_1h'] = bias_val
@@ -732,7 +745,7 @@ def process_webhook(data):
 
     if (
         (alert_type == 'st_context' and tf in ('10m', '30m'))
-        or (alert_type == 'bias' and tf in ('30m', '2h', '4h'))
+        or (alert_type == 'bias' and tf in ('30m', '2h', '4h', '1d'))
         or (alert_type == 'rci' and tf == '2h')
     ):
         evaluate_scalp(
@@ -880,11 +893,13 @@ def debug_symbol():
         m = dict(MOMENTUM_STATE.get(symbol, {}))
         ctx10m = signal_debug_payload(m, 'st_context_10m', 45 * 60)
         ctx30m = signal_debug_payload(m, 'st_context_30m', 90 * 60)
+        bias1d_fresh = is_fresh(m.get('bias_1d_ts'), 3 * 24 * 3600)
         bias2h_fresh = is_fresh(m.get('bias_2h_ts'), 6 * 3600)
         bias4h_fresh = is_fresh(m.get('bias_4h_ts'), 10 * 3600)
         rci2h_fresh = is_fresh(m.get('rci_2h_ts'), 6 * 3600)
         checks = {}
         for exp in ('buy', 'sell'):
+            bias1d_ok = bool(bias1d_fresh and m.get('bias_1d') == exp)
             bias2h_ok = bool(bias2h_fresh and m.get('bias_2h') == exp)
             bias4h_ok = bool(bias4h_fresh and m.get('bias_4h') == exp)
             ctx10_ok = bool(ctx10m['fresh'] and ctx10m['value'] == exp)
@@ -895,13 +910,14 @@ def debug_symbol():
                 and ((exp == 'buy' and float(rci2h_short) <= -75) or (exp == 'sell' and float(rci2h_short) >= 75))
             )
             checks[exp] = {
+                'bias1d_ok': bias1d_ok,
                 'bias2h_ok': bias2h_ok,
                 'ctx10m_ok': ctx10_ok,
-                'entry_a_ok': bias2h_ok and ctx10_ok,
+                'entry_a_ok': bias1d_ok and bias2h_ok and ctx10_ok,
                 'bias4h_ok': bias4h_ok,
-                'entry_b_ok': bias4h_ok and ctx30_ok,
+                'entry_b_ok': bias1d_ok and bias4h_ok and ctx30_ok,
                 'ctx30m_ok': ctx30_ok,
-                'jackpot': bias4h_ok and ctx10_ok and ctx30_ok,
+                'jackpot': bias1d_ok and bias4h_ok and ctx10_ok and ctx30_ok,
                 'rci2h_manual_aligned': rci2h_aligned,
             }
         return jsonify({
@@ -914,6 +930,7 @@ def debug_symbol():
                 'short': checks['sell'],
             },
             'signals': {
+                'bias_1d': {'value': m.get('bias_1d'), 'ts': m.get('bias_1d_ts'), 'fresh': bias1d_fresh},
                 'st_context_10m': ctx10m,
                 'st_context_30m': ctx30m,
                 'bias_4h': {'value': m.get('bias_4h'), 'ts': m.get('bias_4h_ts'), 'fresh': bias4h_fresh},
@@ -1057,6 +1074,7 @@ def scalp_tv_signal_watchdog():
         # Bias bloquants calcules en interne puis relayes par le bot principal.
         if uptime >= 45 * 60:
             for label, field, max_age, alert_key in (
+                ('Bias 1D', 'bias_1d_ts', 3 * 24 * 3600, 'scalp_bias1d_watchdog'),
                 ('Bias 2H', 'bias_2h_ts', 6 * 3600, 'scalp_bias2h_watchdog'),
                 ('Bias 4H', 'bias_4h_ts', 10 * 3600, 'scalp_bias4h_watchdog'),
             ):
@@ -1074,7 +1092,7 @@ def scalp_tv_signal_watchdog():
                     if stale:
                         details.append("perime: " + ", ".join(f"{sym} {age:.0f}m" for sym, age in stale))
                     send_telegram(
-                        f"<b>[ALERTE] Relais {label} (OKX) interrompu — SCALP degrade</b>\n"
+                        f"<b>[ALERTE] Relais {label} (mainbot) interrompu — SCALP bloque/degrade</b>\n"
                         "--------------------\n"
                         + " | ".join(details)
                         + "\n\nVerifier le cycle indicateurs / relay du bot principal.",
@@ -1136,9 +1154,10 @@ def startup():
         "<b>Scalping Bot demarre</b>\n"
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
-        "SCALP A: Bias 2H + ST Context 10m\n"
-        "SCALP B: Bias 4H + ST Context 30m\n"
-        "JACKPOT: Bias 4H + ST Context 30m + ST Context 10m\n"
+        "FILTRE COMMUN: Bias 1D aligne obligatoire\n"
+        "SCALP A: Bias 1D + Bias 2H + ST Context 10m\n"
+        "SCALP B: Bias 1D + Bias 4H + ST Context 30m\n"
+        "JACKPOT: Bias 1D + Bias 4H + ST Context 30m + ST Context 10m\n"
         "RCI 2H: confirmation manuelle non bloquante\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
