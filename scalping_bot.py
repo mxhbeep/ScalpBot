@@ -29,6 +29,7 @@ CONFIG = {
     'REDIS_URL': os.environ.get('REDIS_URL', ''),
     'NTFY_TOPIC': os.environ.get('NTFY_TOPIC', ''),
     'MIN_COOLDOWN': 1800,
+    'ENABLE_SCALP_A': os.environ.get('ENABLE_SCALP_A', '0') == '1',
     'SYMBOLS': {
         'AAVE/USDT': {'exchange': 'okx'},
         'ADA/USDT': {'exchange': 'okx'},
@@ -510,7 +511,7 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
                 and ((exp == 'buy' and rci2h_value <= -75) or (exp == 'sell' and rci2h_value >= 75))
             )
 
-            entry_a_ok = bool(bias1d_ok and bias2h_ok and ctx10_ok)
+            entry_a_ok = bool(CONFIG['ENABLE_SCALP_A'] and bias1d_ok and bias2h_ok and ctx10_ok)
             entry_b_ok = bool(bias1d_ok and bias4h_ok and ctx30_aligned)
             jackpot = bool(bias1d_ok and bias4h_ok and ctx10_ok and ctx30_aligned)
             logger.info(
@@ -1155,7 +1156,7 @@ def startup():
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         "FILTRE COMMUN: Bias 1D aligne obligatoire\n"
-        "SCALP A: Bias 1D + Bias 2H + ST Context 10m\n"
+        "SCALP A: EN PAUSE (Bias 1D + Bias 2H + ST Context 10m)\n"
         "SCALP B: Bias 1D + Bias 4H + ST Context 30m\n"
         "JACKPOT: Bias 1D + Bias 4H + ST Context 30m + ST Context 10m\n"
         "RCI 2H: confirmation manuelle non bloquante\n"
