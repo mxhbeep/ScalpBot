@@ -1076,7 +1076,6 @@ def scalp_tv_signal_watchdog():
         if uptime >= 45 * 60:
             for label, field, max_age, alert_key in (
                 ('Bias 1D', 'bias_1d_ts', 3 * 24 * 3600, 'scalp_bias1d_watchdog'),
-                ('Bias 2H', 'bias_2h_ts', 6 * 3600, 'scalp_bias2h_watchdog'),
                 ('Bias 4H', 'bias_4h_ts', 10 * 3600, 'scalp_bias4h_watchdog'),
             ):
                 missing, stale = [], []
