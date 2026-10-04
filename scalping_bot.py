@@ -29,7 +29,7 @@ CONFIG = {
     'REDIS_URL': os.environ.get('REDIS_URL', ''),
     'NTFY_TOPIC': os.environ.get('NTFY_TOPIC', ''),
     'MIN_COOLDOWN': 1800,
-    'ENABLE_SCALP_A': os.environ.get('ENABLE_SCALP_A', '0') == '1',
+    'ENABLE_SCALP_A': os.environ.get('ENABLE_SCALP_A', '1') == '1',
     'SYMBOLS': {
         'AAVE/USDT': {'exchange': 'okx'},
         'ADA/USDT': {'exchange': 'okx'},
@@ -77,6 +77,11 @@ PULSE_SCALP_SYMBOLS = {
     'CVX/USDT', 'DASH/USDT', 'ETHFI/USDT', 'FARTCOIN/USDT', 'FET/USDT',
     'FIL/USDT', 'HBAR/USDT', 'INJ/USDT',
     'PEPE/USDT', 'RENDER/USDT', 'USELESS/USDT', 'XPL/USDT', 'ZEN/USDT',
+}
+
+SCALP_A_SYMBOLS = {
+    'BTC/USDT', 'ETH/USDT', 'XRP/USDT', 'CRV/USDT',
+    'HBAR/USDT', 'LINK/USDT', 'LTC/USDT',
 }
 
 STATE_LOCK = threading.RLock()
@@ -511,7 +516,11 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
                 and ((exp == 'buy' and rci2h_value <= -75) or (exp == 'sell' and rci2h_value >= 75))
             )
 
-            entry_a_ok = bool(CONFIG['ENABLE_SCALP_A'] and bias1d_ok and bias2h_ok and ctx10_ok)
+            entry_a_ok = bool(
+                CONFIG['ENABLE_SCALP_A']
+                and symbol in SCALP_A_SYMBOLS
+                and bias1d_ok and bias2h_ok and ctx10_ok
+            )
             entry_b_ok = bool(bias1d_ok and bias4h_ok and ctx30_aligned)
             jackpot = bool(bias1d_ok and bias4h_ok and ctx10_ok and ctx30_aligned)
             logger.info(
@@ -914,7 +923,12 @@ def debug_symbol():
                 'bias1d_ok': bias1d_ok,
                 'bias2h_ok': bias2h_ok,
                 'ctx10m_ok': ctx10_ok,
-                'entry_a_ok': bias1d_ok and bias2h_ok and ctx10_ok,
+                'scalp_a_eligible': symbol in SCALP_A_SYMBOLS,
+                'entry_a_ok': bool(
+                    CONFIG['ENABLE_SCALP_A']
+                    and symbol in SCALP_A_SYMBOLS
+                    and bias1d_ok and bias2h_ok and ctx10_ok
+                ),
                 'bias4h_ok': bias4h_ok,
                 'entry_b_ok': bias1d_ok and bias4h_ok and ctx30_ok,
                 'ctx30m_ok': ctx30_ok,
@@ -1074,12 +1088,14 @@ def scalp_tv_signal_watchdog():
 
         # Bias bloquants calcules en interne puis relayes par le bot principal.
         if uptime >= 45 * 60:
-            for label, field, max_age, alert_key in (
-                ('Bias 1D', 'bias_1d_ts', 3 * 24 * 3600, 'scalp_bias1d_watchdog'),
-                ('Bias 4H', 'bias_4h_ts', 10 * 3600, 'scalp_bias4h_watchdog'),
+            for label, field, max_age, alert_key, required_symbols in (
+                ('Bias 1D', 'bias_1d_ts', 3 * 24 * 3600, 'scalp_bias1d_watchdog', symbols),
+                ('Bias 2H', 'bias_2h_ts', 6 * 3600, 'scalp_bias2h_watchdog',
+                 [symbol for symbol in symbols if symbol in SCALP_A_SYMBOLS]),
+                ('Bias 4H', 'bias_4h_ts', 10 * 3600, 'scalp_bias4h_watchdog', symbols),
             ):
                 missing, stale = [], []
-                for symbol in symbols:
+                for symbol in required_symbols:
                     ts = state_copy.get(symbol, {}).get(field)
                     if ts is None:
                         missing.append(symbol.replace('/USDT', ''))
@@ -1155,7 +1171,8 @@ def startup():
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         "FILTRE COMMUN: Bias 1D aligne obligatoire\n"
-        "SCALP A: EN PAUSE (Bias 1D + Bias 2H + ST Context 10m)\n"
+        "SCALP A: ACTIF sur BTC, ETH, XRP, CRV, HBAR, LINK, LTC\n"
+        "Conditions A: Bias 1D + Bias 2H + ST Context 10m\n"
         "SCALP B: Bias 1D + Bias 4H + ST Context 30m\n"
         "JACKPOT: Bias 1D + Bias 4H + ST Context 30m + ST Context 10m\n"
         "RCI 2H: confirmation manuelle non bloquante\n"
