@@ -88,7 +88,7 @@ STATE_LOCK = threading.RLock()
 MOMENTUM_STATE = {}
 LAST_SIGNALS = {}
 LAST_SIGNAL_EVENTS = {}
-SCALP_ENABLED = True
+SCALP_ENABLED = False
 WATCHDOG_EXCLUDED_SYMBOLS = {'CVX/USDT'}
 REDIS_CLIENT = None
 
@@ -1118,8 +1118,13 @@ def scalp_tv_signal_watchdog():
 
 
 def startup():
+    global SCALP_ENABLED
     init_redis()
     load_state()
+    # Pause explicite demandee: l'ancien etat Redis ne doit pas reactiver les alertes au redeploiement.
+    with STATE_LOCK:
+        SCALP_ENABLED = False
+        persist_state()
     tok = os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
     base_url = os.environ.get('SCALP_PUBLIC_URL', '').rstrip('/')
     if base_url and not base_url.startswith(('https://', 'http://')):
@@ -1170,11 +1175,12 @@ def startup():
         "<b>Scalping Bot demarre</b>\n"
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
+        "STRATEGIES SCALP: EN PAUSE\n"
         "FILTRE COMMUN: Bias 1D aligne obligatoire\n"
-        "SCALP A: ACTIF sur BTC, ETH, XRP, CRV, HBAR, LINK, LTC\n"
+        "SCALP A: en pause sur BTC, ETH, XRP, CRV, HBAR, LINK, LTC\n"
         "Conditions A: Bias 1D + Bias 2H + ST Context 10m\n"
-        "SCALP B: Bias 1D + Bias 4H + ST Context 30m\n"
-        "JACKPOT: Bias 1D + Bias 4H + ST Context 30m + ST Context 10m\n"
+        "SCALP B: en pause - Bias 1D + Bias 4H + ST Context 30m\n"
+        "JACKPOT: en pause - Bias 1D + Bias 4H + ST Context 30m + ST Context 10m\n"
         "RCI 2H: confirmation manuelle non bloquante\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
