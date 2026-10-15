@@ -154,6 +154,9 @@ def init_symbol(symbol):
             'bias_1h': None, 'bias_1h_ts': None,
             'bias_30m': None, 'bias_30m_ts': None,
             'zalt_12h': None, 'zalt_12h_ts': None,
+            'zalt_30m': None, 'zalt_30m_ts': None,
+            'last_zalt_30m_flip_dir': None, 'last_zalt_30m_flip_ts': None,
+            'scalp_b_armed_dir': None, 'scalp_b_armed_ts': None,
             'rci_10m_10': None, 'rci_10m_30': None, 'rci_10m_50': None,
             'rci_10m_dir': None, 'rci_10m_ts': None,
             'rci_2h_10': None, 'rci_2h_30': None, 'rci_2h_50': None,
@@ -478,8 +481,9 @@ def send_telegram_with_buttons(msg, ntfy=False, priority=False, symbol=None):
 
 
 def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"):
-    """SCALP B: ZALT 12H + Bias 4H + ST Context 30m, watchlist Scalp seulement."""
+    """SCALP B: PREP HTF, puis entree sur flip ZALT 30m aligne."""
     notifications = []
+    state_changed = False
     with STATE_LOCK:
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
@@ -498,30 +502,68 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
             ctx30_aligned = bool(ctx30_fresh and ctx30 == exp)
             zalt12h = m.get('zalt_12h')
             zalt12h_ok = is_fresh(m.get('zalt_12h_ts'), 24 * 3600) and zalt12h == exp
-            entry_b_ok = bool(zalt12h_ok and bias4h_ok and ctx30_aligned)
+            prep_ok = bool(zalt12h_ok and bias4h_ok and ctx30_aligned)
+            armed_dir = m.get('scalp_b_armed_dir')
+            if prep_ok and armed_dir != exp:
+                m['scalp_b_armed_dir'] = exp
+                m['scalp_b_armed_ts'] = time.time()
+                armed_dir = exp
+                state_changed = True
+                notifications.append(('PREP', direction, price, zalt12h, bias4h, ctx30, None))
+            elif not prep_ok and armed_dir == exp:
+                m['scalp_b_armed_dir'] = None
+                m['scalp_b_armed_ts'] = None
+                armed_dir = None
+                state_changed = True
+
+            zalt30m = m.get('zalt_30m')
+            is_zalt30m_flip = bool(
+                trigger_label == 'zalt_30m_flip'
+                and is_fresh(m.get('last_zalt_30m_flip_ts'), 90 * 60)
+                and m.get('last_zalt_30m_flip_dir') == exp
+                and zalt30m == exp
+            )
+            entry_b_ok = bool(prep_ok and armed_dir == exp and is_zalt30m_flip)
             logger.info(
                 f"[SCALP CHECK] {symbol} {direction} src={trigger_label} "
                 f"zalt12h={zalt12h}/{zalt12h_ok} bias4h_21_55={bias4h}/{bias4h_ok} "
-                f"ctx30={ctx30}/{ctx30_aligned} entry_b={entry_b_ok}"
+                f"ctx30={ctx30}/{ctx30_aligned} prep={prep_ok} armed={armed_dir} "
+                f"zalt30m={zalt30m} flip={is_zalt30m_flip} entry_b={entry_b_ok}"
             )
             if entry_b_ok and should_send(symbol, f"scalp_b_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
-                notifications.append((direction, price, zalt12h, bias4h, ctx30))
+                notifications.append(('ENTRY', direction, price, zalt12h, bias4h, ctx30, zalt30m))
 
-    for direction, alert_price, zalt12h, bias4h, ctx30 in notifications:
+        if state_changed:
+            persist_state()
+
+    for alert_kind, direction, alert_price, zalt12h, bias4h, ctx30, zalt30m in notifications:
         emoji = "🟢" if direction == "LONG" else "🔴"
+        price_line = f"Price: ${format_price(alert_price)}\n" if alert_price and float(alert_price) > 0 else ""
         detail = (
             f"[OK] ZALT 12H: {zalt12h.upper()}\n"
             f"[OK] Bias 4H (21/55): {bias4h.upper()}\n"
             f"[OK] ST Context 30m: {ctx30.upper()}\n"
         )
-        send_telegram_with_buttons(
-            f"{emoji} <b>SCALP B - {direction}</b> {symbol}\n"
-            f"--------------------\n"
-            f"Price: ${format_price(alert_price)}\n"
-            f"{detail}",
-            ntfy=True,
-            symbol=symbol,
-        )
+        if alert_kind == 'PREP':
+            send_telegram(
+                f"{emoji} <b>[PREP SCALP B] {direction}</b> {symbol}\n"
+                f"--------------------\n"
+                f"{price_line}"
+                f"{detail}"
+                "[ATTENTE] Prochain flip ZALT 30m dans le meme sens",
+                ntfy=False,
+                symbol=symbol,
+            )
+        else:
+            send_telegram_with_buttons(
+                f"{emoji} <b>SCALP B - ENTREE {direction}</b> {symbol}\n"
+                f"--------------------\n"
+                f"{price_line}"
+                f"{detail}"
+                f"[TRIGGER] Flip ZALT 30m: {zalt30m.upper()}",
+                ntfy=True,
+                symbol=symbol,
+            )
 
     return bool(notifications)
 
@@ -705,6 +747,15 @@ def process_webhook(data):
             m['zalt_12h_ts'] = time.time()
             persist_state()
 
+        elif alert_type == 'zalt' and tf == '30m':
+            zalt_val = val if val in ('buy', 'sell') else None
+            m['zalt_30m'] = zalt_val
+            m['zalt_30m_ts'] = time.time()
+            if data.get('signal') == 'trend_flip' and zalt_val in ('buy', 'sell'):
+                m['last_zalt_30m_flip_dir'] = zalt_val
+                m['last_zalt_30m_flip_ts'] = time.time()
+            persist_state()
+
         else:
             return
 
@@ -712,12 +763,17 @@ def process_webhook(data):
         (alert_type == 'st_context' and tf == '30m')
         or (alert_type == 'bias' and tf == '4h')
         or (alert_type == 'zalt' and tf == '12h')
+        or (alert_type == 'zalt' and tf == '30m' and data.get('signal') == 'trend_flip')
     ):
         evaluate_scalp(
             symbol,
             price=price,
             event_id=f"scalp_{symbol}_{tf}_{alert_type}_{event_id}",
-            trigger_label=f"{alert_type}_{tf}",
+            trigger_label=(
+                'zalt_30m_flip'
+                if alert_type == 'zalt' and tf == '30m' and data.get('signal') == 'trend_flip'
+                else f"{alert_type}_{tf}"
+            ),
         )
 
 @app.route('/telegram_callback', methods=['POST'])
@@ -868,10 +924,12 @@ def debug_symbol():
                 'scalp_b_eligible': symbol in SCALP_PRIMARY_SYMBOLS,
                 'zalt12h_ok': zalt12h_ok,
                 'bias4h_ok': bias4h_ok,
-                'entry_b_ok': bool(
+                'prep_b_ok': bool(
                     CONFIG['ENABLE_SCALP_B'] and symbol in SCALP_PRIMARY_SYMBOLS
                     and zalt12h_ok and bias4h_ok and ctx30_ok
                 ),
+                'armed_dir': m.get('scalp_b_armed_dir'),
+                'entry_trigger': 'prochain flip ZALT 30m aligne',
                 'ctx30m_ok': ctx30_ok,
             }
         return jsonify({
@@ -1022,6 +1080,7 @@ def scalp_tv_signal_watchdog():
             for label, field, max_age, alert_key, required_symbols in (
                 ('Bias 4H', 'bias_4h_ts', 12 * 3600, 'scalp_bias4h_watchdog', symbols),
                 ('ZALT 12H', 'zalt_12h_ts', 24 * 3600, 'scalp_zalt12h_watchdog', symbols),
+                ('ZALT 30m', 'zalt_30m_ts', 90 * 60, 'scalp_zalt30m_watchdog', symbols),
             ):
                 missing, stale = [], []
                 for symbol in required_symbols:
@@ -1105,7 +1164,8 @@ def startup():
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         f"SCALP B: ACTIVE sur la watchlist Scalp ({len(SCALP_PRIMARY_SYMBOLS)} assets)\n"
-        "Conditions: ZALT 12H + Bias 4H (21/55) + ST Context 30m\n"
+        "PREP: ZALT 12H + Bias 4H (21/55) + ST Context 30m\n"
+        "ENTREE: prochain flip ZALT 30m aligne\n"
         "SCALP A et Confluence forte: EN PAUSE\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
