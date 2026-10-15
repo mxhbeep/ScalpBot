@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Scalping Bot : A=Bias 2H+CTX 10m, B=Bias 4H+CTX 30m.
-# JACKPOT=Bias 4H+CTX 10m+CTX 30m. ntfy est reserve a A et JACKPOT.
+# CONFLUENCE FORTE=Bias 4H+CTX 10m+CTX 30m. ntfy est reserve a A et cette confluence.
 # RCI 30m est affiche comme confirmation manuelle uniquement.
 
 import json
@@ -482,7 +482,7 @@ def send_telegram_with_buttons(msg, ntfy=False, priority=False, symbol=None):
 
 def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"):
     """SCALP filtre par Bias 1D : A=Bias 2H+CTX 10m, B=Bias 4H+CTX 30m.
-    JACKPOT=Bias 4H+CTX 10m+CTX 30m. RCI 2H reste manuel et non bloquant."""
+    CONFLUENCE FORTE=Bias 4H+CTX 10m+CTX 30m. RCI 2H reste manuel et non bloquant."""
     notifications = []
     with STATE_LOCK:
         init_symbol(symbol)
@@ -533,7 +533,7 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
             )
             if jackpot:
                 if should_send(symbol, f"scalp_jackpot_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
-                    notifications.append(('JACKPOT', direction, price, bias4h, ctx10, ctx30, rci2h_value, rci2h_fresh, rci2h_aligned))
+                    notifications.append(('CONFLUENCE', direction, price, bias4h, ctx10, ctx30, rci2h_value, rci2h_fresh, rci2h_aligned))
             elif entry_a_ok and should_send(symbol, f"scalp_a_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
                 notifications.append(('A', direction, price, bias2h, ctx10, ctx30, rci2h_value, rci2h_fresh, rci2h_aligned))
             if entry_b_ok and not jackpot and should_send(symbol, f"scalp_b_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
@@ -552,10 +552,10 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
                 f"[OK] Bias 2H: {primary.upper()}\n"
                 f"[OK] ST Context 10m: {secondary.upper()}\n"
             )
-        elif gate == 'JACKPOT':
+        elif gate == 'CONFLUENCE':
             detail = (
                 f"[FILTRE OK] Bias 1D: {direction}\n"
-                f"[JACKPOT] Bias 4H: {primary.upper()}\n"
+                f"[CONFLUENCE FORTE] Bias 4H: {primary.upper()}\n"
                 f"[OK] ST Context 10m: {secondary.upper()}\n"
                 f"[OK] ST Context 30m: {ctx30.upper()}\n"
             )
@@ -566,11 +566,11 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
                 f"[OK] ST Context 30m: {secondary.upper()}\n"
             )
         send_telegram_with_buttons(
-            f"{emoji} <b>SCALP {'JACKPOT' if gate == 'JACKPOT' else 'ENTREE ' + gate} - {direction}</b> {symbol}\n"
+            f"{emoji} <b>SCALP {'CONFLUENCE FORTE' if gate == 'CONFLUENCE' else 'ENTREE ' + gate} - {direction}</b> {symbol}\n"
             f"--------------------\n"
             f"Price: ${format_price(alert_price)}\n"
             f"{detail}{rci_line}",
-            ntfy=gate in ('A', 'JACKPOT'),
+            ntfy=gate in ('A', 'CONFLUENCE'),
             symbol=symbol,
         )
 
@@ -1180,7 +1180,7 @@ def startup():
         "SCALP A: en pause sur BTC, ETH, XRP, CRV, HBAR, LINK, LTC\n"
         "Conditions A: Bias 1D + Bias 2H + ST Context 10m\n"
         "SCALP B: en pause - Bias 1D + Bias 4H + ST Context 30m\n"
-        "JACKPOT: en pause - Bias 1D + Bias 4H + ST Context 30m + ST Context 10m\n"
+        "CONFLUENCE FORTE: en pause - Bias 1D + Bias 4H + ST Context 30m + ST Context 10m\n"
         "RCI 2H: confirmation manuelle non bloquante\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
