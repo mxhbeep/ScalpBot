@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Scalping Bot : SCALP B = ZALT 12H + Bias 4H (21/55) + ST Context 30m.
-# Strategie limitee a la watchlist Scalp; la watchlist Pulse est exclue.
+# Strategie active sur les watchlists Scalp et Pulse, avec routage Telegram separe.
 
 import json
 import time
@@ -78,7 +78,7 @@ PULSE_SCALP_SYMBOLS = {
     'PEPE/USDT', 'RENDER/USDT', 'USELESS/USDT', 'XPL/USDT', 'ZEN/USDT',
 }
 
-SCALP_PRIMARY_SYMBOLS = set(CONFIG['SYMBOLS']) - PULSE_SCALP_SYMBOLS
+SCALP_B_SYMBOLS = set(CONFIG['SYMBOLS'])
 
 STATE_LOCK = threading.RLock()
 MOMENTUM_STATE = {}
@@ -490,7 +490,7 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
         if not SCALP_ENABLED:
             logger.info(f"[SCALP OFF] ignore {symbol}")
             return False
-        if symbol not in SCALP_PRIMARY_SYMBOLS or not CONFIG['ENABLE_SCALP_B']:
+        if symbol not in SCALP_B_SYMBOLS or not CONFIG['ENABLE_SCALP_B']:
             return False
 
         for exp in ('buy', 'sell'):
@@ -921,11 +921,11 @@ def debug_symbol():
             ctx30_ok = bool(ctx30m['fresh'] and ctx30m['value'] == exp)
             zalt12h_ok = bool(zalt12h_fresh and m.get('zalt_12h') == exp)
             checks[exp] = {
-                'scalp_b_eligible': symbol in SCALP_PRIMARY_SYMBOLS,
+                'scalp_b_eligible': symbol in SCALP_B_SYMBOLS,
                 'zalt12h_ok': zalt12h_ok,
                 'bias4h_ok': bias4h_ok,
                 'prep_b_ok': bool(
-                    CONFIG['ENABLE_SCALP_B'] and symbol in SCALP_PRIMARY_SYMBOLS
+                    CONFIG['ENABLE_SCALP_B'] and symbol in SCALP_B_SYMBOLS
                     and zalt12h_ok and bias4h_ok and ctx30_ok
                 ),
                 'armed_dir': m.get('scalp_b_armed_dir'),
@@ -1041,7 +1041,7 @@ def scalp_tv_signal_watchdog():
         issues = []
         with STATE_LOCK:
             symbols = [
-                symbol for symbol in SCALP_PRIMARY_SYMBOLS
+                symbol for symbol in SCALP_B_SYMBOLS
                 if symbol not in WATCHDOG_EXCLUDED_SYMBOLS
             ]
             state_copy = {s: dict(MOMENTUM_STATE.get(s, {})) for s in symbols}
@@ -1163,7 +1163,7 @@ def startup():
         "<b>Scalping Bot demarre</b>\n"
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
-        f"SCALP B: ACTIVE sur la watchlist Scalp ({len(SCALP_PRIMARY_SYMBOLS)} assets)\n"
+        f"SCALP B: ACTIVE sur Scalp + Pulse ({len(SCALP_B_SYMBOLS)} assets)\n"
         "PREP: ZALT 12H + Bias 4H (21/55) + ST Context 30m\n"
         "ENTREE: prochain flip ZALT 30m aligne\n"
         "SCALP A et Confluence forte: EN PAUSE\n"
@@ -1177,7 +1177,7 @@ def startup():
             "<b>ScalpSecondaire connecte</b>\n"
             "--------------------\n"
             f"Watchlist PULSE: {len(PULSE_SCALP_SYMBOLS)} assets\n"
-            "SCALP B est limitee a la watchlist Scalp; aucune alerte B ne sera envoyee ici.",
+            "Les alertes SCALP B des actifs Pulse seront envoyees ici.",
             telegram=True,
             ntfy=False,
             telegram_channel='telegram_secondary_scalp',
