@@ -161,6 +161,8 @@ def init_symbol(symbol):
             'rci_10m_dir': None, 'rci_10m_ts': None,
             'rci_2h_10': None, 'rci_2h_30': None, 'rci_2h_50': None,
             'rci_2h_dir': None, 'rci_2h_chop': None, 'rci_2h_ts': None,
+            'rci_4h_10': None, 'rci_4h_30': None, 'rci_4h_50': None,
+            'rci_4h_dir': None, 'rci_4h_chop': None, 'rci_4h_ts': None,
             'rci_30m_10': None, 'rci_30m_30': None, 'rci_30m_50': None,
             'rci_30m_dir': None, 'rci_30m_chop': None, 'rci_30m_ts': None,
         }
@@ -502,14 +504,35 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
             ctx30_aligned = bool(ctx30_fresh and ctx30 == exp)
             zalt12h = m.get('zalt_12h')
             zalt12h_ok = is_fresh(m.get('zalt_12h_ts'), 24 * 3600) and zalt12h == exp
-            prep_ok = bool(zalt12h_ok and bias4h_ok and ctx30_aligned)
+            rci4h = m.get('rci_4h_10')
+            rci4h_fresh = is_fresh(m.get('rci_4h_ts'), 12 * 3600)
+            try:
+                rci4h = float(rci4h) if rci4h is not None else None
+            except (TypeError, ValueError):
+                rci4h = None
+            rci4h_quality = bool(
+                rci4h_fresh and rci4h is not None
+                and ((exp == 'buy' and rci4h <= -75) or (exp == 'sell' and rci4h >= 75))
+            )
+            rci4h_veto = bool(
+                rci4h_fresh and rci4h is not None
+                and ((exp == 'buy' and rci4h >= 75) or (exp == 'sell' and rci4h <= -75))
+            )
+            rci4h_warning = bool(
+                rci4h_fresh and rci4h is not None and not rci4h_veto
+                and ((exp == 'buy' and rci4h > 0) or (exp == 'sell' and rci4h < 0))
+            )
+            prep_ok = bool(zalt12h_ok and bias4h_ok and ctx30_aligned and not rci4h_veto)
             armed_dir = m.get('scalp_b_armed_dir')
             if prep_ok and armed_dir != exp:
                 m['scalp_b_armed_dir'] = exp
                 m['scalp_b_armed_ts'] = time.time()
                 armed_dir = exp
                 state_changed = True
-                notifications.append(('PREP', direction, price, zalt12h, bias4h, ctx30, None))
+                notifications.append((
+                    'PREP', direction, price, zalt12h, bias4h, ctx30, None,
+                    rci4h, rci4h_fresh, rci4h_quality, rci4h_warning,
+                ))
             elif not prep_ok and armed_dir == exp:
                 m['scalp_b_armed_dir'] = None
                 m['scalp_b_armed_ts'] = None
@@ -528,15 +551,23 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
                 f"[SCALP CHECK] {symbol} {direction} src={trigger_label} "
                 f"zalt12h={zalt12h}/{zalt12h_ok} bias4h_21_55={bias4h}/{bias4h_ok} "
                 f"ctx30={ctx30}/{ctx30_aligned} prep={prep_ok} armed={armed_dir} "
+                f"rci4h={rci4h} fresh={rci4h_fresh} quality={rci4h_quality} "
+                f"warning={rci4h_warning} veto={rci4h_veto} "
                 f"zalt30m={zalt30m} flip={is_zalt30m_flip} entry_b={entry_b_ok}"
             )
             if entry_b_ok and should_send(symbol, f"scalp_b_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
-                notifications.append(('ENTRY', direction, price, zalt12h, bias4h, ctx30, zalt30m))
+                notifications.append((
+                    'ENTRY', direction, price, zalt12h, bias4h, ctx30, zalt30m,
+                    rci4h, rci4h_fresh, rci4h_quality, rci4h_warning,
+                ))
 
         if state_changed:
             persist_state()
 
-    for alert_kind, direction, alert_price, zalt12h, bias4h, ctx30, zalt30m in notifications:
+    for (
+        alert_kind, direction, alert_price, zalt12h, bias4h, ctx30, zalt30m,
+        rci4h, rci4h_fresh, rci4h_quality, rci4h_warning,
+    ) in notifications:
         emoji = "🟢" if direction == "LONG" else "🔴"
         price_line = f"Price: ${format_price(alert_price)}\n" if alert_price and float(alert_price) > 0 else ""
         detail = (
@@ -544,9 +575,18 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
             f"[OK] Bias 4H (21/55): {bias4h.upper()}\n"
             f"[OK] ST Context 30m: {ctx30.upper()}\n"
         )
+        if rci4h_quality:
+            detail += f"[QUALITE RCI EXTREME] RCI court 4H: {rci4h:.1f} (seuil +/-75)\n"
+        elif rci4h_warning:
+            detail += f"[AVERTISSEMENT NON BLOQUANT] RCI court 4H: {rci4h:.1f} du mauvais cote de zero\n"
+        elif rci4h_fresh and rci4h is not None:
+            detail += f"[RCI OK - NON EXTREME] RCI court 4H: {rci4h:.1f}\n"
+        else:
+            detail += "[RCI INDISPONIBLE - NON BLOQUANT] RCI court 4H absent ou perime\n"
+        quality_label = " - QUALITE" if rci4h_quality else ""
         if alert_kind == 'PREP':
             send_telegram(
-                f"{emoji} <b>[PREP SCALP B] {direction}</b> {symbol}\n"
+                f"{emoji} <b>[PREP SCALP B{quality_label}] {direction}</b> {symbol}\n"
                 f"--------------------\n"
                 f"{price_line}"
                 f"{detail}"
@@ -556,7 +596,7 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
             )
         else:
             send_telegram_with_buttons(
-                f"{emoji} <b>SCALP B - ENTREE {direction}</b> {symbol}\n"
+                f"{emoji} <b>SCALP B - ENTREE{quality_label} {direction}</b> {symbol}\n"
                 f"--------------------\n"
                 f"{price_line}"
                 f"{detail}"
@@ -711,6 +751,21 @@ def process_webhook(data):
             m['rci_2h_ts'] = time.time()
             persist_state()
 
+        elif alert_type == 'rci' and tf == '4h':
+            rci10 = data.get('rci10')
+            try:
+                rci10_value = float(rci10)
+            except (TypeError, ValueError):
+                logger.warning(f"[WEBHOOK] RCI 4H invalide: {symbol} rci10={rci10!r}")
+                return
+            m['rci_4h_10'] = rci10_value
+            m['rci_4h_30'] = data.get('rci30')
+            m['rci_4h_50'] = data.get('rci50')
+            m['rci_4h_dir'] = 'buy' if rci10_value <= -75 else 'sell' if rci10_value >= 75 else None
+            m['rci_4h_chop'] = bool(data.get('chop', False))
+            m['rci_4h_ts'] = time.time()
+            persist_state()
+
         elif alert_type == 'bias' and tf == '4h':
             bias_val = val if val in ('buy', 'sell') else None
             m['bias_4h'] = bias_val
@@ -762,6 +817,7 @@ def process_webhook(data):
     if (
         (alert_type == 'st_context' and tf == '30m')
         or (alert_type == 'bias' and tf == '4h')
+        or (alert_type == 'rci' and tf == '4h')
         or (alert_type == 'zalt' and tf == '12h')
         or (alert_type == 'zalt' and tf == '30m' and data.get('signal') == 'trend_flip')
     ):
