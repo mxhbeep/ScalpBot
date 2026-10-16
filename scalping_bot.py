@@ -751,7 +751,7 @@ def process_webhook(data):
             except (TypeError, ValueError):
                 logger.warning(f"[WEBHOOK] RCI 30m invalide: {symbol} rci10={data.get('rci10')!r}")
                 return
-            if previous_rci10 is not None:
+            if previous_rci10 is not None and not data.get('sync', False):
                 if previous_rci10 > -75 and current_rci10 <= -75:
                     rci30m_extreme_cross = 'buy'
                 elif previous_rci10 < 75 and current_rci10 >= 75:
@@ -1266,8 +1266,9 @@ def startup():
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         f"SCALP B: ACTIVE sur Scalp + Pulse ({len(SCALP_B_SYMBOLS)} assets)\n"
-        "PREP: ZALT 12H + Bias 4H (21/55) + ST Context 30m\n"
-        "ENTREE: prochain flip ZALT 30m aligne\n"
+        "ARMEMENT SILENCIEUX: ZALT 12H + Bias 4H (21/55) + ST Context 30m\n"
+        "PREP NOTIFIEE: RCI 30m entre en extreme favorable\n"
+        "ENTREE: prochain flip ZALT 30m aligne (RCI 30m informatif)\n"
         "SCALP A et Confluence forte: EN PAUSE\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
