@@ -144,8 +144,6 @@ def init_symbol(symbol):
     if symbol not in MOMENTUM_STATE:
         MOMENTUM_STATE[symbol] = {
             'st_context_30m': None, 'st_context_30m_ts': None, 'st_context_30m_raw': None,
-            'st_context_10m': None, 'st_context_10m_ts': None, 'st_context_10m_raw': None,
-            'st_context_lt_10m': None, 'st_context_lt_10m_ts': None, 'st_context_lt_10m_raw': None,
             'st_context_1m': None, 'st_context_1m_ts': None, 'st_context_1m_raw': None,
             'st_context_2h': None, 'st_context_2h_ts': None, 'st_context_2h_raw': None,
             'bias_4h': None, 'bias_4h_ts': None,
@@ -705,14 +703,7 @@ def process_webhook(data):
         m = MOMENTUM_STATE[symbol]
         logger.info(f"Webhook: {symbol} | tf={tf} | type={alert_type} | val={val}")
 
-        if alert_type == 'st_context' and tf == '10m':
-            ctx_parsed, ctx_raw = parse_st_context_value(val)
-            m['st_context_10m'] = ctx_parsed
-            m['st_context_10m_ts'] = time.time()
-            m['st_context_10m_raw'] = ctx_raw
-            persist_state()
-
-        elif alert_type == 'st_context' and tf == '1m':
+        if alert_type == 'st_context' and tf == '1m':
             ctx_parsed, ctx_raw = parse_st_context_value(val)
             m['st_context_1m'] = ctx_parsed
             m['st_context_1m_ts'] = time.time()
@@ -731,13 +722,6 @@ def process_webhook(data):
             m['st_context_2h'] = ctx_parsed
             m['st_context_2h_ts'] = time.time()
             m['st_context_2h_raw'] = ctx_raw
-            persist_state()
-
-        elif alert_type == 'st_context_lt' and tf == '10m':
-            ctx_parsed, ctx_raw = parse_st_context_value(val)
-            m['st_context_lt_10m'] = ctx_parsed
-            m['st_context_lt_10m_ts'] = time.time()
-            m['st_context_lt_10m_raw'] = ctx_raw
             persist_state()
 
         elif alert_type == 'rci' and tf == '30m':
