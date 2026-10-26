@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot : SCALP B = ZALT 12H + Bias 4H (21/55) + ST Context 30m.
+# Scalping Bot : SCALP B = ZALT 12H + Bias 4H + RCI 4H extreme + ST Context 30m.
 # Strategie active sur les watchlists Scalp et Pulse, avec routage Telegram separe.
 
 import json
@@ -521,7 +521,7 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
                 rci4h_fresh and rci4h is not None and not rci4h_veto
                 and ((exp == 'buy' and rci4h > 0) or (exp == 'sell' and rci4h < 0))
             )
-            prep_ok = bool(zalt12h_ok and bias4h_ok and ctx30_aligned and not rci4h_veto)
+            prep_ok = bool(zalt12h_ok and bias4h_ok and ctx30_aligned and rci4h_quality)
             armed_dir = m.get('scalp_b_armed_dir')
             if prep_ok and armed_dir != exp:
                 m['scalp_b_armed_dir'] = exp
@@ -568,7 +568,7 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
                 f"zalt12h={zalt12h}/{zalt12h_ok} bias4h_21_55={bias4h}/{bias4h_ok} "
                 f"ctx30={ctx30}/{ctx30_aligned} prep={prep_ok} armed={armed_dir} "
                 f"rci4h={rci4h} fresh={rci4h_fresh} quality={rci4h_quality} "
-                f"warning={rci4h_warning} veto={rci4h_veto} "
+                f"warning={rci4h_warning} veto={rci4h_veto} required_ok={rci4h_quality} "
                 f"zalt30m={zalt30m} flip={is_zalt30m_flip} "
                 f"rci30m={rci30m} fresh={rci30m_fresh} trigger_ok={rci30m_trigger_ok} "
                 f"extreme_ok={rci30m_extreme_ok} "
@@ -594,15 +594,8 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
             f"[OK] Bias 4H (21/55): {bias4h.upper()}\n"
             f"[OK] ST Context 30m: {ctx30.upper()}\n"
         )
-        if rci4h_quality:
-            detail += f"[QUALITE RCI EXTREME] RCI court 4H: {rci4h:.1f} (seuil +/-75)\n"
-        elif rci4h_warning:
-            detail += f"[AVERTISSEMENT NON BLOQUANT] RCI court 4H: {rci4h:.1f} du mauvais cote de zero\n"
-        elif rci4h_fresh and rci4h is not None:
-            detail += f"[RCI OK - NON EXTREME] RCI court 4H: {rci4h:.1f}\n"
-        else:
-            detail += "[RCI INDISPONIBLE - NON BLOQUANT] RCI court 4H absent ou perime\n"
-        quality_label = " - QUALITE" if rci4h_quality else ""
+        detail += f"[OBLIGATOIRE] RCI court 4H extreme favorable: {rci4h:.1f} (seuil +/-75)\n"
+        quality_label = " - QUALITE"
         if alert_kind == 'PREP':
             detail += f"[PREP] RCI court 30m: {rci30m:.1f} (zone extreme favorable)\n"
             send_telegram(
@@ -1161,10 +1154,11 @@ def scalp_tv_signal_watchdog():
             )
             logger.warning(f"[TV SIGNAL WATCHDOG] Scalp issues: {issues}")
 
-        # Bias bloquants calcules en interne puis relayes par le bot principal.
+        # Signaux obligatoires calcules en interne puis relayes par le bot principal.
         if uptime >= 45 * 60:
             for label, field, max_age, alert_key, required_symbols in (
                 ('Bias 4H', 'bias_4h_ts', 12 * 3600, 'scalp_bias4h_watchdog', symbols),
+                ('RCI 4H', 'rci_4h_ts', 12 * 3600, 'scalp_rci4h_watchdog', symbols),
                 ('ZALT 12H', 'zalt_12h_ts', 24 * 3600, 'scalp_zalt12h_watchdog', symbols),
                 ('ZALT 30m', 'zalt_30m_ts', 90 * 60, 'scalp_zalt30m_watchdog', symbols),
             ):
@@ -1250,7 +1244,7 @@ def startup():
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         f"SCALP B: ACTIVE sur Scalp + Pulse ({len(SCALP_B_SYMBOLS)} assets)\n"
-        "ARMEMENT SILENCIEUX: ZALT 12H + Bias 4H (21/55) + ST Context 30m\n"
+        "ARMEMENT SILENCIEUX: ZALT 12H + Bias 4H (21/55) + RCI 4H extreme + ST Context 30m\n"
         "PREP NOTIFIEE: RCI 30m entre en extreme favorable\n"
         "ENTREE: prochain flip ZALT 30m aligne (RCI 30m informatif)\n"
         "SCALP A et Confluence forte: EN PAUSE\n"
