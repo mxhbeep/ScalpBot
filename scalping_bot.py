@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot : SCALP B = ZALT 12H + Bias 4H + RCI 4H extreme + ST Context 30m.
+# Scalping Bot : SCALP B en pause; SCALP BTC reste actif.
 # SCALP BTC = Bias 2H + RCI 1H extreme + ST Context 5m, avec filtres CTX 30m/2H.
 # Strategies actives avec routage Telegram separe.
 
@@ -29,7 +29,7 @@ CONFIG = {
     'REDIS_URL': os.environ.get('REDIS_URL', ''),
     'NTFY_TOPIC': os.environ.get('NTFY_TOPIC', ''),
     'MIN_COOLDOWN': 1800,
-    'ENABLE_SCALP_B': os.environ.get('ENABLE_SCALP_B', '1') == '1',
+    'ENABLE_SCALP_B': False,
     'ENABLE_SCALP_BTC': os.environ.get('ENABLE_SCALP_BTC', '1') == '1',
     'SYMBOLS': {
         'AAVE/USDT': {'exchange': 'okx'},
@@ -1224,11 +1224,16 @@ def reset():
 
 
 def scalp_required_tv_signals():
-    return [
-        {'label': 'ST Context 30m', 'field': 'st_context_30m_ts', 'max_age': 90 * 60, 'warmup': 2 * 3600},
+    requirements = [
         {'label': 'ST Context 5m (SCALP BTC)', 'field': 'st_context_5m_ts', 'max_age': 20 * 60, 'warmup': 45 * 60, 'symbols': ['BTC/USDT']},
         {'label': 'ST Context 2H (SCALP BTC)', 'field': 'st_context_2h_ts', 'max_age': 6 * 3600, 'warmup': 7 * 3600, 'symbols': ['BTC/USDT']},
     ]
+    if CONFIG.get('ENABLE_SCALP_B', False):
+        requirements.insert(0, {
+            'label': 'ST Context 30m', 'field': 'st_context_30m_ts',
+            'max_age': 90 * 60, 'warmup': 2 * 3600,
+        })
+    return requirements
 
 
 def scalp_tv_signal_watchdog():
@@ -1280,14 +1285,18 @@ def scalp_tv_signal_watchdog():
 
         # Signaux obligatoires calcules en interne puis relayes par le bot principal.
         if uptime >= 45 * 60:
-            for label, field, max_age, alert_key, required_symbols in (
-                ('Bias 4H', 'bias_4h_ts', 12 * 3600, 'scalp_bias4h_watchdog', symbols),
-                ('RCI 4H', 'rci_4h_ts', 12 * 3600, 'scalp_rci4h_watchdog', symbols),
-                ('ZALT 12H', 'zalt_12h_ts', 24 * 3600, 'scalp_zalt12h_watchdog', symbols),
-                ('ZALT 30m', 'zalt_30m_ts', 90 * 60, 'scalp_zalt30m_watchdog', symbols),
+            internal_requirements = [
                 ('Bias 2H (SCALP BTC)', 'bias_2h_ts', 6 * 3600, 'scalp_btc_bias2h_watchdog', ['BTC/USDT']),
                 ('RCI 1H (SCALP BTC)', 'rci_1h_ts', 3 * 3600, 'scalp_btc_rci1h_watchdog', ['BTC/USDT']),
-            ):
+            ]
+            if CONFIG.get('ENABLE_SCALP_B', False):
+                internal_requirements.extend([
+                    ('Bias 4H', 'bias_4h_ts', 12 * 3600, 'scalp_bias4h_watchdog', symbols),
+                    ('RCI 4H', 'rci_4h_ts', 12 * 3600, 'scalp_rci4h_watchdog', symbols),
+                    ('ZALT 12H', 'zalt_12h_ts', 24 * 3600, 'scalp_zalt12h_watchdog', symbols),
+                    ('ZALT 30m', 'zalt_30m_ts', 90 * 60, 'scalp_zalt30m_watchdog', symbols),
+                ])
+            for label, field, max_age, alert_key, required_symbols in internal_requirements:
                 missing, stale = [], []
                 for symbol in required_symbols:
                     ts = state_copy.get(symbol, {}).get(field)
@@ -1369,10 +1378,7 @@ def startup():
         "<b>Scalping Bot demarre</b>\n"
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
-        f"SCALP B: ACTIVE sur Scalp + Pulse ({len(SCALP_B_SYMBOLS)} assets)\n"
-        "ARMEMENT SILENCIEUX: ZALT 12H + Bias 4H (21/55) + RCI 4H extreme + ST Context 30m\n"
-        "PREP NOTIFIEE: RCI 30m entre en extreme favorable\n"
-        "ENTREE: prochain flip ZALT 30m aligne (RCI 30m informatif)\n"
+        "SCALP B: EN PAUSE (remplacee par SWING dans le mainbot)\n"
         "SCALP BTC: Bias 2H + RCI 1H extreme + entree ST Context 5m\n"
         "SCALP BTC: CTX 30m oppose = avertissement; CTX 2H oppose = veto\n"
         "SCALP A et Confluence forte: EN PAUSE\n"
@@ -1386,7 +1392,7 @@ def startup():
             "<b>ScalpSecondaire connecte</b>\n"
             "--------------------\n"
             f"Watchlist PULSE: {len(PULSE_SCALP_SYMBOLS)} assets\n"
-            "Les alertes SCALP B des actifs Pulse seront envoyees ici.",
+            "Canal en attente: SCALP B est actuellement en pause.",
             telegram=True,
             ntfy=False,
             telegram_channel='telegram_secondary_scalp',
