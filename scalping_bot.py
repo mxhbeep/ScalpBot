@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Scalping Bot : SCALP B = ZALT 12H + Bias 4H + RCI 4H extreme + ST Context 30m.
-# Strategie active sur les watchlists Scalp et Pulse, avec routage Telegram separe.
+# SCALP BTC = Bias 2H + RCI 1H extreme + ST Context 5m, avec filtres CTX 30m/2H.
+# Strategies actives avec routage Telegram separe.
 
 import json
 import time
@@ -29,6 +30,7 @@ CONFIG = {
     'NTFY_TOPIC': os.environ.get('NTFY_TOPIC', ''),
     'MIN_COOLDOWN': 1800,
     'ENABLE_SCALP_B': os.environ.get('ENABLE_SCALP_B', '1') == '1',
+    'ENABLE_SCALP_BTC': os.environ.get('ENABLE_SCALP_BTC', '1') == '1',
     'SYMBOLS': {
         'AAVE/USDT': {'exchange': 'okx'},
         'ADA/USDT': {'exchange': 'okx'},
@@ -144,6 +146,7 @@ def init_symbol(symbol):
     if symbol not in MOMENTUM_STATE:
         MOMENTUM_STATE[symbol] = {
             'st_context_30m': None, 'st_context_30m_ts': None, 'st_context_30m_raw': None,
+            'st_context_5m': None, 'st_context_5m_ts': None, 'st_context_5m_raw': None,
             'st_context_1m': None, 'st_context_1m_ts': None, 'st_context_1m_raw': None,
             'st_context_2h': None, 'st_context_2h_ts': None, 'st_context_2h_raw': None,
             'bias_4h': None, 'bias_4h_ts': None,
@@ -164,6 +167,8 @@ def init_symbol(symbol):
             'rci_30m_10': None, 'rci_30m_30': None, 'rci_30m_50': None,
             'rci_30m_dir': None, 'rci_30m_chop': None, 'rci_30m_ts': None,
             'rci_30m_10_prev': None,
+            'rci_1h_10': None, 'rci_1h_30': None, 'rci_1h_50': None,
+            'rci_1h_dir': None, 'rci_1h_chop': None, 'rci_1h_ts': None,
         }
 
 
@@ -628,6 +633,89 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
     return bool(notifications)
 
 
+def evaluate_scalp_btc(symbol, price=0, event_id=None, trigger_label="state_refresh"):
+    """SCALP BTC: Bias 2H + RCI 1H extreme, entree sur nouveau CTX 5m."""
+    if symbol != 'BTC/USDT' or not CONFIG.get('ENABLE_SCALP_BTC', True):
+        return False
+
+    notifications = []
+    with STATE_LOCK:
+        init_symbol(symbol)
+        m = MOMENTUM_STATE[symbol]
+        if not SCALP_ENABLED:
+            logger.info(f"[SCALP OFF] ignore SCALP BTC {symbol}")
+            return False
+
+        for exp in ('buy', 'sell'):
+            direction = 'LONG' if exp == 'buy' else 'SHORT'
+            opposite = 'sell' if exp == 'buy' else 'buy'
+
+            bias2h = m.get('bias_2h')
+            bias2h_ok = is_fresh(m.get('bias_2h_ts'), 6 * 3600) and bias2h == exp
+
+            rci1h = m.get('rci_1h_10')
+            rci1h_fresh = is_fresh(m.get('rci_1h_ts'), 3 * 3600)
+            try:
+                rci1h = float(rci1h) if rci1h is not None else None
+            except (TypeError, ValueError):
+                rci1h = None
+            rci1h_ok = bool(
+                rci1h_fresh and rci1h is not None
+                and ((exp == 'buy' and rci1h <= -75) or (exp == 'sell' and rci1h >= 75))
+            )
+
+            ctx5m = m.get('st_context_5m')
+            ctx5m_fresh = is_fresh(m.get('st_context_5m_ts'), 20 * 60)
+            ctx5m_ok = bool(ctx5m_fresh and ctx5m == exp)
+
+            ctx30m = m.get('st_context_30m')
+            ctx30m_fresh = is_fresh(m.get('st_context_30m_ts'), 90 * 60)
+            ctx30m_opposed = bool(ctx30m_fresh and ctx30m == opposite)
+
+            ctx2h = m.get('st_context_2h')
+            ctx2h_fresh = is_fresh(m.get('st_context_2h_ts'), 6 * 3600)
+            ctx2h_veto = bool(ctx2h_fresh and ctx2h == opposite)
+
+            entry_ok = bool(
+                trigger_label == 'st_context_5m'
+                and bias2h_ok and rci1h_ok and ctx5m_ok and not ctx2h_veto
+            )
+            logger.info(
+                f"[SCALP BTC CHECK] {symbol} {direction} src={trigger_label} "
+                f"bias2h={bias2h}/{bias2h_ok} rci1h={rci1h} fresh={rci1h_fresh} ok={rci1h_ok} "
+                f"ctx5m={ctx5m}/{ctx5m_ok} ctx30m={ctx30m} opposed={ctx30m_opposed} "
+                f"ctx2h={ctx2h} veto={ctx2h_veto} entry={entry_ok}"
+            )
+            if entry_ok and should_send(
+                symbol, f"scalp_btc_{exp}", event_id=event_id,
+                cooldown=CONFIG['MIN_COOLDOWN'],
+            ):
+                notifications.append((direction, bias2h, rci1h, ctx5m, ctx30m, ctx30m_opposed, ctx2h))
+
+    for direction, bias2h, rci1h, ctx5m, ctx30m, ctx30m_opposed, ctx2h in notifications:
+        emoji = "🟢" if direction == "LONG" else "🔴"
+        price_line = f"Price: ${format_price(price)}\n" if price and float(price) > 0 else ""
+        if ctx30m_opposed:
+            ctx30m_line = f"[AVERTISSEMENT NON BLOQUANT] ST Context 30m oppose: {ctx30m.upper()}"
+        elif ctx30m in ('buy', 'sell'):
+            ctx30m_line = f"[INFO] ST Context 30m: {ctx30m.upper()}"
+        else:
+            ctx30m_line = "[INFO] ST Context 30m: neutre, absent ou perime"
+        send_telegram_with_buttons(
+            f"{emoji} <b>SCALP BTC - ENTREE {direction}</b> {symbol}\n"
+            "--------------------\n"
+            f"{price_line}"
+            f"[OK] Bias 2H: {bias2h.upper()}\n"
+            f"[OK] RCI court 1H extreme favorable: {rci1h:.1f}\n"
+            f"[TRIGGER] ST Context 5m: {ctx5m.upper()}\n"
+            f"{ctx30m_line}\n"
+            f"[ANTI-CHOP OK] ST Context 2H: {(ctx2h or 'neutre').upper()}",
+            ntfy=True,
+            symbol=symbol,
+        )
+    return bool(notifications)
+
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json(silent=True)
@@ -703,6 +791,13 @@ def process_webhook(data):
             m['st_context_1m_raw'] = ctx_raw
             persist_state()
 
+        elif alert_type == 'st_context' and tf == '5m':
+            ctx_parsed, ctx_raw = parse_st_context_value(val)
+            m['st_context_5m'] = ctx_parsed
+            m['st_context_5m_ts'] = time.time()
+            m['st_context_5m_raw'] = ctx_raw
+            persist_state()
+
         elif alert_type == 'st_context' and tf == '30m':
             ctx_parsed, ctx_raw = parse_st_context_value(val)
             m['st_context_30m'] = ctx_parsed
@@ -769,6 +864,21 @@ def process_webhook(data):
             m['rci_2h_dir'] = 'buy' if rci10_value <= -75 else 'sell' if rci10_value >= 75 else None
             m['rci_2h_chop'] = bool(data.get('chop', False))
             m['rci_2h_ts'] = time.time()
+            persist_state()
+
+        elif alert_type == 'rci' and tf == '1h':
+            rci10 = data.get('rci10')
+            try:
+                rci10_value = float(rci10)
+            except (TypeError, ValueError):
+                logger.warning(f"[WEBHOOK] RCI 1H invalide: {symbol} rci10={rci10!r}")
+                return
+            m['rci_1h_10'] = rci10_value
+            m['rci_1h_30'] = data.get('rci30')
+            m['rci_1h_50'] = data.get('rci50')
+            m['rci_1h_dir'] = 'buy' if rci10_value <= -75 else 'sell' if rci10_value >= 75 else None
+            m['rci_1h_chop'] = bool(data.get('chop', False))
+            m['rci_1h_ts'] = time.time()
             persist_state()
 
         elif alert_type == 'rci' and tf == '4h':
@@ -853,6 +963,18 @@ def process_webhook(data):
                 if alert_type == 'rci' and tf == '30m' and rci30m_extreme_cross in ('buy', 'sell')
                 else f"{alert_type}_{tf}"
             ),
+        )
+
+    if symbol == 'BTC/USDT' and (
+        (alert_type == 'st_context' and tf in ('5m', '30m', '2h'))
+        or (alert_type == 'bias' and tf == '2h')
+        or (alert_type == 'rci' and tf == '1h')
+    ):
+        evaluate_scalp_btc(
+            symbol,
+            price=price,
+            event_id=f"scalp_btc_{symbol}_{tf}_{alert_type}_{event_id}",
+            trigger_label='sync_state' if data.get('sync', False) else f"{alert_type}_{tf}",
         )
 
 @app.route('/telegram_callback', methods=['POST'])
@@ -1104,6 +1226,8 @@ def reset():
 def scalp_required_tv_signals():
     return [
         {'label': 'ST Context 30m', 'field': 'st_context_30m_ts', 'max_age': 90 * 60, 'warmup': 2 * 3600},
+        {'label': 'ST Context 5m (SCALP BTC)', 'field': 'st_context_5m_ts', 'max_age': 20 * 60, 'warmup': 45 * 60, 'symbols': ['BTC/USDT']},
+        {'label': 'ST Context 2H (SCALP BTC)', 'field': 'st_context_2h_ts', 'max_age': 6 * 3600, 'warmup': 7 * 3600, 'symbols': ['BTC/USDT']},
     ]
 
 
@@ -1129,7 +1253,7 @@ def scalp_tv_signal_watchdog():
                 continue
             missing = []
             stale = []
-            req_symbols = symbols
+            req_symbols = req.get('symbols', symbols)
             for symbol in req_symbols:
                 ts = state_copy.get(symbol, {}).get(req['field'])
                 max_age = req['max_age']
@@ -1161,6 +1285,8 @@ def scalp_tv_signal_watchdog():
                 ('RCI 4H', 'rci_4h_ts', 12 * 3600, 'scalp_rci4h_watchdog', symbols),
                 ('ZALT 12H', 'zalt_12h_ts', 24 * 3600, 'scalp_zalt12h_watchdog', symbols),
                 ('ZALT 30m', 'zalt_30m_ts', 90 * 60, 'scalp_zalt30m_watchdog', symbols),
+                ('Bias 2H (SCALP BTC)', 'bias_2h_ts', 6 * 3600, 'scalp_btc_bias2h_watchdog', ['BTC/USDT']),
+                ('RCI 1H (SCALP BTC)', 'rci_1h_ts', 3 * 3600, 'scalp_btc_rci1h_watchdog', ['BTC/USDT']),
             ):
                 missing, stale = [], []
                 for symbol in required_symbols:
@@ -1247,6 +1373,8 @@ def startup():
         "ARMEMENT SILENCIEUX: ZALT 12H + Bias 4H (21/55) + RCI 4H extreme + ST Context 30m\n"
         "PREP NOTIFIEE: RCI 30m entre en extreme favorable\n"
         "ENTREE: prochain flip ZALT 30m aligne (RCI 30m informatif)\n"
+        "SCALP BTC: Bias 2H + RCI 1H extreme + entree ST Context 5m\n"
+        "SCALP BTC: CTX 30m oppose = avertissement; CTX 2H oppose = veto\n"
         "SCALP A et Confluence forte: EN PAUSE\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
