@@ -710,7 +710,7 @@ def evaluate_scalp_btc(symbol, price=0, event_id=None, trigger_label="state_refr
             f"[TRIGGER] ST Context 5m: {ctx5m.upper()}\n"
             f"{ctx30m_line}\n"
             f"[ANTI-CHOP OK] ST Context 2H: {(ctx2h or 'neutre').upper()}",
-            ntfy=True,
+            ntfy=False,
             symbol=symbol,
         )
     return bool(notifications)
