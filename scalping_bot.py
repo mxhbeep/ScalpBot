@@ -90,7 +90,7 @@ STATE_LOCK = threading.RLock()
 MOMENTUM_STATE = {}
 LAST_SIGNALS = {}
 LAST_SIGNAL_EVENTS = {}
-SCALP_ENABLED = False
+SCALP_ENABLED = True
 WATCHDOG_EXCLUDED_SYMBOLS = {'CVX/USDT'}
 REDIS_CLIENT = None
 
@@ -462,12 +462,19 @@ def send_telegram(msg, ntfy=False, priority=False, symbol=None):
     return bool(result.get(telegram_channel))
 
 
+def scalp_control_keyboard():
+    if SCALP_ENABLED:
+        return {"inline_keyboard": [[
+            {"text": "Mettre SCALP en pause", "callback_data": "scalp_off"},
+        ]]}
+    return {"inline_keyboard": [[
+        {"text": "Activer SCALP", "callback_data": "scalp_on"},
+    ]]}
+
+
 def send_telegram_with_buttons(msg, ntfy=False, priority=False, symbol=None):
     msg = sanitize_scalp_notification(msg)
-    keyboard = {"inline_keyboard": [[
-        {"text": "Scalp ON", "callback_data": "scalp_on"},
-        {"text": "Scalp OFF", "callback_data": "scalp_off"},
-    ]]}
+    keyboard = scalp_control_keyboard()
     telegram_channel = telegram_channel_for_symbol(symbol, priority)
     reply_markup = None if telegram_channel == 'telegram_secondary_scalp' else keyboard
     result = send_notification(
@@ -1032,17 +1039,37 @@ def telegram_callback():
     if not data:
         return jsonify({'ok': True}), 200
     try:
+        message = data.get('message', {})
+        message_text = str(message.get('text', '')).strip().lower()
+        message_chat_id = message.get('chat', {}).get('id')
+        tok = os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
+        if message_text in ('/scalp', '/scalp_status') and tok and message_chat_id:
+            status = 'ACTIVE' if SCALP_ENABLED else 'EN PAUSE'
+            requests.post(
+                f"https://api.telegram.org/bot{tok}/sendMessage",
+                json={
+                    'chat_id': message_chat_id,
+                    'text': f"<b>Controle SCALP</b>\nEtat actuel : <b>{status}</b>",
+                    'parse_mode': 'HTML',
+                    'reply_markup': scalp_control_keyboard(),
+                },
+                timeout=5,
+            )
+            return jsonify({'ok': True}), 200
+
         cb = data.get('callback_query', {})
         cb_id = cb.get('id')
         cb_data = cb.get('data', '')
         chat_id = cb.get('message', {}).get('chat', {}).get('id')
         msg_id = cb.get('message', {}).get('message_id')
         user = cb.get('from', {}).get('first_name', 'User')
-        tok = os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
         if tok and cb_id:
             requests.post(
                 f"https://api.telegram.org/bot{tok}/answerCallbackQuery",
-                json={"callback_query_id": cb_id},
+                json={
+                    "callback_query_id": cb_id,
+                    "text": "SCALP mis a jour",
+                },
                 timeout=5,
             )
         global SCALP_ENABLED
@@ -1057,10 +1084,7 @@ def telegram_callback():
                     json={
                         "chat_id": chat_id,
                         "message_id": msg_id,
-                        "reply_markup": {"inline_keyboard": [[
-                            {"text": "Scalp OFF", "callback_data": "noop"},
-                            {"text": "Scalp ON", "callback_data": "scalp_on"},
-                        ]]},
+                        "reply_markup": scalp_control_keyboard(),
                     },
                     timeout=5,
                 )
@@ -1075,10 +1099,7 @@ def telegram_callback():
                     json={
                         "chat_id": chat_id,
                         "message_id": msg_id,
-                        "reply_markup": {"inline_keyboard": [[
-                            {"text": "Scalp ON", "callback_data": "noop"},
-                            {"text": "Scalp OFF", "callback_data": "scalp_off"},
-                        ]]},
+                        "reply_markup": scalp_control_keyboard(),
                     },
                     timeout=5,
                 )
@@ -1371,9 +1392,8 @@ def startup():
     global SCALP_ENABLED
     init_redis()
     load_state()
-    # Strategie SCALP active; ancienne SCALP B conservee en pause.
+    # Conserver l'etat ON/OFF restaure depuis Redis.
     with STATE_LOCK:
-        SCALP_ENABLED = True
         persist_state()
     tok = os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
     base_url = os.environ.get('SCALP_PUBLIC_URL', '').rstrip('/')
@@ -1421,7 +1441,7 @@ def startup():
                 logger.warning(f"[STARTUP] sync_scalp echoue: {e}")
         threading.Thread(target=_sync, daemon=True).start()
 
-    send_telegram(
+    send_telegram_with_buttons(
         "<b>Scalping Bot demarre</b>\n"
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
