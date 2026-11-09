@@ -1017,6 +1017,7 @@ def process_webhook(data):
 
 @app.route('/telegram_callback', methods=['POST'])
 def telegram_callback():
+    global SCALP_ENABLED
     tg_secret = os.environ.get('SCALP_TELEGRAM_SECRET', '')
     if tg_secret and request.headers.get('X-Telegram-Bot-Api-Secret-Token', '') != tg_secret:
         return jsonify({'ok': False}), 403
@@ -1024,13 +1025,20 @@ def telegram_callback():
     if not data:
         return jsonify({'ok': True}), 200
     try:
-        message = data.get('message', {})
+        message = (
+            data.get('message')
+            or data.get('channel_post')
+            or data.get('edited_message')
+            or data.get('edited_channel_post')
+            or {}
+        )
         message_text = str(message.get('text', '')).strip().lower()
+        command = message_text.split()[0].split('@')[0] if message_text else ''
         message_chat_id = message.get('chat', {}).get('id')
         tok = os.environ.get('SCALP_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
-        if message_text in ('/scalp', '/scalp_status') and tok and message_chat_id:
+        if command in ('/scalp', '/scalp_status') and tok and message_chat_id:
             status = 'ACTIVE' if SCALP_ENABLED else 'EN PAUSE'
-            requests.post(
+            response = requests.post(
                 f"https://api.telegram.org/bot{tok}/sendMessage",
                 json={
                     'chat_id': message_chat_id,
@@ -1040,6 +1048,10 @@ def telegram_callback():
                 },
                 timeout=5,
             )
+            if not 200 <= response.status_code < 300:
+                logger.warning(f"[SCALP CONTROL] Telegram HTTP {response.status_code}: {response.text[:200]}")
+            else:
+                logger.info(f"[SCALP CONTROL] Panneau envoye au chat {message_chat_id}")
             return jsonify({'ok': True}), 200
 
         cb = data.get('callback_query', {})
@@ -1057,7 +1069,6 @@ def telegram_callback():
                 },
                 timeout=5,
             )
-        global SCALP_ENABLED
         if cb_data == 'scalp_off':
             with STATE_LOCK:
                 SCALP_ENABLED = False
