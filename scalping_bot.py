@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot : SCALP B en pause; SCALP BTC reste actif.
-# SCALP BTC = Bias 2H + RCI 1H extreme + ST Context 5m, avec filtres CTX 30m/2H.
+# Scalping Bot : SCALP B en pause; strategie SCALP active sur 10 actifs.
+# SCALP = Bias 1H + RCI 15m extreme + CTX 5m; entree sur flip ZALT 5m.
 # Strategies actives avec routage Telegram separe.
 
 import json
@@ -30,7 +30,7 @@ CONFIG = {
     'NTFY_TOPIC': os.environ.get('NTFY_TOPIC', ''),
     'MIN_COOLDOWN': 1800,
     'ENABLE_SCALP_B': False,
-    'ENABLE_SCALP_BTC': os.environ.get('ENABLE_SCALP_BTC', '1') == '1',
+    'ENABLE_SCALP': os.environ.get('ENABLE_SCALP', os.environ.get('ENABLE_SCALP_BTC', '1')) == '1',
     'SYMBOLS': {
         'AAVE/USDT': {'exchange': 'okx'},
         'ADA/USDT': {'exchange': 'okx'},
@@ -81,6 +81,10 @@ PULSE_SCALP_SYMBOLS = {
 }
 
 SCALP_B_SYMBOLS = set(CONFIG['SYMBOLS'])
+SCALP_SYMBOLS = {
+    'BTC/USDT', 'ETH/USDT', 'XRP/USDT', 'LTC/USDT', 'ADA/USDT',
+    'DOGE/USDT', 'LINK/USDT', 'BNB/USDT', 'SOL/USDT', 'AVAX/USDT',
+}
 
 STATE_LOCK = threading.RLock()
 MOMENTUM_STATE = {}
@@ -147,6 +151,7 @@ def init_symbol(symbol):
         MOMENTUM_STATE[symbol] = {
             'st_context_30m': None, 'st_context_30m_ts': None, 'st_context_30m_raw': None,
             'st_context_5m': None, 'st_context_5m_ts': None, 'st_context_5m_raw': None,
+            'st_context_15m': None, 'st_context_15m_ts': None, 'st_context_15m_raw': None,
             'st_context_1m': None, 'st_context_1m_ts': None, 'st_context_1m_raw': None,
             'st_context_2h': None, 'st_context_2h_ts': None, 'st_context_2h_raw': None,
             'bias_4h': None, 'bias_4h_ts': None,
@@ -155,6 +160,8 @@ def init_symbol(symbol):
             'bias_1h': None, 'bias_1h_ts': None,
             'bias_30m': None, 'bias_30m_ts': None,
             'zalt_12h': None, 'zalt_12h_ts': None,
+            'zalt_5m': None, 'zalt_5m_ts': None,
+            'last_zalt_5m_flip_dir': None, 'last_zalt_5m_flip_ts': None,
             'zalt_30m': None, 'zalt_30m_ts': None,
             'last_zalt_30m_flip_dir': None, 'last_zalt_30m_flip_ts': None,
             'scalp_b_armed_dir': None, 'scalp_b_armed_ts': None,
@@ -169,6 +176,9 @@ def init_symbol(symbol):
             'rci_30m_10_prev': None,
             'rci_1h_10': None, 'rci_1h_30': None, 'rci_1h_50': None,
             'rci_1h_dir': None, 'rci_1h_chop': None, 'rci_1h_ts': None,
+            'rci_15m_10': None, 'rci_15m_30': None, 'rci_15m_50': None,
+            'rci_15m_dir': None, 'rci_15m_chop': None, 'rci_15m_ts': None,
+            'scalp_prep_dir': None, 'scalp_quality_dir': None,
         }
 
 
@@ -633,9 +643,9 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
     return bool(notifications)
 
 
-def evaluate_scalp_btc(symbol, price=0, event_id=None, trigger_label="state_refresh"):
-    """SCALP BTC: Bias 2H + RCI 1H extreme, entree sur nouveau CTX 5m."""
-    if symbol != 'BTC/USDT' or not CONFIG.get('ENABLE_SCALP_BTC', True):
+def evaluate_scalp_core(symbol, price=0, event_id=None, trigger_label="state_refresh"):
+    """SCALP: PREP Bias 1H + RCI 15m + CTX 5m; entree sur flip ZALT 5m."""
+    if symbol not in SCALP_SYMBOLS or not CONFIG.get('ENABLE_SCALP', True):
         return False
 
     notifications = []
@@ -643,73 +653,74 @@ def evaluate_scalp_btc(symbol, price=0, event_id=None, trigger_label="state_refr
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
         if not SCALP_ENABLED:
-            logger.info(f"[SCALP OFF] ignore SCALP BTC {symbol}")
             return False
 
         for exp in ('buy', 'sell'):
             direction = 'LONG' if exp == 'buy' else 'SHORT'
-            opposite = 'sell' if exp == 'buy' else 'buy'
-
-            bias2h = m.get('bias_2h')
-            bias2h_ok = is_fresh(m.get('bias_2h_ts'), 6 * 3600) and bias2h == exp
-
-            rci1h = m.get('rci_1h_10')
-            rci1h_fresh = is_fresh(m.get('rci_1h_ts'), 3 * 3600)
+            bias1h = m.get('bias_1h')
+            bias1h_ok = is_fresh(m.get('bias_1h_ts'), 3 * 3600) and bias1h == exp
             try:
-                rci1h = float(rci1h) if rci1h is not None else None
+                rci15m = float(m.get('rci_15m_10'))
             except (TypeError, ValueError):
-                rci1h = None
-            rci1h_ok = bool(
-                rci1h_fresh and rci1h is not None
-                and ((exp == 'buy' and rci1h <= -75) or (exp == 'sell' and rci1h >= 75))
+                rci15m = None
+            rci15m_ok = bool(
+                is_fresh(m.get('rci_15m_ts'), 60 * 60) and rci15m is not None
+                and ((exp == 'buy' and rci15m <= -75) or (exp == 'sell' and rci15m >= 75))
             )
-
             ctx5m = m.get('st_context_5m')
-            ctx5m_fresh = is_fresh(m.get('st_context_5m_ts'), 20 * 60)
-            ctx5m_ok = bool(ctx5m_fresh and ctx5m == exp)
-
-            ctx30m = m.get('st_context_30m')
-            ctx30m_fresh = is_fresh(m.get('st_context_30m_ts'), 90 * 60)
-            ctx30m_opposed = bool(ctx30m_fresh and ctx30m == opposite)
-
-            ctx2h = m.get('st_context_2h')
-            ctx2h_fresh = is_fresh(m.get('st_context_2h_ts'), 6 * 3600)
-            ctx2h_veto = bool(ctx2h_fresh and ctx2h == opposite)
-
-            entry_ok = bool(
-                trigger_label == 'st_context_5m'
-                and bias2h_ok and rci1h_ok and ctx5m_ok and not ctx2h_veto
+            ctx5m_ok = is_fresh(m.get('st_context_5m_ts'), 20 * 60) and ctx5m == exp
+            ctx15m = m.get('st_context_15m')
+            ctx15m_ok = is_fresh(m.get('st_context_15m_ts'), 60 * 60) and ctx15m == exp
+            armed = bool(bias1h_ok and rci15m_ok and ctx5m_ok)
+            quality = bool(armed and ctx15m_ok)
+            zalt5m = m.get('zalt_5m')
+            flip_ok = bool(
+                trigger_label == 'zalt_5m_flip'
+                and m.get('last_zalt_5m_flip_dir') == exp
+                and is_fresh(m.get('last_zalt_5m_flip_ts'), 20 * 60)
             )
+
+            prep_dir = m.get('scalp_prep_dir')
+            quality_dir = m.get('scalp_quality_dir')
+            send_prep = armed and prep_dir != exp
+            send_quality = quality and quality_dir != exp and prep_dir == exp
+            if send_prep:
+                m['scalp_prep_dir'] = exp
+            elif not armed and prep_dir == exp:
+                m['scalp_prep_dir'] = None
+            if quality:
+                m['scalp_quality_dir'] = exp
+            elif quality_dir == exp:
+                m['scalp_quality_dir'] = None
+
+            entry_ok = armed and flip_ok
             logger.info(
-                f"[SCALP BTC CHECK] {symbol} {direction} src={trigger_label} "
-                f"bias2h={bias2h}/{bias2h_ok} rci1h={rci1h} fresh={rci1h_fresh} ok={rci1h_ok} "
-                f"ctx5m={ctx5m}/{ctx5m_ok} ctx30m={ctx30m} opposed={ctx30m_opposed} "
-                f"ctx2h={ctx2h} veto={ctx2h_veto} entry={entry_ok}"
+                f"[SCALP CHECK] {symbol} {direction} src={trigger_label} "
+                f"bias1h={bias1h}/{bias1h_ok} rci15m={rci15m}/{rci15m_ok} "
+                f"ctx5m={ctx5m}/{ctx5m_ok} ctx15m={ctx15m}/{ctx15m_ok} "
+                f"zalt5m={zalt5m} flip={flip_ok} armed={armed} entry={entry_ok}"
             )
-            if entry_ok and should_send(
-                symbol, f"scalp_btc_{exp}", event_id=event_id,
-                cooldown=CONFIG['MIN_COOLDOWN'],
-            ):
-                notifications.append((direction, bias2h, rci1h, ctx5m, ctx30m, ctx30m_opposed, ctx2h))
+            if send_prep:
+                notifications.append(('prep', direction, bias1h, rci15m, ctx5m, ctx15m, quality))
+            elif send_quality:
+                notifications.append(('quality', direction, bias1h, rci15m, ctx5m, ctx15m, True))
+            if entry_ok and should_send(symbol, f"scalp_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
+                notifications.append(('entry', direction, bias1h, rci15m, ctx5m, ctx15m, quality))
+        persist_state()
 
-    for direction, bias2h, rci1h, ctx5m, ctx30m, ctx30m_opposed, ctx2h in notifications:
+    for kind, direction, bias1h, rci15m, ctx5m, ctx15m, quality in notifications:
         emoji = "🟢" if direction == "LONG" else "🔴"
-        price_line = f"Price: ${format_price(price)}\n" if price and float(price) > 0 else ""
-        if ctx30m_opposed:
-            ctx30m_line = f"[AVERTISSEMENT NON BLOQUANT] ST Context 30m oppose: {ctx30m.upper()}"
-        elif ctx30m in ('buy', 'sell'):
-            ctx30m_line = f"[INFO] ST Context 30m: {ctx30m.upper()}"
-        else:
-            ctx30m_line = "[INFO] ST Context 30m: neutre, absent ou perime"
+        title = 'PREP SCALP - QUALITE' if kind == 'prep' and quality else 'PREP SCALP' if kind == 'prep' else 'QUALITE SCALP' if kind == 'quality' else 'SCALP - ENTREE'
+        quality_line = f"\n[QUALITE] ST Context 15m: {ctx15m.upper()}" if quality else ""
+        trigger_line = "\n[TRIGGER] Flip ZALT 5m 21/1.0" if kind == 'entry' else "\n[ATTENTE] Prochain flip ZALT 5m 21/1.0"
         send_telegram_with_buttons(
-            f"{emoji} <b>SCALP BTC - ENTREE {direction}</b> {symbol}\n"
+            f"{emoji} <b>{title} {direction}</b> {symbol}\n"
             "--------------------\n"
-            f"{price_line}"
-            f"[OK] Bias 2H: {bias2h.upper()}\n"
-            f"[OK] RCI court 1H extreme favorable: {rci1h:.1f}\n"
-            f"[TRIGGER] ST Context 5m: {ctx5m.upper()}\n"
-            f"{ctx30m_line}\n"
-            f"[ANTI-CHOP OK] ST Context 2H: {(ctx2h or 'neutre').upper()}",
+            f"Price: ${format_price(price)}\n"
+            f"[OK] Bias 1H 17/40: {bias1h.upper()}\n"
+            f"[OK] RCI court 15m extreme favorable: {rci15m:.1f}\n"
+            f"[OK] ST Context 5m: {ctx5m.upper()}"
+            f"{quality_line}{trigger_line}",
             ntfy=False,
             symbol=symbol,
         )
@@ -752,6 +763,7 @@ def process_webhook(data):
         '60': '1h', '60m': '1h', '1hour': '1h',
         '5': '5m', '5min': '5m', '5minute': '5m',
         '10': '10m', '10min': '10m', '10minute': '10m',
+        '15': '15m', '15min': '15m', '15minute': '15m',
         '30': '30m', '30min': '30m', '30minute': '30m',
     }
     tf = tf_aliases.get(tf, tf)
@@ -796,6 +808,13 @@ def process_webhook(data):
             m['st_context_5m'] = ctx_parsed
             m['st_context_5m_ts'] = time.time()
             m['st_context_5m_raw'] = ctx_raw
+            persist_state()
+
+        elif alert_type == 'st_context' and tf == '15m':
+            ctx_parsed, ctx_raw = parse_st_context_value(val)
+            m['st_context_15m'] = ctx_parsed
+            m['st_context_15m_ts'] = time.time()
+            m['st_context_15m_raw'] = ctx_raw
             persist_state()
 
         elif alert_type == 'st_context' and tf == '30m':
@@ -849,6 +868,19 @@ def process_webhook(data):
             m['rci_10m_50'] = data.get('rci50')
             m['rci_10m_dir'] = 'buy' if rci10_value <= -75 else 'sell' if rci10_value >= 75 else None
             m['rci_10m_ts'] = time.time()
+            persist_state()
+
+        elif alert_type == 'rci' and tf == '15m':
+            try:
+                rci10_value = float(data.get('rci10'))
+            except (TypeError, ValueError):
+                logger.warning(f"[WEBHOOK] RCI 15m invalide: {symbol} rci10={data.get('rci10')!r}")
+                return
+            m['rci_15m_10'] = rci10_value
+            m['rci_15m_30'] = data.get('rci30')
+            m['rci_15m_50'] = data.get('rci50')
+            m['rci_15m_dir'] = 'buy' if rci10_value <= -75 else 'sell' if rci10_value >= 75 else None
+            m['rci_15m_ts'] = time.time()
             persist_state()
 
         elif alert_type == 'rci' and tf == '2h':
@@ -932,6 +964,15 @@ def process_webhook(data):
             m['zalt_12h_ts'] = time.time()
             persist_state()
 
+        elif alert_type == 'zalt' and tf == '5m':
+            zalt_val = val if val in ('buy', 'sell') else None
+            m['zalt_5m'] = zalt_val
+            m['zalt_5m_ts'] = time.time()
+            if data.get('signal') == 'trend_flip' and zalt_val in ('buy', 'sell'):
+                m['last_zalt_5m_flip_dir'] = zalt_val
+                m['last_zalt_5m_flip_ts'] = time.time()
+            persist_state()
+
         elif alert_type == 'zalt' and tf == '30m':
             zalt_val = val if val in ('buy', 'sell') else None
             m['zalt_30m'] = zalt_val
@@ -965,16 +1006,21 @@ def process_webhook(data):
             ),
         )
 
-    if symbol == 'BTC/USDT' and (
-        (alert_type == 'st_context' and tf in ('5m', '30m', '2h'))
-        or (alert_type == 'bias' and tf == '2h')
-        or (alert_type == 'rci' and tf == '1h')
+    if symbol in SCALP_SYMBOLS and (
+        (alert_type == 'st_context' and tf in ('5m', '15m'))
+        or (alert_type == 'bias' and tf == '1h')
+        or (alert_type == 'rci' and tf == '15m')
+        or (alert_type == 'zalt' and tf == '5m')
     ):
-        evaluate_scalp_btc(
+        evaluate_scalp_core(
             symbol,
             price=price,
-            event_id=f"scalp_btc_{symbol}_{tf}_{alert_type}_{event_id}",
-            trigger_label='sync_state' if data.get('sync', False) else f"{alert_type}_{tf}",
+            event_id=f"scalp_{symbol}_{tf}_{alert_type}_{event_id}",
+            trigger_label=(
+                'sync_state' if data.get('sync', False)
+                else 'zalt_5m_flip' if alert_type == 'zalt' and tf == '5m' and data.get('signal') == 'trend_flip'
+                else f"{alert_type}_{tf}"
+            ),
         )
 
 @app.route('/telegram_callback', methods=['POST'])
@@ -1225,8 +1271,8 @@ def reset():
 
 def scalp_required_tv_signals():
     requirements = [
-        {'label': 'ST Context 5m (SCALP BTC)', 'field': 'st_context_5m_ts', 'max_age': 20 * 60, 'warmup': 45 * 60, 'symbols': ['BTC/USDT']},
-        {'label': 'ST Context 2H (SCALP BTC)', 'field': 'st_context_2h_ts', 'max_age': 6 * 3600, 'warmup': 7 * 3600, 'symbols': ['BTC/USDT']},
+        {'label': 'ST Context 5m (SCALP)', 'field': 'st_context_5m_ts', 'max_age': 20 * 60, 'warmup': 45 * 60, 'symbols': sorted(SCALP_SYMBOLS)},
+        {'label': 'ST Context 15m (qualite SCALP)', 'field': 'st_context_15m_ts', 'max_age': 60 * 60, 'warmup': 75 * 60, 'symbols': sorted(SCALP_SYMBOLS)},
     ]
     if CONFIG.get('ENABLE_SCALP_B', False):
         requirements.insert(0, {
@@ -1286,8 +1332,9 @@ def scalp_tv_signal_watchdog():
         # Signaux obligatoires calcules en interne puis relayes par le bot principal.
         if uptime >= 45 * 60:
             internal_requirements = [
-                ('Bias 2H (SCALP BTC)', 'bias_2h_ts', 6 * 3600, 'scalp_btc_bias2h_watchdog', ['BTC/USDT']),
-                ('RCI 1H (SCALP BTC)', 'rci_1h_ts', 3 * 3600, 'scalp_btc_rci1h_watchdog', ['BTC/USDT']),
+                ('Bias 1H (SCALP)', 'bias_1h_ts', 3 * 3600, 'scalp_bias1h_watchdog', sorted(SCALP_SYMBOLS)),
+                ('RCI 15m (SCALP)', 'rci_15m_ts', 60 * 60, 'scalp_rci15m_watchdog', sorted(SCALP_SYMBOLS)),
+                ('ZALT 5m (SCALP)', 'zalt_5m_ts', 20 * 60, 'scalp_zalt5m_watchdog', sorted(SCALP_SYMBOLS)),
             ]
             if CONFIG.get('ENABLE_SCALP_B', False):
                 internal_requirements.extend([
@@ -1324,7 +1371,7 @@ def startup():
     global SCALP_ENABLED
     init_redis()
     load_state()
-    # SCALP B reactivee; les anciennes portes A et Confluence restent desactivees.
+    # Strategie SCALP active; ancienne SCALP B conservee en pause.
     with STATE_LOCK:
         SCALP_ENABLED = True
         persist_state()
@@ -1379,8 +1426,8 @@ def startup():
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         "SCALP B: EN PAUSE (remplacee par SWING dans le mainbot)\n"
-        "SCALP BTC: Bias 2H + RCI 1H extreme + entree ST Context 5m\n"
-        "SCALP BTC: CTX 30m oppose = avertissement; CTX 2H oppose = veto\n"
+        "SCALP (10 actifs): PREP Bias 1H 17/40 + RCI 15m extreme + CTX 5m\n"
+        "SCALP: CTX 15m aligne = QUALITE; entree sur flip ZALT 5m 21/1.0\n"
         "SCALP A et Confluence forte: EN PAUSE\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
