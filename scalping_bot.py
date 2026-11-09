@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Scalping Bot : SCALP B en pause; strategie SCALP active sur 10 actifs.
-# SCALP = Bias 1H + RCI 15m extreme + CTX 5m; entree sur flip ZALT 5m.
+# SCALP = Bias 1H + RCI 1H extreme + CTX 5m; entree sur flip ZALT 5m.
 # Strategies actives avec routage Telegram separe.
 
 import json
@@ -176,8 +176,6 @@ def init_symbol(symbol):
             'rci_30m_10_prev': None,
             'rci_1h_10': None, 'rci_1h_30': None, 'rci_1h_50': None,
             'rci_1h_dir': None, 'rci_1h_chop': None, 'rci_1h_ts': None,
-            'rci_15m_10': None, 'rci_15m_30': None, 'rci_15m_50': None,
-            'rci_15m_dir': None, 'rci_15m_chop': None, 'rci_15m_ts': None,
             'scalp_prep_dir': None, 'scalp_quality_dir': None,
         }
 
@@ -651,7 +649,7 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
 
 
 def evaluate_scalp_core(symbol, price=0, event_id=None, trigger_label="state_refresh"):
-    """SCALP: PREP Bias 1H + RCI 15m + CTX 5m; entree sur flip ZALT 5m."""
+    """SCALP: PREP Bias 1H + RCI 1H + CTX 5m; entree sur flip ZALT 5m."""
     if symbol not in SCALP_SYMBOLS or not CONFIG.get('ENABLE_SCALP', True):
         return False
 
@@ -667,18 +665,18 @@ def evaluate_scalp_core(symbol, price=0, event_id=None, trigger_label="state_ref
             bias1h = m.get('bias_1h')
             bias1h_ok = is_fresh(m.get('bias_1h_ts'), 3 * 3600) and bias1h == exp
             try:
-                rci15m = float(m.get('rci_15m_10'))
+                rci1h = float(m.get('rci_1h_10'))
             except (TypeError, ValueError):
-                rci15m = None
-            rci15m_ok = bool(
-                is_fresh(m.get('rci_15m_ts'), 60 * 60) and rci15m is not None
-                and ((exp == 'buy' and rci15m <= -75) or (exp == 'sell' and rci15m >= 75))
+                rci1h = None
+            rci1h_ok = bool(
+                is_fresh(m.get('rci_1h_ts'), 3 * 3600) and rci1h is not None
+                and ((exp == 'buy' and rci1h <= -75) or (exp == 'sell' and rci1h >= 75))
             )
             ctx5m = m.get('st_context_5m')
             ctx5m_ok = is_fresh(m.get('st_context_5m_ts'), 20 * 60) and ctx5m == exp
             ctx15m = m.get('st_context_15m')
             ctx15m_ok = is_fresh(m.get('st_context_15m_ts'), 60 * 60) and ctx15m == exp
-            armed = bool(bias1h_ok and rci15m_ok and ctx5m_ok)
+            armed = bool(bias1h_ok and rci1h_ok and ctx5m_ok)
             quality = bool(armed and ctx15m_ok)
             zalt5m = m.get('zalt_5m')
             flip_ok = bool(
@@ -703,19 +701,19 @@ def evaluate_scalp_core(symbol, price=0, event_id=None, trigger_label="state_ref
             entry_ok = armed and flip_ok
             logger.info(
                 f"[SCALP CHECK] {symbol} {direction} src={trigger_label} "
-                f"bias1h={bias1h}/{bias1h_ok} rci15m={rci15m}/{rci15m_ok} "
+                f"bias1h={bias1h}/{bias1h_ok} rci1h={rci1h}/{rci1h_ok} "
                 f"ctx5m={ctx5m}/{ctx5m_ok} ctx15m={ctx15m}/{ctx15m_ok} "
                 f"zalt5m={zalt5m} flip={flip_ok} armed={armed} entry={entry_ok}"
             )
             if send_prep:
-                notifications.append(('prep', direction, bias1h, rci15m, ctx5m, ctx15m, quality))
+                notifications.append(('prep', direction, bias1h, rci1h, ctx5m, ctx15m, quality))
             elif send_quality:
-                notifications.append(('quality', direction, bias1h, rci15m, ctx5m, ctx15m, True))
+                notifications.append(('quality', direction, bias1h, rci1h, ctx5m, ctx15m, True))
             if entry_ok and should_send(symbol, f"scalp_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
-                notifications.append(('entry', direction, bias1h, rci15m, ctx5m, ctx15m, quality))
+                notifications.append(('entry', direction, bias1h, rci1h, ctx5m, ctx15m, quality))
         persist_state()
 
-    for kind, direction, bias1h, rci15m, ctx5m, ctx15m, quality in notifications:
+    for kind, direction, bias1h, rci1h, ctx5m, ctx15m, quality in notifications:
         emoji = "🟢" if direction == "LONG" else "🔴"
         title = 'PREP SCALP - QUALITE' if kind == 'prep' and quality else 'PREP SCALP' if kind == 'prep' else 'QUALITE SCALP' if kind == 'quality' else 'SCALP - ENTREE'
         quality_line = f"\n[QUALITE] ST Context 15m: {ctx15m.upper()}" if quality else ""
@@ -725,7 +723,7 @@ def evaluate_scalp_core(symbol, price=0, event_id=None, trigger_label="state_ref
             "--------------------\n"
             f"Price: ${format_price(price)}\n"
             f"[OK] Bias 1H 17/40: {bias1h.upper()}\n"
-            f"[OK] RCI court 15m extreme favorable: {rci15m:.1f}\n"
+            f"[OK] RCI court 1H extreme favorable: {rci1h:.1f}\n"
             f"[OK] ST Context 5m: {ctx5m.upper()}"
             f"{quality_line}{trigger_line}",
             ntfy=False,
@@ -877,19 +875,6 @@ def process_webhook(data):
             m['rci_10m_ts'] = time.time()
             persist_state()
 
-        elif alert_type == 'rci' and tf == '15m':
-            try:
-                rci10_value = float(data.get('rci10'))
-            except (TypeError, ValueError):
-                logger.warning(f"[WEBHOOK] RCI 15m invalide: {symbol} rci10={data.get('rci10')!r}")
-                return
-            m['rci_15m_10'] = rci10_value
-            m['rci_15m_30'] = data.get('rci30')
-            m['rci_15m_50'] = data.get('rci50')
-            m['rci_15m_dir'] = 'buy' if rci10_value <= -75 else 'sell' if rci10_value >= 75 else None
-            m['rci_15m_ts'] = time.time()
-            persist_state()
-
         elif alert_type == 'rci' and tf == '2h':
             rci10 = data.get('rci10')
             try:
@@ -1016,7 +1001,7 @@ def process_webhook(data):
     if symbol in SCALP_SYMBOLS and (
         (alert_type == 'st_context' and tf in ('5m', '15m'))
         or (alert_type == 'bias' and tf == '1h')
-        or (alert_type == 'rci' and tf == '15m')
+        or (alert_type == 'rci' and tf == '1h')
         or (alert_type == 'zalt' and tf == '5m')
     ):
         evaluate_scalp_core(
@@ -1354,7 +1339,7 @@ def scalp_tv_signal_watchdog():
         if uptime >= 45 * 60:
             internal_requirements = [
                 ('Bias 1H (SCALP)', 'bias_1h_ts', 3 * 3600, 'scalp_bias1h_watchdog', sorted(SCALP_SYMBOLS)),
-                ('RCI 15m (SCALP)', 'rci_15m_ts', 60 * 60, 'scalp_rci15m_watchdog', sorted(SCALP_SYMBOLS)),
+                ('RCI 1H (SCALP)', 'rci_1h_ts', 3 * 3600, 'scalp_rci1h_watchdog', sorted(SCALP_SYMBOLS)),
                 ('ZALT 5m (SCALP)', 'zalt_5m_ts', 20 * 60, 'scalp_zalt5m_watchdog', sorted(SCALP_SYMBOLS)),
             ]
             if CONFIG.get('ENABLE_SCALP_B', False):
@@ -1446,7 +1431,7 @@ def startup():
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         "SCALP B: EN PAUSE (remplacee par SWING dans le mainbot)\n"
-        "SCALP (10 actifs): PREP Bias 1H 17/40 + RCI 15m extreme + CTX 5m\n"
+        "SCALP (10 actifs): PREP Bias 1H 17/40 + RCI 1H extreme + CTX 5m\n"
         "SCALP: CTX 15m aligne = QUALITE; entree sur flip ZALT 5m 21/1.0\n"
         "SCALP A et Confluence forte: EN PAUSE\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
