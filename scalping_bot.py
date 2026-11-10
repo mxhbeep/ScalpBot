@@ -37,6 +37,7 @@ CONFIG = {
         'APT/USDT': {'exchange': 'okx'},
         'ARB/USDT': {'exchange': 'okx'},
         'AVAX/USDT': {'exchange': 'okx'},
+        'BCH/USDT': {'exchange': 'okx'},
         'BNB/USDT': {'exchange': 'okx'},
         'BONK/USDT': {'exchange': 'okx'},
         'BTC/USDT': {'exchange': 'okx'},
@@ -45,6 +46,7 @@ CONFIG = {
         'CVX/USDT': {'exchange': 'okx'},
         'DASH/USDT': {'exchange': 'okx'},
         'DOGE/USDT': {'exchange': 'okx'},
+        'DOT/USDT': {'exchange': 'okx'},
         'ENA/USDT': {'exchange': 'okx'},
         'ETH/USDT': {'exchange': 'okx'},
         'ETHFI/USDT': {'exchange': 'okx'},
@@ -66,6 +68,7 @@ CONFIG = {
         'TAO/USDT': {'exchange': 'okx'},
         'UNI/USDT': {'exchange': 'okx'},
         'USELESS/USDT': {'exchange': 'okx'},
+        'XLM/USDT': {'exchange': 'okx'},
         'XPL/USDT': {'exchange': 'okx'},
         'XRP/USDT': {'exchange': 'okx'},
         'ZEC/USDT': {'exchange': 'okx'},
@@ -74,10 +77,11 @@ CONFIG = {
 }
 
 PULSE_SCALP_SYMBOLS = {
-    'ARB/USDT', 'BNB/USDT', 'BONK/USDT', 'COMP/USDT',
-    'CVX/USDT', 'DASH/USDT', 'ETHFI/USDT', 'FARTCOIN/USDT', 'FET/USDT',
-    'FIL/USDT', 'INJ/USDT',
-    'PEPE/USDT', 'RENDER/USDT', 'USELESS/USDT', 'XPL/USDT', 'ZEN/USDT',
+    'ADA/USDT', 'APT/USDT', 'ARB/USDT', 'BCH/USDT', 'BONK/USDT',
+    'COMP/USDT', 'CVX/USDT', 'DASH/USDT', 'ENA/USDT', 'ETHFI/USDT',
+    'FARTCOIN/USDT', 'FET/USDT', 'FIL/USDT', 'INJ/USDT', 'NEAR/USDT',
+    'ONDO/USDT', 'PENGU/USDT', 'PEPE/USDT', 'RENDER/USDT', 'TAO/USDT',
+    'UNI/USDT', 'USELESS/USDT', 'XLM/USDT', 'XPL/USDT', 'ZEN/USDT',
 }
 
 SCALP_B_SYMBOLS = set(CONFIG['SYMBOLS'])
