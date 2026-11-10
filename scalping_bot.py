@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Scalping Bot : SCALP B en pause; strategie SCALP active sur 10 actifs.
+# Scalping Bot : SCALP B en pause; strategie SCALP active sur cinq actifs.
 # SCALP = Bias 1H + RCI 1H extreme + CTX 5m; entree sur flip ZALT 5m.
 # Strategies actives avec routage Telegram separe.
 
@@ -82,8 +82,7 @@ PULSE_SCALP_SYMBOLS = {
 
 SCALP_B_SYMBOLS = set(CONFIG['SYMBOLS'])
 SCALP_SYMBOLS = {
-    'BTC/USDT', 'ETH/USDT', 'XRP/USDT', 'LTC/USDT', 'ADA/USDT',
-    'DOGE/USDT', 'LINK/USDT', 'BNB/USDT', 'SOL/USDT', 'AVAX/USDT',
+    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'LINK/USDT',
 }
 
 STATE_LOCK = threading.RLock()
@@ -1442,7 +1441,7 @@ def startup():
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         "SCALP B: EN PAUSE (remplacee par SWING dans le mainbot)\n"
-        "SCALP (10 actifs): PREP Bias 1H 17/40 + RCI 1H extreme + CTX 5m\n"
+        "SCALP (5 actifs): PREP Bias 1H 17/40 + RCI 1H extreme + CTX 5m\n"
         "SCALP: CTX 15m aligne = QUALITE; entree sur flip ZALT 5m 21/1.0\n"
         "SCALP A et Confluence forte: EN PAUSE\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
