@@ -406,8 +406,7 @@ def send_notification(title: str, message: str, priority=5, tags=None, telegram=
     channels = []
     if telegram:
         channels.append(telegram_channel)
-    if ntfy:
-        channels.append('ntfy')
+    # Les alertes montre sont reservees a SWING dans le bot principal.
     if tags is None:
         tags = notification_tags_from_text(f"{title}\n{message}")
     return NOTIFICATIONS.send(
