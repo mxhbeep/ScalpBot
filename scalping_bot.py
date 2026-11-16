@@ -728,7 +728,7 @@ def evaluate_scalp_core(symbol, price=0, event_id=None, trigger_label="state_ref
             "--------------------\n"
             f"Price: ${format_price(price)}\n"
             f"[OK] Bias 2H 17/40: {bias2h.upper()}\n"
-            f"[OK] ZALT 2H 60/1.2: {zalt2h.upper()}\n"
+            f"[OK] ZALT 2H 55/1.2: {zalt2h.upper()}\n"
             f"[OK] RCI court 1H extreme favorable: {rci1h:.1f}\n"
             f"{'[OK] ST Context 5m: ' + ctx5m.upper() if kind == 'entry' else '[ATTENTE] ST Context 5m'}"
             f"{quality_line}{trigger_line}",
@@ -1455,7 +1455,7 @@ def startup():
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         "SCALP B: EN PAUSE (remplacee par SWING dans le mainbot)\n"
-        "SCALP (5 actifs): PREP Bias 2H 17/40 + ZALT 2H 60/1.2 + RCI 1H extreme\n"
+        "SCALP (5 actifs): PREP Bias 2H 17/40 + ZALT 2H 55/1.2 + RCI 1H extreme\n"
         "SCALP: CTX 15m aligne = QUALITE; entree CTX 5m + flip ZALT 5m 21/1.0\n"
         "SCALP A et Confluence forte: EN PAUSE\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
