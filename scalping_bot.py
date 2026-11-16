@@ -163,6 +163,7 @@ def init_symbol(symbol):
             'bias_1h': None, 'bias_1h_ts': None,
             'bias_30m': None, 'bias_30m_ts': None,
             'zalt_12h': None, 'zalt_12h_ts': None,
+            'zalt_2h': None, 'zalt_2h_ts': None,
             'zalt_5m': None, 'zalt_5m_ts': None,
             'last_zalt_5m_flip_dir': None, 'last_zalt_5m_flip_ts': None,
             'zalt_30m': None, 'zalt_30m_ts': None,
@@ -651,7 +652,7 @@ def evaluate_scalp(symbol, price=0, event_id=None, trigger_label="state_refresh"
 
 
 def evaluate_scalp_core(symbol, price=0, event_id=None, trigger_label="state_refresh"):
-    """SCALP: PREP Bias 1H + RCI 1H + CTX 5m; entree sur flip ZALT 5m."""
+    """SCALP: PREP Bias 2H + ZALT 2H + RCI 1H; entree CTX 5m + flip ZALT 5m."""
     if symbol not in SCALP_SYMBOLS or not CONFIG.get('ENABLE_SCALP', True):
         return False
 
@@ -664,8 +665,10 @@ def evaluate_scalp_core(symbol, price=0, event_id=None, trigger_label="state_ref
 
         for exp in ('buy', 'sell'):
             direction = 'LONG' if exp == 'buy' else 'SHORT'
-            bias1h = m.get('bias_1h')
-            bias1h_ok = is_fresh(m.get('bias_1h_ts'), 3 * 3600) and bias1h == exp
+            bias2h = m.get('bias_2h')
+            bias2h_ok = is_fresh(m.get('bias_2h_ts'), 6 * 3600) and bias2h == exp
+            zalt2h = m.get('zalt_2h')
+            zalt2h_ok = is_fresh(m.get('zalt_2h_ts'), 6 * 3600) and zalt2h == exp
             try:
                 rci1h = float(m.get('rci_1h_10'))
             except (TypeError, ValueError):
@@ -678,7 +681,7 @@ def evaluate_scalp_core(symbol, price=0, event_id=None, trigger_label="state_ref
             ctx5m_ok = is_fresh(m.get('st_context_5m_ts'), 20 * 60) and ctx5m == exp
             ctx15m = m.get('st_context_15m')
             ctx15m_ok = is_fresh(m.get('st_context_15m_ts'), 60 * 60) and ctx15m == exp
-            armed = bool(bias1h_ok and rci1h_ok and ctx5m_ok)
+            armed = bool(bias2h_ok and zalt2h_ok and rci1h_ok)
             quality = bool(armed and ctx15m_ok)
             zalt5m = m.get('zalt_5m')
             flip_ok = bool(
@@ -700,33 +703,34 @@ def evaluate_scalp_core(symbol, price=0, event_id=None, trigger_label="state_ref
             elif quality_dir == exp:
                 m['scalp_quality_dir'] = None
 
-            entry_ok = armed and flip_ok
+            entry_ok = armed and ctx5m_ok and flip_ok and prep_dir == exp
             logger.info(
                 f"[SCALP CHECK] {symbol} {direction} src={trigger_label} "
-                f"bias1h={bias1h}/{bias1h_ok} rci1h={rci1h}/{rci1h_ok} "
+                f"bias2h={bias2h}/{bias2h_ok} zalt2h={zalt2h}/{zalt2h_ok} rci1h={rci1h}/{rci1h_ok} "
                 f"ctx5m={ctx5m}/{ctx5m_ok} ctx15m={ctx15m}/{ctx15m_ok} "
                 f"zalt5m={zalt5m} flip={flip_ok} armed={armed} entry={entry_ok}"
             )
             if send_prep:
-                notifications.append(('prep', direction, bias1h, rci1h, ctx5m, ctx15m, quality))
+                notifications.append(('prep', direction, bias2h, zalt2h, rci1h, ctx5m, ctx15m, quality))
             elif send_quality:
-                notifications.append(('quality', direction, bias1h, rci1h, ctx5m, ctx15m, True))
+                notifications.append(('quality', direction, bias2h, zalt2h, rci1h, ctx5m, ctx15m, True))
             if entry_ok and should_send(symbol, f"scalp_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
-                notifications.append(('entry', direction, bias1h, rci1h, ctx5m, ctx15m, quality))
+                notifications.append(('entry', direction, bias2h, zalt2h, rci1h, ctx5m, ctx15m, quality))
         persist_state()
 
-    for kind, direction, bias1h, rci1h, ctx5m, ctx15m, quality in notifications:
+    for kind, direction, bias2h, zalt2h, rci1h, ctx5m, ctx15m, quality in notifications:
         emoji = "🟢" if direction == "LONG" else "🔴"
         title = 'PREP SCALP - QUALITE' if kind == 'prep' and quality else 'PREP SCALP' if kind == 'prep' else 'QUALITE SCALP' if kind == 'quality' else 'SCALP - ENTREE'
         quality_line = f"\n[QUALITE] ST Context 15m: {ctx15m.upper()}" if quality else ""
-        trigger_line = "\n[TRIGGER] Flip ZALT 5m 21/1.0" if kind == 'entry' else "\n[ATTENTE] Prochain flip ZALT 5m 21/1.0"
+        trigger_line = "\n[TRIGGER] Flip ZALT 5m 21/1.0" if kind == 'entry' else "\n[ATTENTE] ST Context 5m aligne + prochain flip ZALT 5m 21/1.0"
         send_telegram_with_buttons(
             f"{emoji} <b>{title} {direction}</b> {symbol}\n"
             "--------------------\n"
             f"Price: ${format_price(price)}\n"
-            f"[OK] Bias 1H 17/40: {bias1h.upper()}\n"
+            f"[OK] Bias 2H 17/40: {bias2h.upper()}\n"
+            f"[OK] ZALT 2H 60/1.2: {zalt2h.upper()}\n"
             f"[OK] RCI court 1H extreme favorable: {rci1h:.1f}\n"
-            f"[OK] ST Context 5m: {ctx5m.upper()}"
+            f"{'[OK] ST Context 5m: ' + ctx5m.upper() if kind == 'entry' else '[ATTENTE] ST Context 5m'}"
             f"{quality_line}{trigger_line}",
             ntfy=False,
             symbol=symbol,
@@ -958,6 +962,12 @@ def process_webhook(data):
             m['zalt_12h_ts'] = time.time()
             persist_state()
 
+        elif alert_type == 'zalt' and tf == '2h':
+            zalt_val = val if val in ('buy', 'sell') else None
+            m['zalt_2h'] = zalt_val
+            m['zalt_2h_ts'] = time.time()
+            persist_state()
+
         elif alert_type == 'zalt' and tf == '5m':
             zalt_val = val if val in ('buy', 'sell') else None
             m['zalt_5m'] = zalt_val
@@ -1002,9 +1012,9 @@ def process_webhook(data):
 
     if symbol in SCALP_SYMBOLS and (
         (alert_type == 'st_context' and tf in ('5m', '15m'))
-        or (alert_type == 'bias' and tf == '1h')
+        or (alert_type == 'bias' and tf == '2h')
         or (alert_type == 'rci' and tf == '1h')
-        or (alert_type == 'zalt' and tf == '5m')
+        or (alert_type == 'zalt' and tf in ('2h', '5m'))
     ):
         evaluate_scalp_core(
             symbol,
@@ -1351,8 +1361,9 @@ def scalp_tv_signal_watchdog():
         # Signaux obligatoires calcules en interne puis relayes par le bot principal.
         if uptime >= 45 * 60:
             internal_requirements = [
-                ('Bias 1H (SCALP)', 'bias_1h_ts', 3 * 3600, 'scalp_bias1h_watchdog', sorted(SCALP_SYMBOLS)),
+                ('Bias 2H (SCALP)', 'bias_2h_ts', 6 * 3600, 'scalp_bias2h_watchdog', sorted(SCALP_SYMBOLS)),
                 ('RCI 1H (SCALP)', 'rci_1h_ts', 3 * 3600, 'scalp_rci1h_watchdog', sorted(SCALP_SYMBOLS)),
+                ('ZALT 2H (SCALP)', 'zalt_2h_ts', 6 * 3600, 'scalp_zalt2h_watchdog', sorted(SCALP_SYMBOLS)),
                 ('ZALT 5m (SCALP)', 'zalt_5m_ts', 20 * 60, 'scalp_zalt5m_watchdog', sorted(SCALP_SYMBOLS)),
             ]
             if CONFIG.get('ENABLE_SCALP_B', False):
@@ -1444,8 +1455,8 @@ def startup():
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         "SCALP B: EN PAUSE (remplacee par SWING dans le mainbot)\n"
-        "SCALP (5 actifs): PREP Bias 1H 17/40 + RCI 1H extreme + CTX 5m\n"
-        "SCALP: CTX 15m aligne = QUALITE; entree sur flip ZALT 5m 21/1.0\n"
+        "SCALP (5 actifs): PREP Bias 2H 17/40 + ZALT 2H 60/1.2 + RCI 1H extreme\n"
+        "SCALP: CTX 15m aligne = QUALITE; entree CTX 5m + flip ZALT 5m 21/1.0\n"
         "SCALP A et Confluence forte: EN PAUSE\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
