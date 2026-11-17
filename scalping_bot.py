@@ -86,7 +86,7 @@ PULSE_SCALP_SYMBOLS = {
 
 SCALP_B_SYMBOLS = set(CONFIG['SYMBOLS'])
 SCALP_SYMBOLS = {
-    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'LINK/USDT',
+    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'LINK/USDT', 'ZEC/USDT',
 }
 
 STATE_LOCK = threading.RLock()
@@ -1455,7 +1455,7 @@ def startup():
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         "SCALP B: EN PAUSE (remplacee par SWING dans le mainbot)\n"
-        "SCALP (5 actifs): PREP Bias 2H 17/40 + ZALT 2H 55/1.2 + RCI 1H extreme\n"
+        "SCALP (6 actifs): PREP Bias 2H 17/40 + ZALT 2H 55/1.2 + RCI 1H extreme\n"
         "SCALP: CTX 15m aligne = QUALITE; entree CTX 5m + flip ZALT 5m 21/1.0\n"
         "SCALP A et Confluence forte: EN PAUSE\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
