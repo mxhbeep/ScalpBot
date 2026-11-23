@@ -162,6 +162,10 @@ def init_symbol(symbol):
             'bias_30m': None, 'bias_30m_ts': None,
             'bias_15m': None, 'bias_15m_ts': None,
             'zalt_15m': None, 'zalt_15m_ts': None,
+            'bias_1h_btc': None, 'bias_1h_btc_ts': None,
+            'zalt_1h_btc': None, 'zalt_1h_btc_ts': None,
+            'rci_15m_10': None, 'rci_15m_ts': None,
+            'st_context_3m': None, 'st_context_3m_ts': None,
             'zalt_12h': None, 'zalt_12h_ts': None,
             'zalt_2h': None, 'zalt_2h_ts': None,
             'zalt_5m': None, 'zalt_5m_ts': None,
@@ -505,26 +509,26 @@ def send_telegram_with_buttons(msg, ntfy=False, priority=False, symbol=None):
 
 
 def evaluate_scalp_btc_15m(price=0, event_id=None):
-    """BTC: confirmations 15m, RCI 5m extreme, nouvelle zone Context 1m."""
+    """BTC: confirmations 1H, RCI 15m extreme, nouvelle zone Context 3m."""
     symbol = 'BTC/USDT'
     if not CONFIG.get('ENABLE_SCALP_BTC_15M', False) or not CONFIG.get('ENABLE_SCALP', True) or not SCALP_ENABLED:
         return False
     with STATE_LOCK:
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
-        direction = m.get('st_context_1m')
+        direction = m.get('st_context_3m')
         if direction not in ('buy', 'sell'):
             return False
         try:
-            rci5 = float(m.get('rci_5m_10'))
+            rci5 = float(m.get('rci_15m_10'))
         except (TypeError, ValueError):
             return False
         aligned = (
-            is_fresh(m.get('bias_15m_ts'), 45 * 60) and m.get('bias_15m') == direction
-            and is_fresh(m.get('zalt_15m_ts'), 45 * 60) and m.get('zalt_15m') == direction
-            and is_fresh(m.get('rci_5m_ts'), 12 * 60)
+            is_fresh(m.get('bias_1h_btc_ts'), 2 * 3600) and m.get('bias_1h_btc') == direction
+            and is_fresh(m.get('zalt_1h_btc_ts'), 2 * 3600) and m.get('zalt_1h_btc') == direction
+            and is_fresh(m.get('rci_15m_ts'), 30 * 60)
             and ((direction == 'buy' and rci5 <= -75) or (direction == 'sell' and rci5 >= 75))
-            and is_fresh(m.get('st_context_1m_ts'), 3 * 60)
+            and is_fresh(m.get('st_context_3m_ts'), 10 * 60)
         )
         if not aligned or not should_send(symbol, f"scalp_btc_15m_{direction}", cooldown=1800, event_id=event_id):
             return False
@@ -532,9 +536,9 @@ def evaluate_scalp_btc_15m(price=0, event_id=None):
     return send_telegram_with_buttons(
         f"<b>[SCALP BTC - ENTREE]</b> BTC/USDT\n"
         f"Direction: {side}\nPrice: ${format_price(price)}\n"
-        f"[OK] Bias 15m 21/55 et ZALT 15m 45/1.3: {direction.upper()}\n"
-        f"[OK] RCI court 5m extreme favorable: {rci5:.1f}\n"
-        "[TRIGGER] Nouvelle zone ST Context 1m alignee",
+        f"[OK] Bias 1H 21/55 et ZALT 1H 45/1.3: {direction.upper()}\n"
+        f"[OK] RCI court 15m extreme favorable: {rci5:.1f}\n"
+        "[TRIGGER] Nouvelle zone ST Context 3m alignee",
         ntfy=False, symbol=symbol,
     )
 
@@ -673,12 +677,13 @@ def process_webhook(data):
     price = data.get('price', 0)
     event_id = data.get('event_id') or data.get('time') or str(time.time())
     rci30m_extreme_cross = None
-    new_btc_ctx1m_zone = False
+    new_btc_ctx3m_zone = False
 
     tf_aliases = {
         '1': '1m', '1min': '1m', '1minute': '1m',
         '60': '1h', '60m': '1h', '1hour': '1h',
         '5': '5m', '5min': '5m', '5minute': '5m',
+        '3': '3m', '3min': '3m', '3minute': '3m',
         '10': '10m', '10min': '10m', '10minute': '10m',
         '15': '15m', '15min': '15m', '15minute': '15m',
         '30': '30m', '30min': '30m', '30minute': '30m',
@@ -713,9 +718,15 @@ def process_webhook(data):
         m = MOMENTUM_STATE[symbol]
         logger.info(f"Webhook: {symbol} | tf={tf} | type={alert_type} | val={val}")
 
-        if alert_type == 'st_context' and tf == '1m':
+        if alert_type == 'st_context' and tf == '3m':
             ctx_parsed, ctx_raw = parse_st_context_value(val)
-            new_btc_ctx1m_zone = symbol == 'BTC/USDT' and ctx_parsed in ('buy', 'sell') and ctx_parsed != m.get('st_context_1m') and not data.get('sync', False)
+            new_btc_ctx3m_zone = symbol == 'BTC/USDT' and ctx_parsed in ('buy', 'sell') and ctx_parsed != m.get('st_context_3m') and not data.get('sync', False)
+            m['st_context_3m'] = ctx_parsed
+            m['st_context_3m_ts'] = time.time()
+            persist_state()
+
+        elif alert_type == 'st_context' and tf == '1m':
+            ctx_parsed, ctx_raw = parse_st_context_value(val)
             m['st_context_1m'] = ctx_parsed
             m['st_context_1m_ts'] = time.time()
             m['st_context_1m_raw'] = ctx_raw
@@ -803,7 +814,7 @@ def process_webhook(data):
             m['rci_2h_ts'] = time.time()
             persist_state()
 
-        elif alert_type == 'rci' and tf in ('1h', '5m'):
+        elif alert_type == 'rci' and tf in ('1h', '5m', '15m'):
             rci10 = data.get('rci10')
             try:
                 rci10_value = float(rci10)
@@ -850,6 +861,10 @@ def process_webhook(data):
             m['bias_1h'] = bias_val
             m['bias_1h_ts'] = time.time()
             persist_state()
+            if symbol == 'BTC/USDT' and str(data.get('event_id', '')).startswith('okx_btc_bias_1h_'):
+                m['bias_1h_btc'] = bias_val
+                m['bias_1h_btc_ts'] = time.time()
+                persist_state()
 
         elif alert_type == 'bias' and tf == '30m':
             bias_val = val if val in ('buy', 'sell') else None
@@ -871,6 +886,11 @@ def process_webhook(data):
         elif alert_type == 'zalt' and tf == '15m':
             m['zalt_15m'] = val if val in ('buy', 'sell') else None
             m['zalt_15m_ts'] = time.time()
+            persist_state()
+
+        elif alert_type == 'zalt' and tf == '1h':
+            m['zalt_1h_btc'] = val if val in ('buy', 'sell') else None
+            m['zalt_1h_btc_ts'] = time.time()
             persist_state()
 
         elif alert_type == 'zalt' and tf == '12h':
@@ -906,7 +926,7 @@ def process_webhook(data):
         else:
             return
 
-    if new_btc_ctx1m_zone:
+    if new_btc_ctx3m_zone:
         evaluate_scalp_btc_15m(price=price, event_id=f"scalp_btc_{event_id}")
 
     if symbol in SCALP_SYMBOLS and (
