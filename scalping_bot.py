@@ -49,7 +49,6 @@ CONFIG = {
         'DOT/USDT': {'exchange': 'okx'},
         'ENA/USDT': {'exchange': 'okx'},
         'ETH/USDT': {'exchange': 'okx'},
-        'ETHFI/USDT': {'exchange': 'okx'},
         'FARTCOIN/USDT': {'exchange': 'okx'},
         'FET/USDT': {'exchange': 'okx'},
         'FIL/USDT': {'exchange': 'okx'},
@@ -78,7 +77,7 @@ CONFIG = {
 
 PULSE_SCALP_SYMBOLS = {
     'ADA/USDT', 'APT/USDT', 'ARB/USDT', 'BCH/USDT', 'BONK/USDT',
-    'COMP/USDT', 'CVX/USDT', 'DASH/USDT', 'ENA/USDT', 'ETHFI/USDT',
+    'COMP/USDT', 'CVX/USDT', 'DASH/USDT', 'ENA/USDT',
     'FARTCOIN/USDT', 'FET/USDT', 'FIL/USDT', 'INJ/USDT', 'NEAR/USDT',
     'ONDO/USDT', 'PENGU/USDT', 'PEPE/USDT', 'RENDER/USDT', 'TAO/USDT',
     'UNI/USDT', 'USELESS/USDT', 'XLM/USDT', 'XPL/USDT', 'ZEN/USDT',
@@ -1204,7 +1203,7 @@ def reset():
 def scalp_required_tv_signals():
     requirements = [
         {'label': 'RCI 5m (SCALP)', 'field': 'rci_5m_ts', 'max_age': 20 * 60, 'warmup': 45 * 60, 'symbols': sorted(SCALP_SYMBOLS)},
-        {'label': 'ST Context 5m (SCALP)', 'field': 'st_context_5m_ts', 'max_age': 20 * 60, 'warmup': 45 * 60, 'symbols': sorted(SCALP_SYMBOLS)},
+        {'label': 'ST Context 5m (SCALP)', 'field': 'st_context_5m_ts', 'max_age': 60 * 60, 'warmup': 60 * 60, 'symbols': sorted(SCALP_SYMBOLS)},
         {'label': 'ST Context 15m (SCALP B / qualite A)', 'field': 'st_context_15m_ts', 'max_age': 60 * 60, 'warmup': 75 * 60, 'symbols': sorted(SCALP_SYMBOLS)},
     ]
     return requirements
