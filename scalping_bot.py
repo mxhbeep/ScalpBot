@@ -30,6 +30,7 @@ CONFIG = {
     'NTFY_TOPIC': os.environ.get('NTFY_TOPIC', ''),
     'MIN_COOLDOWN': 1800,
     'ENABLE_SCALP': os.environ.get('ENABLE_SCALP', os.environ.get('ENABLE_SCALP_BTC', '1')) == '1',
+    'ENABLE_SCALP_BTC_15M': os.environ.get('ENABLE_SCALP_BTC_15M', '0') == '1',
     'SYMBOLS': {
         'AAVE/USDT': {'exchange': 'okx'},
         'ADA/USDT': {'exchange': 'okx'},
@@ -507,7 +508,7 @@ def send_telegram_with_buttons(msg, ntfy=False, priority=False, symbol=None):
 def evaluate_scalp_btc_15m(price=0, event_id=None):
     """BTC: confirmations 15m, RCI 5m extreme, nouvelle zone Context 1m."""
     symbol = 'BTC/USDT'
-    if not CONFIG.get('ENABLE_SCALP', True) or not SCALP_ENABLED:
+    if not CONFIG.get('ENABLE_SCALP_BTC_15M', False) or not CONFIG.get('ENABLE_SCALP', True) or not SCALP_ENABLED:
         return False
     with STATE_LOCK:
         init_symbol(symbol)
