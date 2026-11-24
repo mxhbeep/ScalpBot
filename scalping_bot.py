@@ -508,9 +508,10 @@ def send_telegram_with_buttons(msg, ntfy=False, priority=False, symbol=None):
     return bool(result.get(telegram_channel))
 
 
-def evaluate_scalp_btc_15m(price=0, event_id=None):
-    """BTC: confirmations 1H, RCI 15m extreme, nouvelle zone Context 3m."""
-    symbol = 'BTC/USDT'
+def evaluate_scalp_btc_15m(symbol, price=0, event_id=None):
+    """Six actifs Scalp: confirmations 1H, RCI 15m, nouvelle zone Context 3m."""
+    if symbol not in SCALP_SYMBOLS:
+        return False
     if not CONFIG.get('ENABLE_SCALP_BTC_15M', False) or not CONFIG.get('ENABLE_SCALP', True) or not SCALP_ENABLED:
         return False
     with STATE_LOCK:
@@ -534,7 +535,7 @@ def evaluate_scalp_btc_15m(price=0, event_id=None):
             return False
     side = 'LONG' if direction == 'buy' else 'SHORT'
     return send_telegram_with_buttons(
-        f"<b>[SCALP BTC - ENTREE]</b> BTC/USDT\n"
+        f"<b>[SCALP 3m - ENTREE]</b> {symbol}\n"
         f"Direction: {side}\nPrice: ${format_price(price)}\n"
         f"[OK] Bias 1H 21/55 et ZALT 1H 45/1.3: {direction.upper()}\n"
         f"[OK] RCI court 15m extreme favorable: {rci5:.1f}\n"
@@ -720,7 +721,7 @@ def process_webhook(data):
 
         if alert_type == 'st_context' and tf == '3m':
             ctx_parsed, ctx_raw = parse_st_context_value(val)
-            new_btc_ctx3m_zone = symbol == 'BTC/USDT' and ctx_parsed in ('buy', 'sell') and ctx_parsed != m.get('st_context_3m') and not data.get('sync', False)
+            new_btc_ctx3m_zone = symbol in SCALP_SYMBOLS and ctx_parsed in ('buy', 'sell') and ctx_parsed != m.get('st_context_3m') and not data.get('sync', False)
             m['st_context_3m'] = ctx_parsed
             m['st_context_3m_ts'] = time.time()
             persist_state()
@@ -861,7 +862,7 @@ def process_webhook(data):
             m['bias_1h'] = bias_val
             m['bias_1h_ts'] = time.time()
             persist_state()
-            if symbol == 'BTC/USDT' and str(data.get('event_id', '')).startswith('okx_btc_bias_1h_'):
+            if symbol in SCALP_SYMBOLS and str(data.get('event_id', '')).startswith('okx_scalp_bias_1h_'):
                 m['bias_1h_btc'] = bias_val
                 m['bias_1h_btc_ts'] = time.time()
                 persist_state()
@@ -927,7 +928,7 @@ def process_webhook(data):
             return
 
     if new_btc_ctx3m_zone:
-        evaluate_scalp_btc_15m(price=price, event_id=f"scalp_btc_{event_id}")
+        evaluate_scalp_btc_15m(symbol, price=price, event_id=f"scalp_3m_{symbol}_{event_id}")
 
     if symbol in SCALP_SYMBOLS and (
         (alert_type == 'st_context' and tf in ('5m', '15m'))
