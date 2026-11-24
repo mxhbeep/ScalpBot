@@ -31,6 +31,7 @@ CONFIG = {
     'MIN_COOLDOWN': 1800,
     'ENABLE_SCALP': os.environ.get('ENABLE_SCALP', os.environ.get('ENABLE_SCALP_BTC', '1')) == '1',
     'ENABLE_SCALP_BTC_15M': os.environ.get('ENABLE_SCALP_BTC_15M', '1') == '1',
+    'ENABLE_SCALP_CONTINUATION': os.environ.get('ENABLE_SCALP_CONTINUATION', '1') == '1',
     'SYMBOLS': {
         'AAVE/USDT': {'exchange': 'okx'},
         'ADA/USDT': {'exchange': 'okx'},
@@ -162,6 +163,7 @@ def init_symbol(symbol):
             'bias_30m': None, 'bias_30m_ts': None,
             'bias_15m': None, 'bias_15m_ts': None,
             'zalt_15m': None, 'zalt_15m_ts': None,
+            'zalt_4h': None, 'zalt_4h_ts': None,
             'bias_1h_btc': None, 'bias_1h_btc_ts': None,
             'zalt_1h_btc': None, 'zalt_1h_btc_ts': None,
             'rci_15m_10': None, 'rci_15m_ts': None,
@@ -185,6 +187,8 @@ def init_symbol(symbol):
             'rci_1h_10': None, 'rci_1h_30': None, 'rci_1h_50': None,
             'rci_1h_dir': None, 'rci_1h_chop': None, 'rci_1h_ts': None,
             'scalp_prep_dir': None, 'scalp_b_prep_dir': None, 'scalp_quality_dir': None,
+            'continuation_prep_dir': None, 'continuation_prep_route': None, 'continuation_prep_ts': None,
+            'continuation_quality_dir': None,
         }
 
 
@@ -508,6 +512,72 @@ def send_telegram_with_buttons(msg, ntfy=False, priority=False, symbol=None):
     return bool(result.get(telegram_channel))
 
 
+def evaluate_scalp_continuation(symbol, price=0, event_id=None, rci15m_previous=None, trigger=False):
+    """PREP sur confluence 4H/2H/15m; entree au franchissement RCI 15m."""
+    if symbol not in SCALP_SYMBOLS or not CONFIG.get('ENABLE_SCALP_CONTINUATION', True) or not CONFIG.get('ENABLE_SCALP', True) or not SCALP_ENABLED:
+        return False
+    notifications = []
+    with STATE_LOCK:
+        init_symbol(symbol)
+        m = MOMENTUM_STATE[symbol]
+        bias4h = m.get('bias_4h') if is_fresh(m.get('bias_4h_ts'), 12 * 3600) else None
+        bias2h = m.get('bias_2h') if is_fresh(m.get('bias_2h_ts'), 6 * 3600) else None
+        zalt4h = m.get('zalt_4h') if is_fresh(m.get('zalt_4h_ts'), 12 * 3600) else None
+        ctx15m = m.get('st_context_15m') if is_fresh(m.get('st_context_15m_ts'), 60 * 60) else None
+        try:
+            rci2h = float(m.get('rci_2h_10')) if is_fresh(m.get('rci_2h_ts'), 6 * 3600) else None
+        except (TypeError, ValueError):
+            rci2h = None
+        try:
+            rci15m = float(m.get('rci_15m_10')) if is_fresh(m.get('rci_15m_ts'), 30 * 60) else None
+        except (TypeError, ValueError):
+            rci15m = None
+        route = direction = None
+        for exp in ('buy', 'sell'):
+            rci2h_ok = rci2h is not None and (rci2h <= -75 if exp == 'buy' else rci2h >= 75)
+            if ctx15m != exp or not rci2h_ok:
+                continue
+            if bias4h == exp:
+                route, direction = 'A', exp
+                break
+            if zalt4h == exp and bias2h == exp and bias4h in ('buy', 'sell') and bias4h != zalt4h:
+                route, direction = 'B', exp
+                break
+        previous_dir = m.get('continuation_prep_dir')
+        previous_route = m.get('continuation_prep_route')
+        if direction != previous_dir or route != previous_route:
+            m['continuation_prep_dir'] = direction
+            m['continuation_prep_route'] = route
+            m['continuation_prep_ts'] = time.time() if direction else None
+            persist_state()
+            if direction:
+                notifications.append(('prep', route, direction))
+        quality_dir = direction if route == 'A' and zalt4h == direction else None
+        if quality_dir != m.get('continuation_quality_dir'):
+            m['continuation_quality_dir'] = quality_dir
+            persist_state()
+            if quality_dir and previous_dir == direction and previous_route == route:
+                notifications.append(('quality', route, direction))
+        if direction and trigger and previous_dir == direction and previous_route == route and rci15m is not None and rci15m_previous is not None:
+            crossed = (rci15m_previous > -75 and rci15m <= -75) if direction == 'buy' else (rci15m_previous < 75 and rci15m >= 75)
+            if crossed and should_send(symbol, f"continuation_{route}_{direction}", cooldown=1800, event_id=event_id):
+                notifications.append(('entry', route, direction))
+    for kind, route, direction in notifications:
+        side = 'LONG' if direction == 'buy' else 'SHORT'
+        quality = route == 'A' and zalt4h == direction
+        title = f"{'PREP' if kind == 'prep' else 'ENTREE' if kind == 'entry' else 'QUALITE'} CONTINUATION {route}"
+        send_telegram_with_buttons(
+            f"<b>[{title}{' - QUALITE' if quality and kind != 'quality' else ''}]</b> {symbol}\n"
+            f"Direction: {side}\nPrice: ${format_price(price)}\n"
+            + (f"[OK] Bias 4H 21/55: {side}\n" if route == 'A' else f"[OK] ZALT 4H 55/1.2 + Bias 2H 17/40: {side}\n")
+            + f"[OK] RCI court 2H extreme: {rci2h:.1f}\n[OK] ST Context 15m aligne\n"
+            + (f"[QUALITE] ZALT 4H aligne\n" if quality else "")
+            + (f"[TRIGGER] RCI court 15m franchit l'extreme: {rci15m:.1f}" if kind == 'entry' else "[ATTENTE] RCI court 15m franchit l'extreme favorable"),
+            ntfy=False, symbol=symbol,
+        )
+    return bool(notifications)
+
+
 def evaluate_scalp_btc_15m(symbol, price=0, event_id=None):
     """Six actifs Scalp: confirmations 1H, RCI 15m, nouvelle zone Context 3m."""
     if symbol not in SCALP_SYMBOLS:
@@ -679,6 +749,7 @@ def process_webhook(data):
     event_id = data.get('event_id') or data.get('time') or str(time.time())
     rci30m_extreme_cross = None
     new_btc_ctx3m_zone = False
+    rci15m_previous = None
 
     tf_aliases = {
         '1': '1m', '1min': '1m', '1minute': '1m',
@@ -822,6 +893,11 @@ def process_webhook(data):
             except (TypeError, ValueError):
                 logger.warning(f"[WEBHOOK] RCI {tf} invalide: {symbol} rci10={rci10!r}")
                 return
+            if tf == '15m':
+                try:
+                    rci15m_previous = float(m.get('rci_15m_10'))
+                except (TypeError, ValueError):
+                    rci15m_previous = None
             m[f'rci_{tf}_10'] = rci10_value
             m[f'rci_{tf}_30'] = data.get('rci30')
             m[f'rci_{tf}_50'] = data.get('rci50')
@@ -894,6 +970,11 @@ def process_webhook(data):
             m['zalt_1h_btc_ts'] = time.time()
             persist_state()
 
+        elif alert_type == 'zalt' and tf == '4h':
+            m['zalt_4h'] = val if val in ('buy', 'sell') else None
+            m['zalt_4h_ts'] = time.time()
+            persist_state()
+
         elif alert_type == 'zalt' and tf == '12h':
             zalt_val = val if val in ('buy', 'sell') else None
             m['zalt_12h'] = zalt_val
@@ -926,6 +1007,18 @@ def process_webhook(data):
 
         else:
             return
+
+    if symbol in SCALP_SYMBOLS and (
+        (alert_type == 'bias' and tf in ('2h', '4h'))
+        or (alert_type == 'zalt' and tf == '4h')
+        or (alert_type == 'rci' and tf in ('2h', '15m'))
+        or (alert_type == 'st_context' and tf == '15m')
+    ):
+        evaluate_scalp_continuation(
+            symbol, price=price, event_id=f"continuation_{symbol}_{event_id}",
+            rci15m_previous=rci15m_previous,
+            trigger=alert_type == 'rci' and tf == '15m' and not data.get('sync', False),
+        )
 
     if new_btc_ctx3m_zone:
         evaluate_scalp_btc_15m(symbol, price=price, event_id=f"scalp_3m_{symbol}_{event_id}")
