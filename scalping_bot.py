@@ -30,7 +30,7 @@ CONFIG = {
     'NTFY_TOPIC': os.environ.get('NTFY_TOPIC', ''),
     'MIN_COOLDOWN': 1800,
     'ENABLE_SCALP': os.environ.get('ENABLE_SCALP', os.environ.get('ENABLE_SCALP_BTC', '1')) == '1',
-    'ENABLE_SCALP_BTC_15M': os.environ.get('ENABLE_SCALP_BTC_15M', '1') == '1',
+    'ENABLE_SCALP_BTC_15M': os.environ.get('ENABLE_SCALP_BTC_15M', '0') == '1',
     'ENABLE_SCALP_CONTINUATION': os.environ.get('ENABLE_SCALP_CONTINUATION', '1') == '1',
     'SYMBOLS': {
         'AAVE/USDT': {'exchange': 'okx'},
