@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Scalping Bot : SCALP A et B actives sur six actifs.
-# SCALP A/B = Bias 2H + RCI 1H extreme; entree avec CTX 5m et RCI 5m extreme.
+# SCALP A = ZALT 2H + Bias 1H + RCI 1H; B conserve Bias 2H + CTX 15m.
 # Strategies actives avec routage Telegram separe.
 
 import json
@@ -32,6 +32,7 @@ CONFIG = {
     'ENABLE_SCALP': os.environ.get('ENABLE_SCALP', os.environ.get('ENABLE_SCALP_BTC', '1')) == '1',
     'ENABLE_SCALP_BTC_15M': os.environ.get('ENABLE_SCALP_BTC_15M', '0') == '1',
     'ENABLE_SCALP_CONTINUATION': os.environ.get('ENABLE_SCALP_CONTINUATION', '1') == '1',
+    'ENABLE_SCALP_CONTINUATION_B': os.environ.get('ENABLE_SCALP_CONTINUATION_B', '0') == '1',
     'SYMBOLS': {
         'AAVE/USDT': {'exchange': 'okx'},
         'ADA/USDT': {'exchange': 'okx'},
@@ -187,6 +188,7 @@ def init_symbol(symbol):
             'rci_1h_10': None, 'rci_1h_30': None, 'rci_1h_50': None,
             'rci_1h_dir': None, 'rci_1h_chop': None, 'rci_1h_ts': None,
             'scalp_prep_dir': None, 'scalp_b_prep_dir': None, 'scalp_quality_dir': None,
+            'scalp_a_bias1h_prep_dir': None,
             'continuation_prep_dir': None, 'continuation_prep_route': None, 'continuation_prep_ts': None,
             'continuation_quality_dir': None,
         }
@@ -540,7 +542,7 @@ def evaluate_scalp_continuation(symbol, price=0, event_id=None, rci15m_previous=
             if bias4h == exp:
                 route, direction = 'A', exp
                 break
-            if zalt4h == exp and bias2h == exp and bias4h in ('buy', 'sell') and bias4h != zalt4h:
+            if CONFIG.get('ENABLE_SCALP_CONTINUATION_B', False) and zalt4h == exp and bias2h == exp and bias4h in ('buy', 'sell') and bias4h != zalt4h:
                 route, direction = 'B', exp
                 break
         previous_dir = m.get('continuation_prep_dir')
@@ -615,7 +617,7 @@ def evaluate_scalp_btc_15m(symbol, price=0, event_id=None):
 
 
 def evaluate_scalp_core(symbol, price=0, event_id=None, trigger_label="state_refresh"):
-    """SCALP A/B: ZALT 2H ou CTX 15m; entree CTX 5m + RCI 5m extreme."""
+    """SCALP A/B: confirmations distinctes; entree CTX 5m + RCI 5m extreme."""
     if symbol not in SCALP_SYMBOLS or not CONFIG.get('ENABLE_SCALP', True):
         return False
 
@@ -630,6 +632,8 @@ def evaluate_scalp_core(symbol, price=0, event_id=None, trigger_label="state_ref
             direction = 'LONG' if exp == 'buy' else 'SHORT'
             bias2h = m.get('bias_2h')
             bias2h_ok = is_fresh(m.get('bias_2h_ts'), 6 * 3600) and bias2h == exp
+            bias1h = m.get('bias_1h_btc')
+            bias1h_ok = is_fresh(m.get('bias_1h_btc_ts'), 2 * 3600) and bias1h == exp
             zalt2h = m.get('zalt_2h')
             zalt2h_ok = is_fresh(m.get('zalt_2h_ts'), 6 * 3600) and zalt2h == exp
             try:
@@ -645,7 +649,7 @@ def evaluate_scalp_core(symbol, price=0, event_id=None, trigger_label="state_ref
             ctx15m = m.get('st_context_15m')
             ctx15m_ok = is_fresh(m.get('st_context_15m_ts'), 60 * 60) and ctx15m == exp
             base_ok = bool(bias2h_ok and rci1h_ok)
-            armed_a = bool(base_ok and zalt2h_ok)
+            armed_a = bool(bias1h_ok and rci1h_ok and zalt2h_ok)
             armed_b = bool(base_ok and not zalt2h_ok and ctx15m_ok)
             armed = armed_a or armed_b
             route = 'A' if armed_a else 'B'
@@ -659,7 +663,7 @@ def evaluate_scalp_core(symbol, price=0, event_id=None, trigger_label="state_ref
                 and ((exp == 'buy' and rci5m <= -75) or (exp == 'sell' and rci5m >= 75))
             )
 
-            prep_dir = m.get('scalp_prep_dir')
+            prep_dir = m.get('scalp_a_bias1h_prep_dir')
             prep_b_dir = m.get('scalp_b_prep_dir')
             quality_dir = m.get('scalp_quality_dir')
             send_prep = (armed_a and prep_dir != exp) or (armed_b and prep_b_dir != exp)
@@ -667,9 +671,9 @@ def evaluate_scalp_core(symbol, price=0, event_id=None, trigger_label="state_ref
                 (armed_a and prep_dir == exp) or (armed_b and prep_b_dir == exp)
             )
             if armed_a and send_prep:
-                m['scalp_prep_dir'] = exp
+                m['scalp_a_bias1h_prep_dir'] = exp
             elif not armed_a and prep_dir == exp:
-                m['scalp_prep_dir'] = None
+                m['scalp_a_bias1h_prep_dir'] = None
             if armed_b and send_prep:
                 m['scalp_b_prep_dir'] = exp
             elif not armed_b and prep_b_dir == exp:
@@ -684,19 +688,19 @@ def evaluate_scalp_core(symbol, price=0, event_id=None, trigger_label="state_ref
             )
             logger.info(
                 f"[SCALP CHECK] {symbol} {direction} src={trigger_label} "
-                f"bias2h={bias2h}/{bias2h_ok} zalt2h={zalt2h}/{zalt2h_ok} rci1h={rci1h}/{rci1h_ok} "
+                f"bias1h={bias1h}/{bias1h_ok} bias2h={bias2h}/{bias2h_ok} zalt2h={zalt2h}/{zalt2h_ok} rci1h={rci1h}/{rci1h_ok} "
                 f"ctx5m={ctx5m}/{ctx5m_ok} ctx15m={ctx15m}/{ctx15m_ok} "
                 f"rci5m={rci5m}/{rci5m_ok} route={route} armed={armed} entry={entry_ok}"
             )
             if send_prep:
-                notifications.append(('prep', route, direction, bias2h, zalt2h, rci1h, ctx5m, ctx15m, quality))
+                notifications.append(('prep', route, direction, bias1h, bias2h, zalt2h, rci1h, ctx5m, ctx15m, quality))
             elif send_quality:
-                notifications.append(('quality', route, direction, bias2h, zalt2h, rci1h, ctx5m, ctx15m, True))
+                notifications.append(('quality', route, direction, bias1h, bias2h, zalt2h, rci1h, ctx5m, ctx15m, True))
             if entry_ok and should_send(symbol, f"scalp_{exp}", event_id=event_id, cooldown=CONFIG['MIN_COOLDOWN']):
-                notifications.append(('entry', route, direction, bias2h, zalt2h, rci1h, ctx5m, ctx15m, quality))
+                notifications.append(('entry', route, direction, bias1h, bias2h, zalt2h, rci1h, ctx5m, ctx15m, quality))
         persist_state()
 
-    for kind, route, direction, bias2h, zalt2h, rci1h, ctx5m, ctx15m, quality in notifications:
+    for kind, route, direction, bias1h, bias2h, zalt2h, rci1h, ctx5m, ctx15m, quality in notifications:
         emoji = "🟢" if direction == "LONG" else "🔴"
         title = f'PREP SCALP {route}' if kind == 'prep' else f'QUALITE SCALP {route}' if kind == 'quality' else f'SCALP {route} - ENTREE'
         expected = 'buy' if direction == 'LONG' else 'sell'
@@ -706,8 +710,7 @@ def evaluate_scalp_core(symbol, price=0, event_id=None, trigger_label="state_ref
             f"{emoji} <b>{title} {direction}</b> {symbol}\n"
             "--------------------\n"
             f"Price: ${format_price(price)}\n"
-            f"[OK] Bias 2H 17/40: {bias2h.upper()}\n"
-            + (f"[OK] ZALT 2H 55/1.2: {zalt2h.upper()}\n" if route == 'A' else f"[OK] ST Context 15m: {ctx15m.upper()} (remplace ZALT 2H)\n")
+            + (f"[OK] Bias 1H 21/55: {bias1h.upper()}\n[OK] ZALT 2H 55/1.2: {zalt2h.upper()}\n" if route == 'A' else f"[OK] Bias 2H 17/40: {bias2h.upper()}\n[OK] ST Context 15m: {ctx15m.upper()} (remplace ZALT 2H)\n")
             +
             f"[OK] RCI court 1H extreme favorable: {rci1h:.1f}\n"
             f"{'[OK] ST Context 5m: ' + ctx5m.upper() if kind == 'entry' else '[ATTENTE] ST Context 5m'}"
@@ -1025,7 +1028,7 @@ def process_webhook(data):
 
     if symbol in SCALP_SYMBOLS and (
         (alert_type == 'st_context' and tf in ('5m', '15m'))
-        or (alert_type == 'bias' and tf == '2h')
+        or (alert_type == 'bias' and tf in ('1h', '2h'))
         or (alert_type == 'rci' and tf in ('1h', '5m'))
         or (alert_type == 'zalt' and tf == '2h')
     ):
@@ -1459,7 +1462,7 @@ def startup():
         "<b>Scalping Bot demarre</b>\n"
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
-        "SCALP A (6 actifs): PREP Bias 2H + ZALT 2H 55/1.2 + RCI 1H extreme\n"
+        "SCALP A (6 actifs): PREP ZALT 2H 55/1.2 + Bias 1H 21/55 + RCI 1H extreme\n"
         "SCALP B: PREP Bias 2H + CTX 15m + RCI 1H extreme (sans ZALT 2H aligne)\n"
         "A/B: entree CTX 5m + RCI 5m extreme 21/1.0\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
