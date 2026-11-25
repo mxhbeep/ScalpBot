@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Scalping Bot : SCALP A et B actives sur six actifs.
-# SCALP A = ZALT 2H + Bias 1H + RCI 1H; B conserve Bias 2H + CTX 15m.
+# SCALP A = ZALT 2H + Bias 1H + RCI 1H; B = Bias 2H + Bias 1H + CTX 15m + RCI 1H.
 # Strategies actives avec routage Telegram separe.
 
 import json
@@ -648,9 +648,8 @@ def evaluate_scalp_core(symbol, price=0, event_id=None, trigger_label="state_ref
             ctx5m_ok = is_fresh(m.get('st_context_5m_ts'), 20 * 60) and ctx5m == exp
             ctx15m = m.get('st_context_15m')
             ctx15m_ok = is_fresh(m.get('st_context_15m_ts'), 60 * 60) and ctx15m == exp
-            base_ok = bool(bias2h_ok and rci1h_ok)
             armed_a = bool(bias1h_ok and rci1h_ok and zalt2h_ok)
-            armed_b = bool(base_ok and not zalt2h_ok and ctx15m_ok)
+            armed_b = bool(bias2h_ok and bias1h_ok and rci1h_ok and ctx15m_ok)
             armed = armed_a or armed_b
             route = 'A' if armed_a else 'B'
             quality = bool(armed_a and ctx15m_ok)
@@ -710,7 +709,7 @@ def evaluate_scalp_core(symbol, price=0, event_id=None, trigger_label="state_ref
             f"{emoji} <b>{title} {direction}</b> {symbol}\n"
             "--------------------\n"
             f"Price: ${format_price(price)}\n"
-            + (f"[OK] Bias 1H 21/55: {bias1h.upper()}\n[OK] ZALT 2H 55/1.2: {zalt2h.upper()}\n" if route == 'A' else f"[OK] Bias 2H 17/40: {bias2h.upper()}\n[OK] ST Context 15m: {ctx15m.upper()} (remplace ZALT 2H)\n")
+            + (f"[OK] Bias 1H 21/55: {bias1h.upper()}\n[OK] ZALT 2H 55/1.2: {zalt2h.upper()}\n" if route == 'A' else f"[OK] Bias 1H 21/55: {bias1h.upper()}\n[OK] Bias 2H 17/40: {bias2h.upper()}\n[OK] ST Context 15m: {ctx15m.upper()}\n")
             +
             f"[OK] RCI court 1H extreme favorable: {rci1h:.1f}\n"
             f"{'[OK] ST Context 5m: ' + ctx5m.upper() if kind == 'entry' else '[ATTENTE] ST Context 5m'}"
@@ -1204,6 +1203,7 @@ def debug_symbol():
     with STATE_LOCK:
         init_symbol(symbol)
         m = dict(MOMENTUM_STATE.get(symbol, {}))
+        bias1h = signal_debug_payload(m, 'bias_1h_btc', 2 * 3600)
         bias2h = signal_debug_payload(m, 'bias_2h', 6 * 3600)
         zalt2h = signal_debug_payload(m, 'zalt_2h', 6 * 3600)
         ctx15m = signal_debug_payload(m, 'st_context_15m', 60 * 60)
@@ -1215,9 +1215,9 @@ def debug_symbol():
             rci_ok = bool(rci1h['fresh'] and rci is not None and (
                 (exp == 'buy' and float(rci) <= -75) or (exp == 'sell' and float(rci) >= 75)
             ))
-            base_ok = bias2h['fresh'] and bias2h['value'] == exp and rci_ok
-            a_ok = base_ok and zalt2h['fresh'] and zalt2h['value'] == exp
-            b_ok = base_ok and not a_ok and ctx15m['fresh'] and ctx15m['value'] == exp
+            bias1h_ok = bias1h['fresh'] and bias1h['value'] == exp
+            a_ok = bias1h_ok and rci_ok and zalt2h['fresh'] and zalt2h['value'] == exp
+            b_ok = bias1h_ok and rci_ok and bias2h['fresh'] and bias2h['value'] == exp and ctx15m['fresh'] and ctx15m['value'] == exp
             checks[exp] = {
                 'eligible': symbol in SCALP_SYMBOLS,
                 'prep_a_ok': bool(a_ok),
@@ -1238,6 +1238,7 @@ def debug_symbol():
                 'st_context_15m': ctx15m,
                 'st_context_5m': ctx5m,
                 'bias_2h': bias2h,
+                'bias_1h': bias1h,
                 'zalt_2h': zalt2h,
                 'rci_1h_10': rci,
             },
@@ -1463,7 +1464,7 @@ def startup():
         "--------------------\n"
         f"Assets: {len(CONFIG['SYMBOLS'])}\n"
         "SCALP A (6 actifs): PREP ZALT 2H 55/1.2 + Bias 1H 21/55 + RCI 1H extreme\n"
-        "SCALP B: PREP Bias 2H + CTX 15m + RCI 1H extreme (sans ZALT 2H aligne)\n"
+        "SCALP B: PREP Bias 2H + Bias 1H + CTX 15m + RCI 1H extreme\n"
         "A/B: entree CTX 5m + RCI 5m extreme 21/1.0\n"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M (Shanghai)')}",
         ntfy=False,
