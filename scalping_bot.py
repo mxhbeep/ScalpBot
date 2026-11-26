@@ -32,7 +32,7 @@ CONFIG = {
     'ENABLE_SCALP': os.environ.get('ENABLE_SCALP', os.environ.get('ENABLE_SCALP_BTC', '1')) == '1',
     'ENABLE_SCALP_BTC_15M': os.environ.get('ENABLE_SCALP_BTC_15M', '0') == '1',
     'ENABLE_SCALP_CONTINUATION': os.environ.get('ENABLE_SCALP_CONTINUATION', '1') == '1',
-    'ENABLE_SCALP_CONTINUATION_B': os.environ.get('ENABLE_SCALP_CONTINUATION_B', '0') == '1',
+    'ENABLE_SCALP_CONTINUATION_B': os.environ.get('ENABLE_SCALP_CONTINUATION_B', '1') == '1',
     'SYMBOLS': {
         'AAVE/USDT': {'exchange': 'okx'},
         'ADA/USDT': {'exchange': 'okx'},
@@ -523,7 +523,6 @@ def evaluate_scalp_continuation(symbol, price=0, event_id=None, rci15m_previous=
         init_symbol(symbol)
         m = MOMENTUM_STATE[symbol]
         bias4h = m.get('bias_4h') if is_fresh(m.get('bias_4h_ts'), 12 * 3600) else None
-        bias2h = m.get('bias_2h') if is_fresh(m.get('bias_2h_ts'), 6 * 3600) else None
         zalt4h = m.get('zalt_4h') if is_fresh(m.get('zalt_4h_ts'), 12 * 3600) else None
         ctx15m = m.get('st_context_15m') if is_fresh(m.get('st_context_15m_ts'), 60 * 60) else None
         try:
@@ -531,18 +530,23 @@ def evaluate_scalp_continuation(symbol, price=0, event_id=None, rci15m_previous=
         except (TypeError, ValueError):
             rci2h = None
         try:
+            rci4h = float(m.get('rci_4h_10')) if is_fresh(m.get('rci_4h_ts'), 12 * 3600) else None
+        except (TypeError, ValueError):
+            rci4h = None
+        try:
             rci15m = float(m.get('rci_15m_10')) if is_fresh(m.get('rci_15m_ts'), 30 * 60) else None
         except (TypeError, ValueError):
             rci15m = None
         route = direction = None
         for exp in ('buy', 'sell'):
             rci2h_ok = rci2h is not None and (rci2h <= -75 if exp == 'buy' else rci2h >= 75)
-            if ctx15m != exp or not rci2h_ok:
+            rci4h_ok = rci4h is not None and (rci4h <= -75 if exp == 'buy' else rci4h >= 75)
+            if ctx15m != exp or bias4h != exp:
                 continue
-            if bias4h == exp:
+            if zalt4h == exp and rci2h_ok:
                 route, direction = 'A', exp
                 break
-            if CONFIG.get('ENABLE_SCALP_CONTINUATION_B', False) and zalt4h == exp and bias2h == exp and bias4h in ('buy', 'sell') and bias4h != zalt4h:
+            if CONFIG.get('ENABLE_SCALP_CONTINUATION_B', True) and zalt4h != exp and rci4h_ok:
                 route, direction = 'B', exp
                 break
         previous_dir = m.get('continuation_prep_dir')
@@ -554,7 +558,7 @@ def evaluate_scalp_continuation(symbol, price=0, event_id=None, rci15m_previous=
             persist_state()
             if direction:
                 notifications.append(('prep', route, direction))
-        quality_dir = direction if route == 'A' and zalt4h == direction else None
+        quality_dir = None
         if quality_dir != m.get('continuation_quality_dir'):
             m['continuation_quality_dir'] = quality_dir
             persist_state()
@@ -566,14 +570,14 @@ def evaluate_scalp_continuation(symbol, price=0, event_id=None, rci15m_previous=
                 notifications.append(('entry', route, direction))
     for kind, route, direction in notifications:
         side = 'LONG' if direction == 'buy' else 'SHORT'
-        quality = route == 'A' and zalt4h == direction
+        quality = False
         title = f"{'PREP' if kind == 'prep' else 'ENTREE' if kind == 'entry' else 'QUALITE'} CONTINUATION {route}"
         send_telegram_with_buttons(
             f"<b>[{title}{' - QUALITE' if quality and kind != 'quality' else ''}]</b> {symbol}\n"
             f"Direction: {side}\nPrice: ${format_price(price)}\n"
-            + (f"[OK] Bias 4H 21/55: {side}\n" if route == 'A' else f"[OK] ZALT 4H 55/1.2 + Bias 2H 17/40: {side}\n")
-            + f"[OK] RCI court 2H extreme: {rci2h:.1f}\n[OK] ST Context 15m aligne\n"
-            + (f"[QUALITE] ZALT 4H aligne\n" if quality else "")
+            + f"[OK] Bias 4H 21/55: {side}\n"
+            + (f"[OK] ZALT 4H 55/1.2: {side}\n[OK] RCI court 2H extreme: {rci2h:.1f}\n" if route == 'A' else f"[INFO] ZALT 4H non aligne\n[OK] RCI court 4H extreme: {rci4h:.1f}\n")
+            + "[OK] ST Context 15m aligne\n"
             + (f"[TRIGGER] RCI court 15m franchit l'extreme: {rci15m:.1f}" if kind == 'entry' else "[ATTENTE] RCI court 15m franchit l'extreme favorable"),
             ntfy=False, symbol=symbol,
         )
